@@ -1,0 +1,25 @@
+[package]
+name = "ps-testclient"
+description = "Cliente Wayland mínimo de teste do compositor do psd (só Linux)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ps_testclient"
+
+[[bin]]
+name = "ps-testclient"
+path = "src/main.rs"
+
+# Só Linux: no Windows o crate compila vazio e o binário só avisa.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# Keysym e texto das teclas recebidas (a chave `xkbcommon` já vem com o Smithay).
+xkbcommon = "0.8"
+# Arquivo temporário para o `wl_shm`, escrito com pwrite (sem mmap, sem unsafe).
+tempfile = "3"
+# Alocar e mapear o DMABUF de teste (ioctl do dma-heap e mmap; `unsafe` só em `dmabuf.rs`).
+libc = "0.2"

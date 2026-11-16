@@ -1,0 +1,68 @@
+# Marco 3, critério 2: foot com ctrl, alt, altgr, repetição de tecla, seleção com o mouse e rolagem.
+# No Pi:      setsid -f ./target/release/psd --wayland --listen 0.0.0.0:7700 --spawn foot > ~/psd.log 2>&1
+# No Windows: target\release\psc.exe 192.168.0.13:7700 --script tools\roteiros\10-foot.txt
+# As capturas vão para .cache\shot\foot-*.png
+wait 1500
+win 1
+type "echo ação ç ÃÇ\n"
+wait 600
+shot foot-1-digitacao
+
+# ctrl+c interrompe o sleep (o prompt volta e o echo seguinte roda)
+type "sleep 60\n"
+wait 1000
+key ctrl+c
+wait 500
+type "echo depois-do-ctrl-c\n"
+wait 600
+shot foot-2-ctrl-c
+
+# ctrl+l limpa a tela (só o prompt deve sobrar no topo)
+type "seq 1 40\n"
+wait 600
+key ctrl+l
+wait 600
+shot foot-3-ctrl-l
+
+# alt: no readline, alt+b volta uma palavra; o X entra antes de "tres"
+type "echo um dois tres"
+key alt+b
+type "X"
+wait 400
+shot foot-4-alt
+key ctrl+u
+key ctrl+k
+
+# altgr: no ABNT2, altgr+q é "/" e altgr+w é "?"
+type "echo "
+key altgr+q
+key altgr+w
+type "|"
+wait 400
+shot foot-5-altgr
+key ctrl+u
+
+# repetição: o app repete a 25/s depois de 600 ms. Segurando "a" por 1500 ms saem 1 + 22 = 23 letras;
+# `wc -c` conta mais o fim de linha: o esperado é 24 (se o cliente repetisse também, seria ~50).
+type "echo -n "
+hold a 1500
+type " | wc -c\n"
+wait 800
+shot foot-6-repeticao
+
+# rolagem: enche o histórico e rola para cima
+type "clear; seq 1 300\n"
+wait 1000
+scroll 0 -150
+wait 600
+shot foot-7-rolagem
+
+# seleção com o mouse: arrasta sobre o texto
+move 20 30
+click left down
+move 200 30
+move 400 60
+click left up
+wait 500
+shot foot-8-selecao
+quit

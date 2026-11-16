@@ -1,0 +1,23 @@
+# Marco 3, critério 4: área de transferência entre o mousepad (no Pi) e o Windows.
+# No Pi:      sh ~/pistick/tools/pi/iniciar-psd.sh mousepad
+# No Windows: target\release\psc.exe 192.168.0.13:7700 --script tools\roteiros\30-area-de-transferencia.txt
+# ATENÇÃO: sobrescreve a área de transferência do Windows com textos de teste.
+wait 1500
+win 1
+
+# Pi -> Windows: copiar no mousepad (ctrl+a, ctrl+c) e conferir o que ficou no Windows.
+type "copiado-no-pi ação ç"
+key ctrl+a
+key ctrl+c
+wait 1000
+showclip
+shot clip-1-copiado
+
+# Windows -> Pi: define o texto no Windows (clip) e cola no mousepad (ctrl+a seleciona tudo, ctrl+v troca).
+clip "pistick-teste-123"
+wait 500
+key ctrl+a
+key ctrl+v
+wait 1000
+shot clip-2-colado
+quit

@@ -1,0 +1,16 @@
+# Marco 8A, critérios 2 e 5: o cliente B (segunda identidade, PISTICK_KEYS_DIR numa pasta temporária fora do repositório,
+# já pareada) assume a sessão de A. A janela chega com o texto de A; o que B digita sai em minúsculas (o Shift de A foi
+# solto) e mover o mouse não arrasta nem seleciona (o botão de A foi solto).
+# Capturas troca-B-*.png.
+wait 800
+win 1
+shot troca-B-1
+key ctrl+u
+key ctrl+l
+type "echo abc def\n"
+wait 600
+move 20 40
+move 300 70
+wait 500
+shot troca-B-2
+quit

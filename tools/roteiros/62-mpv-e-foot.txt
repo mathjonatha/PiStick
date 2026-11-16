@@ -1,0 +1,26 @@
+# Marco 4, etapa 8, aceite 4: mpv e foot abertos juntos. O foot continua sem perdas (nenhuma região de vídeo
+# nele) e responde à digitação enquanto o vídeo do mpv toca.
+#   sh ~/pistick/tools/pi/iniciar-psd.sh mpv foot
+#   target\release\psc.exe 192.168.0.11:7700 --script tools\roteiros\62-mpv-e-foot.txt
+# Capturas em .cache\shot\mpvfoot-*.png (uma por janela); a do foot tem de mostrar o texto digitado.
+waitwin title mpv 15000
+waitwin title foot 15000
+wait 1000
+win title mpv
+resize 1280 720
+wait 1500
+waitvideostart 8000
+wait 3000
+videostats start
+win title foot
+# ctrl+u apaga o que o teclado real do notebook possa ter digitado na linha enquanto a janela do psc tinha o foco
+key ctrl+u
+type "echo texto-digitado-durante-o-video\n"
+wait 1500
+type "ls /etc | head -40\n"
+wait 3000
+verify-novideo
+shot mpvfoot-1
+wait 4000
+videostats report
+quit

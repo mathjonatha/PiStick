@@ -1,0 +1,15 @@
+# Marco 8A, critérios 2, 5 e 6: o cliente A (identidade do notebook) deixa Shift e o botão esquerdo apertados e é
+# substituído pelo cliente B (110 e 111 juntos; veja tools/roteiros/111-troca-b.txt).
+# No Pi:      sh ~/pistick/tools/pi/iniciar-psd.sh foot
+# No Windows: target\release\psc.exe 192.168.0.13:7700 --script tools\roteiros\110-troca-a.txt --shot-dir .cache\shot-m8
+# O psc de A sai com código 6 (outro computador assumiu); capturas troca-A-*.png.
+wait 1500
+win 1
+type "echo sessao-de-A ação ç\n"
+wait 800
+shot troca-A-1
+move 100 100
+click left down
+# F12 com Shift: a tecla não imprime nada (o foot a repete como sequência de escape enquanto estiver apertada)
+hold shift+f12 25000
+quit

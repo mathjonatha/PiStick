@@ -1,0 +1,81 @@
+# Medição (critério 8): CPU do psd e tráfego ao abrir menus do mousepad (15 aberturas: File, Edit e View, 5 vezes cada).
+# Cada abertura espera 800 ms com o menu na tela e o fecha com Esc.
+wait 3000
+win 1
+move 19 12
+click left
+wait 800
+key escape
+wait 500
+move 61 12
+click left
+wait 800
+key escape
+wait 500
+move 175 12
+click left
+wait 800
+key escape
+wait 500
+move 19 12
+click left
+wait 800
+key escape
+wait 500
+move 61 12
+click left
+wait 800
+key escape
+wait 500
+move 175 12
+click left
+wait 800
+key escape
+wait 500
+move 19 12
+click left
+wait 800
+key escape
+wait 500
+move 61 12
+click left
+wait 800
+key escape
+wait 500
+move 175 12
+click left
+wait 800
+key escape
+wait 500
+move 19 12
+click left
+wait 800
+key escape
+wait 500
+move 61 12
+click left
+wait 800
+key escape
+wait 500
+move 175 12
+click left
+wait 800
+key escape
+wait 500
+move 19 12
+click left
+wait 800
+key escape
+wait 500
+move 61 12
+click left
+wait 800
+key escape
+wait 500
+move 175 12
+click left
+wait 800
+key escape
+wait 500
+wait 1500
+quit

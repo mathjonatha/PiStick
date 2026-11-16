@@ -1,0 +1,25 @@
+# Marco 5 (parte B), aceite 2: um app Android (Configurações) e o foot abertos juntos, cada um em sua janela do
+# psc; digita nos dois (o foot e a busca do app) e captura as duas janelas.
+#   no Pi:      ANDROID_APP=com.android.settings sh ~/pistick/tools/pi/iniciar-psd.sh foot android
+#   no Windows: target\release\psc.exe pi-stick --script tools\roteiros\101-android-e-foot.txt
+# Capturas em .cache\shot\android-foot-*.png (uma por janela): a do foot com o eco de "ação éêã ç" e a do
+# Android com o mesmo texto na busca. Uma janela "InputMethod" é o teclado na tela do Android (aparece quando
+# um campo de texto ganha foco).
+waitwin title foot 30000
+waitwin title Settings 90000
+wait 3000
+win title foot
+key ctrl+u
+type "echo ação éêã ç\n"
+wait 1000
+win title Settings
+move 480 229
+click left
+wait 1500
+type "ação éêã ç"
+wait 1000
+win title foot
+type "ls /etc | head -5\n"
+wait 1000
+shot android-foot
+quit

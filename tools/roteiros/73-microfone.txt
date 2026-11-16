@@ -1,0 +1,21 @@
+# Marco 7B, aceites 2, 3 e 4: o microfone do computador chega ao Pi como a fonte pistick-mic.
+# Nada de microfone de verdade: o psc roda com --mic-file (um tom em laço) e nenhum dispositivo de captura é aberto.
+# Quem dirige o gravador no Pi é tools\testar-microfone.ps1 (-Teste aceite2-3); à mão:
+#   no Pi:     PSD_AUDIO=1 sh ~/pistick/tools/pi/iniciar-psd.sh foot
+#   no Windows: cargo run -q -p ps-audio --example gerar_tom_wav -- .cache\mic-tom.wav 2
+#               target\release\psc.exe pi-stick --mic-file .cache\mic-tom.wav --audio-null --script tools\roteiros\73-microfone.txt
+#   (quando aparecer a linha "MICSTATS ... pedidos=0" da fase 1, rode no Pi:
+#      pw-record --rate 48000 --channels 2 --format s16 --target pistick-mic ~/mic-teste/73.wav   (5 s, Ctrl+C)
+#    e depois:  psd verify-wav ~/mic-teste/73.wav 440 880 )
+waitwin 1 15000
+echo FASE 1: 10 s sem gravador no Pi. Esperado: pacotes=0 pedidos=0 captura=fechada
+micstats start
+wait 10000
+micstats report
+echo FASE 2: o gravador entra e sai no Pi. Esperado: captura abre, e fecha em ate 1 s depois que o gravador sai
+waitmic on 60000
+waitmic off 60000
+micstats report
+wait 1500
+micstats report
+quit

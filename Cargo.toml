@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ps-proto",
+    "crates/ps-codec",
+    "crates/ps-audio",
+    "crates/ps-transport",
+    "crates/ps-secure",
+    "crates/ps-update",
+    "crates/ps-discovery",
+    "crates/ps-server",
+    "crates/ps-client",
+    "crates/ps-android",
+    "crates/ps-testclient",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+
+# O codec é código quente; otimizado mesmo em debug mantém os testes rápidos.
+[profile.dev.package.ps-codec]
+opt-level = 3
+
+[profile.dev.package.ps-server]
+opt-level = 2
+
+# Primitivas criptográficas otimizadas mesmo em debug: os testes do canal fazem muitas trocas de chaves.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.ps-secure]
+opt-level = 2

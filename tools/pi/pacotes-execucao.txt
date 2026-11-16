@@ -1,0 +1,16 @@
+# Pacotes apt de execução do PiStick, um por linha (linhas com # e vazias são ignoradas).
+# Lido por tools/pi/provisionar.sh e copiado (sem comentários) para o PACOTES do pacote,
+# que o instalador usa. Lista única: não duplicar em outro lugar.
+libxkbcommon0
+xkb-data
+avahi-daemon
+foot
+mousepad
+mpv
+fonts-dejavu-core
+# Áudio (marco 7): servidor de som do projeto (psd o sobe com a configuração de /etc/pistick/pipewire)
+pipewire
+pipewire-pulse
+wireplumber
+pipewire-alsa
+pipewire-bin

@@ -1,0 +1,13 @@
+# Apresentação atômica de quadros fatiados (docs/20), aceite 3: enlace lento.
+# Com 256 KiB/s um quadro de ruído (1,7 MB) leva mais de 250 ms (na verdade ~6,6 s): o psc passa a apresentar as
+# fatias conforme chegam (progresso) em vez de ficar parado. `progressivas` conta as apresentações feitas assim;
+# `mistas` é esperado acima de zero e `verify-atomic` não se aplica a este caso.
+#
+#   target\release\psd.exe --synthetic --synthetic-stripes --max-rate 256 --listen 127.0.0.1:7700
+#   target\release\psc.exe 127.0.0.1:7700 --script tools\roteiros\91-atomico-lento.txt
+waitwin 1 15000
+wait 1500
+atomic start
+wait 14000
+atomic report
+quit

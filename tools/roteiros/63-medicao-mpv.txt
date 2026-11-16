@@ -1,0 +1,14 @@
+# Marco 4, etapa 9: medição do mpv 720p30 por 20 s, igual para `--video auto` e `--video off` (e para o
+# `psc --no-video`): espera 9,5 s depois do resize (com vídeo, a entrada em H.264 já aconteceu), abre a janela
+# de medição e imprime `VIDEOSTATS` depois de 20 s. Usado por tools\medir-marco4.ps1.
+#   sh ~/pistick/tools/pi/iniciar-psd.sh mpv        (MPV_CLIP e PSD_ARGS: veja docs/06)
+#   target\release\psc.exe 192.168.0.11:7700 --script tools\roteiros\63-medicao-mpv.txt
+waitwin 1 15000
+wait 1000
+resize 1280 720
+wait 9500
+videostats start
+wait 20000
+videostats report
+shot medicao-mpv
+quit

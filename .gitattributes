@@ -1,0 +1,13 @@
+# Scripts que rodam no Pi precisam de fim de linha LF (o git archive do sync-pi converte para CRLF com autocrlf).
+*.sh text eol=lf
+*.service.in text eol=lf
+*.service text eol=lf
+tools/pi/pacotes-execucao.txt text eol=lf
+tools/imagem/base.conf text eol=lf
+tools/pacote/psd.conf text eol=lf
+tools/pi/pistick-pair.in text eol=lf
+tools/pi/android/*.rc text eol=lf
+tools/pi/android/*.c text eol=lf
+tools/pi/pipewire/*.conf text eol=lf
+tools/pi/*.py text eol=lf
+tools/pi/networkmanager/*.conf text eol=lf

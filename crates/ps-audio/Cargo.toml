@@ -1,0 +1,6 @@
+[package]
+name = "ps-audio"
+description = "Áudio do PiStick: codec sem perdas PSA1, gerador sintético e análise de frequência"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

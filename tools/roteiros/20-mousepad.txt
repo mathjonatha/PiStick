@@ -1,0 +1,35 @@
+# Marco 3, critérios 3, 5, 6 (parcial) e 7: mousepad com menu, diálogo e cursor.
+# No Pi:      sh ~/pistick/tools/pi/iniciar-psd.sh mousepad
+# No Windows: target\release\psc.exe 192.168.0.13:7700 --script tools\roteiros\20-mousepad.txt
+# Capturas em .cache\shot\mp-*.png; o menu aparece como janela 2 e o diálogo como janela 3
+# (a captura mp-2-menu-composto-1.png mostra o menu sobre a janela, na posição em que o cliente o mostra).
+# O mousepad está em inglês: "Arquivo" = File, "Salvar como" = Save As.
+wait 1500
+win 1
+type "Texto de teste: ação ç ÃÇ\n"
+wait 500
+shot mp-1-texto
+
+# Menu "Arquivo" (File)
+move 19 12
+click left
+wait 1000
+shot mp-2-menu
+
+# "Salvar como" (Save As...): o ponteiro vai para o popup (janela 2), cujas coordenadas são locais:
+# o menu está em (0, 26) na janela principal, então o item em y=196 da tela fica em y=170 no popup.
+# O diálogo é uma segunda janela de nível superior.
+win 2
+move 65 170
+click left
+waitwin title Save 8000
+wait 1500
+shot mp-3-salvar-como
+
+# Fecha o diálogo com Esc e volta à janela principal
+win title Save
+key escape
+wait 1000
+win 1
+shot mp-4-depois
+quit

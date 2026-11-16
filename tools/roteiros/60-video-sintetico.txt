@@ -1,0 +1,25 @@
+# Marco 4, etapa 7, critério 2: vídeo sintético ponta a ponta, Pi -> Windows.
+# A janela de 1280x720 tem uma região animada de 640x384 em (64, 64) e o resto parado. O vídeo entra em
+# H.264 em até 2 s; a animação pausa 12 s depois do início da sessão e o vídeo sai; a janela volta
+# idêntica à origem em até 1,5 s depois da pausa. Cada `verify-*` imprime uma linha `VERIFY ...`; se
+# alguma falhar, o psc termina com código 3 depois do `quit`.
+#
+# No Pi (o psd começa a contar os 12 s quando o cliente conecta):
+#   sh ~/pistick/tools/pi/iniciar-psd.sh --synthetic-video --synthetic-video-pause-after 12
+# No Windows (cargo build --release -p ps-client antes; sempre o endereço do cabo):
+#   target\release\psc.exe 192.168.0.11:7700 --script tools\roteiros\60-video-sintetico.txt
+# Capturas em .cache\shot\video-*.png. Log do psd no Pi: ~/psd.log (linhas "vídeo iniciado/encerrado ... t=").
+waitwin 1 10000
+echo espera a entrada em vídeo (limite de 2,0 s desde o primeiro FRAME, conferido no verify-video)
+waitvideostart 5000
+wait 1500
+verify-video 30 2.0
+shot video-1-durante
+wait 3000
+verify-video 30 2.0
+shot video-2-durante
+# A pausa da animação é em 12 s; o vídeo sai 1 s depois (sem dano na região) e a região volta sem perdas.
+waitvideostop 15000
+verify-still 1500 1500
+shot video-3-depois-da-pausa
+quit

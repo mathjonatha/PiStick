@@ -1,0 +1,9 @@
+[package]
+name = "ps-transport"
+description = "Transportes de bytes confiáveis (TCP agora, USB bulk depois)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+socket2 = { version = "0.6.5", features = ["all"] }

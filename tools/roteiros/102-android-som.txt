@@ -1,0 +1,17 @@
+# Marco 5 (parte B), aceite 4: o som de um app Android chega ao cliente. O app de teste "Tom PiStick"
+# (tools/android-tom, br.pistick.tom) toca por AudioTrack 440 Hz à esquerda e 880 Hz à direita, amplitude 0,25,
+# por 60 s; o roteiro confere por Goertzel que é isso que o cliente recebeu (o mesmo verify-audio do marco 7).
+# Uma vez por instalação do Android (com o psd no ar): sh ~/pistick/tools/pi/android/instalar-app.sh ~/pistick/tools/pi/android/tom.apk
+#   no Pi:      ANDROID_APP=br.pistick.tom PSD_AUDIO=1 sh ~/pistick/tools/pi/iniciar-psd.sh android
+#   no Windows: target\release\psc.exe pi-stick --audio-dump .cache\audio-android.wav --script tools\roteiros\102-android-som.txt
+# Nada toca neste computador (--audio-dump descarta a saída). Capturas em .cache\shot\android-som-*.png.
+waitwin title Tom 90000
+wait 2000
+shot android-som-janela
+waitaudio 30000
+wait 5000
+audiostats reset
+wait 8000
+verify-audio 440 880
+audiostats
+quit

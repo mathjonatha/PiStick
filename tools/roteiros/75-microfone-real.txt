@@ -1,0 +1,12 @@
+# Marco 7B, aceite 8: o microfone de VERDADE. Só confere que o dispositivo abre e que chegam amostras (pico=0 é
+# silêncio total; pico>0 é som). NADA é gravado nem guardado: o gravador do Pi descarta em /dev/null.
+# Rode com --mic (sem --mic-file): target\release\psc.exe pi-stick --mic --audio-null --script tools\roteiros\75-microfone-real.txt
+# (tools\testar-microfone.ps1 -Teste real faz isso e liga o gravador no Pi).
+waitwin 1 15000
+micstats start
+waitmic on 60000
+wait 4000
+micstats report
+waitmic off 60000
+micstats report
+quit

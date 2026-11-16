@@ -1,0 +1,6 @@
+[package]
+name = "ps-proto"
+description = "Protocolo de fio do PiStick: mensagens e enquadramento"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

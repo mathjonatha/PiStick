@@ -1,0 +1,68 @@
+# Marco 5 (parte B), aceites 2 e 3: o Android do Waydroid, uma janela só (Configurações), com clique, rolagem
+# do mouse, arrastar e digitação com acentos do ABNT2 (campo de busca do app).
+#   no Pi:      ANDROID_APP=com.android.settings sh ~/pistick/tools/pi/iniciar-psd.sh android
+#   no Windows: target\release\psc.exe pi-stick --script tools\roteiros\100-android.txt
+# Capturas em .cache\shot\android-*-1.png: 1 inicio (Configurações), 2 clique (Network & internet), 3 arrastar (o
+# interruptor "Airplane mode" ligado), 4 rolagem (a lista até o fim, com "About phone"), 5 digitação
+# ("ação éêã ç") e 6 AltGr ("/?"). O iniciar-psd.sh espera o Android ficar pronto (uns 30 s) antes de voltar.
+# As coordenadas são as da janela de 960x600 que o Android ocupa inteira num Android recém-instalado (sem a
+# barra de título de janela livre). Se o Android já foi redimensionado à mão, apague os dados dele.
+waitwin title Settings 90000
+wait 3000
+win title Settings
+move 480 400
+scroll 0 -900
+wait 1500
+shot android-1-inicio
+
+# clique: entra em "Network & internet"
+move 480 320
+click left
+wait 2000
+shot android-2-clique
+
+# arrastar (o ponteiro faz o papel de um dedo): puxa o interruptor "Airplane mode" para a direita (liga) e de
+# volta (desliga)
+move 895 325
+click left down
+move 905 325
+move 915 325
+move 926 325
+click left up
+wait 1200
+shot android-3-arrastar
+move 926 325
+click left down
+move 915 325
+move 905 325
+move 894 325
+click left up
+wait 800
+
+# volta pela seta do app e rola a lista de ajustes até o fim e de volta ao topo
+move 32 27
+click left
+wait 1500
+move 480 400
+scroll 0 200
+wait 2500
+shot android-4-rolagem
+scroll 0 -900
+wait 2000
+
+# digitação com acentos na busca: "ação éêã ç"
+move 480 229
+click left
+wait 1500
+type "ação éêã ç"
+wait 1000
+shot android-5-digitacao
+
+# AltGr: no ABNT2, AltGr+q é "/" e AltGr+w é "?"
+key ctrl+a
+key backspace
+key altgr+q
+key altgr+w
+wait 800
+shot android-6-altgr
+quit

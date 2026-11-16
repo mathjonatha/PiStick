@@ -1,0 +1,20 @@
+# Marco 7, aceite 3 (revisado): o som do mpv do Pi (clipe com 440 Hz à esquerda e 880 Hz à direita, amplitude 0,25)
+# chega ao cliente por 5 minutos, pelo Wi-Fi, com o vídeo H.264 ativo na mesma janela. Conta só depois dos
+# primeiros 20 s: no máximo 2 esvaziamentos, 0 descartes, e alvo e nível médio anotados (esperado abaixo de 200 ms).
+# Nada toca neste computador: o cliente roda com --audio-dump (ou --audio-null) e descarta a saída.
+# Uso:
+#   no Pi:  PSD_AUDIO=1 PSD_AUDIO_RT=1 MPV_CLIP=$HOME/clips/som-720p30.mp4 sh ~/pistick/tools/pi/iniciar-psd.sh mpv
+#   target\release\psc.exe pi-stick --audio-dump .cache\audio-mpv.wav --script tools\roteiros\71-audio-mpv.txt
+# A linha final AUDIOSTATS traz esvaziamentos, descartes, alvo e nivel_medio. Em 127.0.0.1 o alvo fica em 40 ms.
+waitwin 1 15000
+wait 1000
+resize 1280 720
+wait 1500
+waitvideostart 8000
+waitaudio 5000
+wait 20000
+audiostats reset
+wait 300000
+verify-audio 440 880
+audiostats
+quit

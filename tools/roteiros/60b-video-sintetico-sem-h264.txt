@@ -1,0 +1,18 @@
+# Marco 4, etapa 7: o mesmo vídeo sintético sem H.264, tudo no codec de blocos. Nenhuma mensagem de vídeo
+# pode chegar (o log do psc não tem linhas "video:" nem "vídeo iniciado") e a janela parada, depois da
+# pausa, é idêntica à origem. Duas variações; o roteiro é o mesmo:
+#   a) psc sem H.264:  psd normal e `psc --no-video`
+#        sh ~/pistick/tools/pi/iniciar-psd.sh --synthetic-video --synthetic-video-pause-after 8
+#        target\release\psc.exe 192.168.0.11:7700 --no-video --script tools\roteiros\60b-video-sintetico-sem-h264.txt
+#   b) psd sem H.264:  `psd --video off` e `psc` normal
+#        sh ~/pistick/tools/pi/iniciar-psd.sh --synthetic-video --synthetic-video-pause-after 8 --video off
+#        target\release\psc.exe 192.168.0.11:7700 --script tools\roteiros\60b-video-sintetico-sem-h264.txt
+# Capturas em .cache\shot\semh264-*.png.
+waitwin 1 10000
+wait 2500
+shot semh264-1-durante
+# A animação pausa 8 s depois do início da sessão; o verify-still tenta a cada 50 ms por até 4 s.
+wait 4500
+verify-still 4000
+shot semh264-2-depois-da-pausa
+quit

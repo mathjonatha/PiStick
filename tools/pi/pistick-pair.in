@@ -1,0 +1,13 @@
+#!/bin/sh
+# Instalado em /usr/local/bin/pistick-pair pelo provisionar.sh (marco 9A). Roda `psd pair` como o usuário do
+# serviço pistick, falando com o soquete de controle dele (/run/pistick/pistick-ctl):
+#   pistick-pair                 espera um pedido de pareamento, mostra nome e código de 6 dígitos, pergunta se confere
+#   pistick-pair --list          lista os clientes pareados
+#   pistick-pair --remove NOME   remove um cliente (encerra a sessão dele)
+#   pistick-pair --reset         apaga todos e reabre o primeiro uso por 10 minutos
+set -eu
+USUARIO="@USUARIO@"
+if [ "$(id -un)" = "$USUARIO" ]; then
+    exec env XDG_RUNTIME_DIR=/run/pistick /usr/local/bin/psd pair "$@"
+fi
+exec sudo -u "$USUARIO" env XDG_RUNTIME_DIR=/run/pistick /usr/local/bin/psd pair "$@"

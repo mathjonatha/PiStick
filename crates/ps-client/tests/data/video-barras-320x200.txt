@@ -1,0 +1,8 @@
+video-barras-320x200.psh2: amostra H.264 do codificador do Raspberry Pi 4 (bcm2835-codec, /dev/video11) com tamanho que nao e multiplo de 16.
+Tamanho: 8544 bytes (8358 bytes de H.264). Quadros: 30; o primeiro e IDR com SPS+PPS, os outros 29 sao P.
+Taxa de bits: 67 kbit/s medida (pedido 600 kbit/s, VBR, perfil High, nivel 4.0). Regiao: 320x200.
+Recorte: o SPS codifica 320x208 (20x13 macroblocos) e sinaliza o recorte (frame_cropping) para 320x200.
+Cor: VUI com matrix_coefficients = 6 (BT.601), faixa limitada.
+Conteudo: ps_codec::testutil::bars::render(320, 200, quadro), quadros 0 a 29: oito barras de cor chapadas (75%) e uma faixa de 40 linhas embaixo que anda a cada quadro.
+Como foi gerada (no Pi): cargo run --release -p ps-server --example gen_h264_sample -- --size 320x200 --frames 30 --bitrate 600000 --content bars --out video-barras-320x200.psh2
+Formato: igual ao de video-640x384.psh2.

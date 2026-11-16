@@ -1,0 +1,13 @@
+# Medição (critério 8): digitação numa linha única e comprida (352 caracteres, 60 ms cada), para comparar.
+wait 3000
+win 1
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+type "O rato roeu a roupa do rei de Roma, ação ç. "
+wait 2000
+quit

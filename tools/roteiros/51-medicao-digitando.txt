@@ -1,0 +1,15 @@
+# Medição (critério 8): CPU do psd e tráfego ao digitar no mousepad: 8 linhas de 44 caracteres (60 ms por caractere).
+# As linhas terminam em Enter; uma linha única e comprida faz o mousepad rolar o texto na horizontal a cada tecla,
+# o que redesenha a área inteira (veja docs/medicoes.md).
+wait 3000
+win 1
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+type "O rato roeu a roupa do rei de Roma, ação ç.\n"
+wait 2000
+quit

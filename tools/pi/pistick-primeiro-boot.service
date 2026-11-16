@@ -1,0 +1,11 @@
+[Unit]
+Description=PiStick: nome do aparelho no primeiro boot
+ConditionPathExists=/usr/local/libexec/pistick/primeiro-boot.sh
+Before=avahi-daemon.service NetworkManager.service pistick.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/pistick/primeiro-boot.sh
+
+[Install]
+WantedBy=multi-user.target

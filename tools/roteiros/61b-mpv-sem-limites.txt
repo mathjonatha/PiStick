@@ -1,0 +1,15 @@
+# Marco 4, etapa 8, aceite 5: o mesmo que 61-mpv.txt, mas sem exigir vídeo H.264 nem limites. Serve para
+# `psc --no-video` e para `psd --video off`: tudo no codec de blocos. Imprime quadros por segundo e taxa
+# de bits do codec de blocos (blocos_fps e blocos_kbit_s) e do vídeo (se houver), para comparação.
+#   sh ~/pistick/tools/pi/iniciar-psd.sh mpv                      (e `psc ... --no-video`)
+#   (ou o psd sem H.264: PSD_ARGS="--video off" sh ~/pistick/tools/pi/iniciar-psd.sh mpv)
+# Capturas em .cache\shot\mpvsem-*.png.
+waitwin 1 15000
+wait 1000
+resize 1280 720
+wait 4000
+videostats start
+wait 20000
+videostats report
+shot mpvsem-1
+quit
