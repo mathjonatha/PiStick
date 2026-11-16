@@ -1,16 +1,3 @@
-//! Microfone do hospedeiro para os apps do Pi (marco 7B). Veja `docs/24-marco-7b-microfone.md`.
-//!
-//! Peças:
-//! - [`LinkTracker`]: analisador do texto de `pw-link --links --monitor`; diz se algum app do Pi está gravando da
-//!   fonte `pistick-mic` (existe ligação saindo de `pistick-mic:capture_*`).
-//! - [`RequestGate`]: transforma "há gravador" em pedidos `AUDIO_REQUEST` (liga na hora, desliga depois de uma
-//!   espera curta para não piscar o indicador do Windows quando um app reabre o dispositivo).
-//! - [`MicQueue`]: fila de jitter pequena e adaptativa entre os pacotes que chegam do cliente e o soquete do PipeWire.
-//! - [`MicHub`] e [`MicSession`]: o monitor de ligações (um processo filho de vida longa, só enquanto há cliente com
-//!   `CAP_MIC`), a escrita de PCM no soquete do segundo servidor `protocol-simple` (só enquanto há pedido ligado) e a
-//!   validação do fluxo que o cliente envia.
-//!
-//! Nada aqui captura nem guarda áudio em arquivo: os blocos vão da rede para o soquete local do PipeWire.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -25,42 +12,20 @@ use ps_audio::{decode, pcm_to_samples, CODEC_PCM, CODEC_PSA1, SAMPLE_RATE};
 use crate::audio::{LogFn, BLOCK_FRAMES, CHANNELS};
 use crate::source::Waker;
 
-/// Nome do nó da fonte virtual (`tools/pi/pipewire/pipewire.conf`).
 pub const MIC_NODE: &str = "pistick-mic";
-/// Endereço do segundo servidor `protocol-simple` (reprodução) que alimenta a fonte.
 pub const PIPEWIRE_MIC_ADDR: &str = "127.0.0.1:4712";
-/// Quanto tempo sem gravador antes de pedir ao cliente que pare (menos de 1 s no total, com a fila do cliente).
 pub const OFF_DELAY: Duration = Duration::from_millis(500);
-/// Alvo inicial (igual ao máximo; vale também durante o aquecimento), mínimo e máximo da fila, em milissegundos. O começo do fluxo
-/// é o pior momento do Wi-Fi (o rádio acorda, o estimador de jitter ainda não viu nada): por isso o alvo começa no
-/// máximo e só desce depois de [`WARMUP_US`], pela medição.
 pub const QUEUE_TARGET_MS: usize = 100;
 pub const QUEUE_MIN_MS: usize = 20;
 pub const QUEUE_MAX_MS: usize = 100;
-/// Folga acima do máximo a partir da qual o excesso é descartado de uma vez.
 pub const QUEUE_OVERFLOW_SLACK_MS: usize = 50;
-/// Aquecimento: nos primeiros 6 s do fluxo o alvo não desce de [`QUEUE_TARGET_MS`] e o consumo não é acelerado (µs).
 pub const WARMUP_US: u64 = 6_000_000;
-/// Janela de memória do jitter (µs): um atraso do Wi-Fi mantém o alvo alto por esse tempo. Com 5 s a fila encolhia entre
-/// dois atrasos (que no Wi-Fi do desenvolvimento vêm a cada 5 a 10 s) e esvaziava no seguinte.
 pub const JITTER_WINDOW_US: u64 = 30_000_000;
-/// Quadros por milissegundo.
 const FRAMES_PER_MS: usize = SAMPLE_RATE as usize / 1000;
 
-// ---------------------------------------------------------------------------------------------------------------
-// Monitor de ligações
-// ---------------------------------------------------------------------------------------------------------------
-
-/// Acompanha as ligações que saem da fonte `pistick-mic` pelo texto de `pw-link --links --monitor`.
-///
-/// Formato (PipeWire 1.4): ao abrir, um despejo com `= PORTA` e, indentadas, `=   |-> DESTINO` (a porta liga a
-/// destino) ou `=   |<- ORIGEM`; depois, um evento por linha: `+ ORIGEM -> DESTINO` (ligação criada), `- ORIGEM ->
-/// DESTINO` (desfeita) e `+ PORTA` / `- PORTA` (portas, ignoradas). Cada ligação é guardada como contagem por par
-/// (origem, destino): dois apps com o mesmo nome produzem o mesmo par, e o `-` de um não pode apagar o outro.
 #[derive(Debug, Default)]
 pub struct LinkTracker {
     counts: HashMap<(String, String), u32>,
-    /// Porta do último `= PORTA` do despejo inicial (só importa se for da fonte).
     header: Option<String>,
 }
 
@@ -68,7 +33,6 @@ fn is_mic_out(port: &str) -> bool {
     port.strip_prefix(MIC_NODE).is_some_and(|r| r.starts_with(":capture_"))
 }
 
-/// Nome do nó de uma porta `nó:porta` (o que vem antes do último `:`).
 fn node_of(port: &str) -> &str {
     port.rsplit_once(':').map_or(port, |(n, _)| n)
 }
@@ -78,18 +42,15 @@ impl LinkTracker {
         LinkTracker::default()
     }
 
-    /// Esquece tudo (o monitor foi reaberto: o despejo inicial reconstrói o estado).
     pub fn reset(&mut self) {
         self.counts.clear();
         self.header = None;
     }
 
-    /// Alguma ligação sai da fonte.
     pub fn recording(&self) -> bool {
         !self.counts.is_empty()
     }
 
-    /// Nomes (sem repetição, em ordem) dos nós que gravam da fonte.
     pub fn consumers(&self) -> Vec<String> {
         let mut v: Vec<String> = self.counts.keys().map(|(_, dst)| node_of(dst).to_string()).collect();
         v.sort();
@@ -112,7 +73,6 @@ impl LinkTracker {
         }
     }
 
-    /// Processa uma linha. Devolve `true` se o estado (gravando, quem grava) pode ter mudado.
     pub fn feed_line(&mut self, line: &str) -> bool {
         let line = line.trim_end_matches(['\r', '\n']);
         let before = (self.recording(), self.consumers());
@@ -141,11 +101,6 @@ impl LinkTracker {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Porta dos pedidos
-// ---------------------------------------------------------------------------------------------------------------
-
-/// Decide quando mandar `AUDIO_REQUEST`: liga na hora em que há gravador; desliga depois de [`OFF_DELAY`] sem ele.
 #[derive(Debug, Default)]
 pub struct RequestGate {
     on: bool,
@@ -161,7 +116,6 @@ impl RequestGate {
         self.on
     }
 
-    /// Devolve `Some(novo estado)` quando um pedido deve sair agora.
     pub fn update(&mut self, recording: bool, now: Instant) -> Option<bool> {
         if recording {
             self.idle_since = None;
@@ -183,61 +137,39 @@ impl RequestGate {
         None
     }
 
-    /// Quando `update` deve ser chamado de novo mesmo sem evento (prazo do desligamento).
     pub fn next_deadline(&self) -> Option<Instant> {
         self.idle_since.map(|t| t + OFF_DELAY)
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Fila de jitter
-// ---------------------------------------------------------------------------------------------------------------
-
-/// Resultado de [`MicQueue::pop_block`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pop {
-    /// Bloco inteiro de áudio.
     Full,
-    /// Faltaram quadros no fim: completado com silêncio e a fila volta a encher até o alvo.
     Underrun,
-    /// Fila ainda enchendo (ou sem dados): bloco de silêncio.
     Silence,
 }
 
-/// Contadores da fila desde que ela foi criada (ou zerada).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct QueueStats {
     pub packets: u64,
     pub frames_in: u64,
     pub dropped_frames: u64,
-    /// Quadros consumidos a mais para a fila voltar ao alvo (correção gradual).
     pub skipped_frames: u64,
     pub underruns: u64,
     pub silence_blocks: u64,
 }
 
-/// Fila de quadros estéreo entre a rede (chegadas irregulares) e o soquete do PipeWire (um bloco a cada 10 ms).
-///
-/// - Sem dados (ou ainda abaixo do alvo, depois de esvaziar): entrega silêncio.
-/// - Acima do alvo mais uma folga: descarta o excesso mais velho até o alvo (atraso acima do alvo é descartado).
-/// - O alvo vai de 20 a 100 ms pelo jitter das chegadas nos últimos 30 s: o pior atraso de um pacote em relação
-///   ao mais adiantado da janela, mais 20 ms de folga; sobe na hora e desce devagar (a janela vai expirando).
 pub struct MicQueue {
-    /// Alvo máximo (e inicial) em ms; `psd --mic-max-ms`.
     max_ms: usize,
     buf: VecDeque<i16>,
     primed: bool,
     target_frames: usize,
     stats: QueueStats,
-    // Estimativa de jitter: o "trânsito" de um pacote é a chegada menos o instante nominal (quadros já recebidos).
     first_arrival_us: Option<u64>,
     frames_seen: u64,
-    /// Por janela de 1 s: (início em µs, menor trânsito, maior trânsito).
     buckets: VecDeque<(u64, i64, i64)>,
-    /// Última chegada e o maior intervalo entre duas chegadas desde a última leitura (diagnóstico, µs).
     last_arrival_us: Option<u64>,
     max_gap_us: u64,
-    /// O aquecimento acabou (só então o consumo acelerado é permitido).
     warm: bool,
 }
 
@@ -252,7 +184,6 @@ impl MicQueue {
         MicQueue::with_max_ms(QUEUE_MAX_MS)
     }
 
-    /// Fila com alvo máximo (e inicial, no aquecimento) de `max_ms` (entre `QUEUE_MIN_MS` e 300).
     pub fn with_max_ms(max_ms: usize) -> MicQueue {
         let max_ms = max_ms.clamp(QUEUE_MIN_MS, 300);
         MicQueue {
@@ -270,12 +201,10 @@ impl MicQueue {
         }
     }
 
-    /// Maior intervalo (ms) entre duas chegadas desde a última chamada; zera o contador.
     pub fn take_max_gap_ms(&mut self) -> f64 {
         std::mem::take(&mut self.max_gap_us) as f64 / 1000.0
     }
 
-    /// Quadros na fila.
     pub fn level_frames(&self) -> usize {
         self.buf.len() / CHANNELS
     }
@@ -292,12 +221,10 @@ impl MicQueue {
         self.stats
     }
 
-    /// Esvazia e recomeça (novo fluxo): o alvo volta ao inicial.
     pub fn reset(&mut self) {
         *self = MicQueue::with_max_ms(self.max_ms);
     }
 
-    /// Estimativa do jitter (ms) na janela atual.
     fn jitter_ms(&self) -> f64 {
         let lo = self.buckets.iter().map(|b| b.1).min();
         let hi = self.buckets.iter().map(|b| b.2).max();
@@ -333,7 +260,6 @@ impl MicQueue {
         self.target_frames = want_ms.clamp(QUEUE_MIN_MS, self.max_ms) * FRAMES_PER_MS;
     }
 
-    /// Entrega quadros estéreo intercalados recebidos do cliente em `now_us` (relógio qualquer, crescente).
     pub fn push(&mut self, samples: &[i16], now_us: u64) {
         let frames = samples.len() / CHANNELS;
         if frames == 0 {
@@ -343,8 +269,6 @@ impl MicQueue {
         self.stats.frames_in += frames as u64;
         self.note_arrival(frames, now_us);
         self.buf.extend(&samples[..frames * CHANNELS]);
-        // Descarte de uma vez só para o que passa muito do máximo (rajada grande): fica o mais novo, até o máximo. O que
-        // fica entre o alvo e esse limite volta ao alvo aos poucos, em `pop_block`, sem estalo.
         let limit = (self.max_ms + QUEUE_OVERFLOW_SLACK_MS) * FRAMES_PER_MS;
         if self.level_frames() > limit {
             let excess = self.level_frames() - self.max_ms * FRAMES_PER_MS;
@@ -353,7 +277,6 @@ impl MicQueue {
         }
     }
 
-    /// Preenche `out` (`BLOCK_FRAMES` quadros estéreo) com o próximo bloco.
     pub fn pop_block(&mut self, out: &mut [i16]) -> Pop {
         debug_assert_eq!(out.len(), BLOCK_FRAMES * CHANNELS);
         if !self.primed {
@@ -366,10 +289,6 @@ impl MicQueue {
             }
         }
         if self.level_frames() >= BLOCK_FRAMES {
-            // Nível acima do alvo (depois de uma rajada do Wi-Fi): a fila só encolheria descartando de uma vez, e o atraso
-            // ficaria alto para sempre. Em vez disso, passado o aquecimento, consome um pouco mais depressa que o relógio:
-            // 10 quadros a mais por bloco (cerca de 2%) se o excesso passa de 50 ms, 5 (1%) se passa de 30 ms, 1 (0,2%) se
-            // passa de 10 ms; os quadros pulados são espalhados pelo bloco.
             let excess = self.level_frames().saturating_sub(self.target_frames);
             let skip = if !self.warm {
                 0
@@ -398,7 +317,6 @@ impl MicQueue {
             }
             return Pop::Full;
         }
-        // Esvaziou: entrega o que há, completa com zeros e volta a encher até o alvo.
         let have = self.buf.len();
         for (o, s) in out.iter_mut().zip(self.buf.drain(..)) {
             *o = s;
@@ -410,21 +328,13 @@ impl MicQueue {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Origem do texto do monitor
-// ---------------------------------------------------------------------------------------------------------------
-
-/// O texto do monitor de ligações e o jeito de encerrá-lo de outra thread.
 pub struct LinkFeed {
     pub reader: Box<dyn Read + Send>,
-    /// Encerra a origem (mata o processo; fecha o soquete). Pode ser chamada várias vezes, de qualquer thread.
     pub kill: Arc<dyn Fn() + Send + Sync>,
 }
 
-/// Abre uma origem do monitor (de novo, se a anterior terminou).
 pub type OpenFeed = Arc<dyn Fn() -> std::io::Result<LinkFeed> + Send + Sync>;
 
-/// Origem de produção: o processo filho `pw-link --links --monitor`, no PipeWire do `XDG_RUNTIME_DIR` do `psd`.
 pub fn pw_link_feed() -> OpenFeed {
     Arc::new(|| {
         let mut cmd = Command::new("pw-link");
@@ -436,7 +346,6 @@ pub fn pw_link_feed() -> OpenFeed {
                 e
             }
         })?;
-        // Encerrado com o `psd` quando ele sai por SIGTERM ou SIGINT.
         #[cfg(target_os = "linux")]
         crate::discovery::register_child(child.id());
         let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("sem saída do pw-link"))?;
@@ -450,18 +359,10 @@ pub fn pw_link_feed() -> OpenFeed {
     })
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Hub e sessão
-// ---------------------------------------------------------------------------------------------------------------
-
 #[derive(Default)]
 struct HubState {
-    /// Geração do monitor em curso (cada troca de dono a incrementa). Threads de uma geração antiga terminam sozinhas.
     gen: u64,
-    /// Número da próxima sessão.
     next_id: u64,
-    /// Sessão que tem o microfone (a primeira que conectou) e as que esperam, em ordem de chegada (decisão 7: um
-    /// microfone por vez; só o dono recebe pedidos e só ele tem o monitor de ligações).
     owner: Option<u64>,
     waiting: Vec<(u64, Waker)>,
     waker: Option<Waker>,
@@ -476,9 +377,7 @@ struct Inner {
     log: LogFn,
     state: Mutex<HubState>,
     queue: Mutex<MicQueue>,
-    /// Blocos de 10 ms que o soquete do PipeWire não aceitou a tempo e foram jogados fora (a escrita guarda no máximo 50 ms).
     pw_drops: std::sync::atomic::AtomicU64,
-    /// Vezes em que a escrita chegou atrasada mais de 100 ms e recomeçou a grade de tempo.
     pw_late: std::sync::atomic::AtomicU64,
 }
 
@@ -511,25 +410,19 @@ impl Inner {
     }
 }
 
-/// Ponto de encontro do microfone: um por `psd`. A sessão de um cliente com `CAP_MIC` chama [`MicHub::attach`].
 pub struct MicHub {
     inner: Arc<Inner>,
 }
 
 impl MicHub {
-    /// `open`: origem do monitor de ligações (use [`pw_link_feed`]); `pcm_addr`: soquete de reprodução do PipeWire.
     pub fn new(open: OpenFeed, pcm_addr: &str, log: LogFn) -> Arc<MicHub> {
         MicHub::with_max_ms(open, pcm_addr, log, QUEUE_MAX_MS)
     }
 
-    /// Como [`MicHub::new`], com o alvo máximo da fila (e inicial) em `max_ms` (`psd --mic-max-ms`).
     pub fn with_max_ms(open: OpenFeed, pcm_addr: &str, log: LogFn, max_ms: usize) -> Arc<MicHub> {
         Arc::new(MicHub { inner: Arc::new(Inner { open, pcm_addr: pcm_addr.to_string(), log, state: Mutex::new(HubState::default()), queue: Mutex::new(MicQueue::with_max_ms(max_ms)), pw_drops: Default::default(), pw_late: Default::default() }) })
     }
 
-    /// Liga a sessão do cliente. A primeira sessão vira dona do microfone: sobe o monitor de ligações (o filho só
-    /// existe enquanto houver dono). As seguintes esperam e nunca recebem pedido enquanto a dona estiver conectada;
-    /// quando ela sai, a primeira da fila assume. `waker` é chamado quando "há gravador" muda (e ao assumir).
     pub fn attach(&self, waker: Waker) -> MicSession {
         let (id, gen) = {
             let mut g = self.inner.lock();
@@ -619,7 +512,6 @@ fn monitor_loop(inner: &Arc<Inner>, gen: u64) {
     }
 }
 
-/// O fluxo do cliente em curso.
 struct StreamState {
     codec: u8,
     channels: u8,
@@ -630,25 +522,20 @@ struct Writer {
     stop: Arc<AtomicBool>,
 }
 
-/// Contadores do segundo corrente para a linha de estatísticas.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct MicStats {
     pub packets: u64,
     pub bytes: u64,
     pub level_ms: f64,
     pub target_ms: f64,
-    /// Maior intervalo entre dois pacotes no último segundo (ms).
     pub gap_ms: f64,
-    /// Blocos jogados fora porque o PipeWire não os aceitou, e atrasos da escrita acima de 100 ms (desde o último pedido de ligar).
     pub pw_drops: u64,
     pub pw_late: u64,
     pub queue: QueueStats,
 }
 
-/// A parte da sessão: porta dos pedidos, fluxo do cliente e escrita no PipeWire.
 pub struct MicSession {
     inner: Arc<Inner>,
-    /// Número da sessão no hub.
     id: u64,
     gate: RequestGate,
     stream: Option<StreamState>,
@@ -672,7 +559,6 @@ impl Drop for MicSession {
                 g.consumers.clear();
                 g.owner = None;
                 let kill = g.kill_monitor.take();
-                // A primeira da fila assume o microfone (com um monitor novo, que reconstrói o estado).
                 let promoted = if g.waiting.is_empty() {
                     None
                 } else {
@@ -702,7 +588,6 @@ impl Drop for MicSession {
 }
 
 impl MicSession {
-    /// Há gravador agora, e quem são (para o log).
     pub fn recording(&self) -> (bool, Vec<String>) {
         let g = self.inner.lock();
         if g.owner == Some(self.id) {
@@ -712,18 +597,14 @@ impl MicSession {
         }
     }
 
-    /// O pedido está ligado.
     pub fn requested(&self) -> bool {
         self.gate.is_on()
     }
 
-    /// Prazo da próxima chamada de [`MicSession::poll`] sem evento.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.gate.next_deadline()
     }
 
-    /// Confere se um pedido deve sair. `Some(on)`: a sessão envia `AUDIO_REQUEST` e já ficou preparada (a escrita
-    /// no PipeWire começa ao ligar e termina ao desligar).
     pub fn poll(&mut self, now: Instant) -> Option<bool> {
         let (recording, _) = self.recording();
         let change = self.gate.update(recording, now)?;
@@ -761,7 +642,6 @@ impl MicSession {
         }
     }
 
-    /// `AUDIO_START` do fluxo 1. `Err(motivo)`: fluxo recusado (o pacote é descartado e o motivo, registrado).
     pub fn on_start(&mut self, codec: u8, channels: u8, rate: u32, _frames: u16) -> Result<(), String> {
         if !self.gate.is_on() {
             return Err("AUDIO_START do microfone sem pedido em vigor".into());
@@ -777,13 +657,10 @@ impl MicSession {
         Ok(())
     }
 
-    /// `AUDIO_STOP` do fluxo 1. Devolve `true` se havia fluxo aberto.
     pub fn on_stop(&mut self) -> bool {
         self.stream.take().is_some()
     }
 
-    /// `AUDIO_DATA` do fluxo 1. Sem pedido em vigor (ou sem `AUDIO_START`) o pacote é descartado; `Err` só na
-    /// primeira vez de cada episódio (para o log não encher). Pacote que não decodifica também é descartado.
     pub fn on_data(&mut self, seq: u32, data: &[u8], now_us: u64) -> Result<(), String> {
         if !self.gate.is_on() || self.stream.is_none() {
             self.discarded += 1;
@@ -819,17 +696,14 @@ impl MicSession {
         Ok(())
     }
 
-    /// Pacotes descartados por falta de pedido ou erro desde o início da sessão.
     pub fn discarded(&self) -> u64 {
         self.discarded
     }
 
-    /// Saltos de `seq` vistos desde o início da sessão.
     pub fn seq_gaps(&self) -> u64 {
         self.seq_gaps
     }
 
-    /// Estatísticas do que chegou (pacotes e bytes desde a última chamada de [`MicSession::take_stats`]) e da fila.
     pub fn take_stats(&mut self) -> MicStats {
         let mut q = self.inner.queue();
         let s = MicStats { packets: self.packets, bytes: self.bytes, level_ms: q.level_ms(), target_ms: q.target_ms(), gap_ms: q.take_max_gap_ms(), pw_drops: self.inner.pw_drops.load(Ordering::Relaxed), pw_late: self.inner.pw_late.load(Ordering::Relaxed), queue: q.stats() };
@@ -840,9 +714,6 @@ impl MicSession {
     }
 }
 
-/// Thread de escrita: enquanto não for parada, mantém conexão com o soquete do PipeWire e escreve um bloco de
-/// 10 ms a cada 10 ms, no relógio do sistema (o mesmo que move o PipeWire no Pi). O bloqueio do soquete não serve de
-/// ritmo: o laço local do TCP guarda segundos de dados antes de bloquear.
 fn writer_loop(inner: &Arc<Inner>, stop: &Arc<AtomicBool>) {
     let mut warned = false;
     let mut block = vec![0i16; BLOCK_FRAMES * CHANNELS];
@@ -865,7 +736,6 @@ fn writer_loop(inner: &Arc<Inner>, stop: &Arc<AtomicBool>) {
         let _ = s.set_nonblocking(true);
         let period = Duration::from_micros(BLOCK_FRAMES as u64 * 1_000_000 / u64::from(SAMPLE_RATE));
         let mut next = Instant::now();
-        // Blocos que o soquete ainda não aceitou (o primeiro pode estar escrito pela metade, em `off` bytes).
         let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
         let mut off = 0usize;
         let mut lost = false;
@@ -875,7 +745,6 @@ fn writer_loop(inner: &Arc<Inner>, stop: &Arc<AtomicBool>) {
                 std::thread::sleep((next - now).min(Duration::from_millis(5)));
                 continue;
             }
-            // Atrasado demais (o sistema travou): não corre atrás, recomeça a grade daqui.
             if now.duration_since(next) > Duration::from_millis(100) {
                 next = now;
                 inner.pw_late.fetch_add(1, Ordering::Relaxed);
@@ -887,8 +756,6 @@ fn writer_loop(inner: &Arc<Inner>, stop: &Arc<AtomicBool>) {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }
             pending.push_back(bytes);
-            // O PipeWire não consome (por exemplo, o gravador saiu e o grafo parou): guarda no máximo 50 ms; o
-            // excesso mais velho é jogado fora, sempre em blocos inteiros para não desalinhar os canais.
             while pending.len() > 5 {
                 inner.pw_drops.fetch_add(1, Ordering::Relaxed);
                 if off > 0 {

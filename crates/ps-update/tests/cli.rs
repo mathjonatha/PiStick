@@ -1,4 +1,3 @@
-//! O binário `ps-update` de ponta a ponta: keygen, manifest, sign e verify, com os códigos de saída.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +36,6 @@ fn fluxo_completo_e_recusas_com_codigos_de_saida() {
     let o = rodar(&["keygen", s(&chave)]);
     assert!(o.status.success(), "{}", texto(&o));
     assert!(chave.exists() && publica.exists());
-    // Não sobrescreve.
     assert_eq!(rodar(&["keygen", s(&chave)]).status.code(), Some(1));
 
     let o = rodar(&["manifest", s(&dir), "--serial", "12", "--versao", "0.3.0", "--out", s(&man)]);
@@ -49,24 +47,20 @@ fn fluxo_completo_e_recusas_com_codigos_de_saida() {
     assert!(o.status.success(), "{}", texto(&o));
     assert!(texto(&o).contains("VERIFY ok serial=12 versao=0.3.0 arquivos=2 pasta_conferida=2"), "{}", texto(&o));
 
-    // Serial mínimo maior: recusado (código 1).
     let o = rodar(&["verify", s(&man), "--pub", s(&publica), "--min-serial", "13"]);
     assert_eq!(o.status.code(), Some(1), "{}", texto(&o));
     assert!(texto(&o).contains("retrocesso"), "{}", texto(&o));
 
-    // Arquivo alterado na pasta: recusado.
     fs::write(dir.join("LEIA.txt"), b"oI").unwrap();
     let o = rodar(&["verify", s(&man), "--pub", s(&publica), "--dir", s(&dir)]);
     assert_eq!(o.status.code(), Some(1), "{}", texto(&o));
     fs::write(dir.join("LEIA.txt"), b"oi").unwrap();
 
-    // Arquivo a mais: recusado.
     fs::write(dir.join("intruso"), b"x").unwrap();
     let o = rodar(&["verify", s(&man), "--pub", s(&publica), "--dir", s(&dir)]);
     assert_eq!(o.status.code(), Some(1), "{}", texto(&o));
     fs::remove_file(dir.join("intruso")).unwrap();
 
-    // Manifesto alterado: recusado.
     let original = fs::read(&man).unwrap();
     let mut ruim = original.clone();
     ruim[20] ^= 1;
@@ -74,14 +68,12 @@ fn fluxo_completo_e_recusas_com_codigos_de_saida() {
     assert_eq!(rodar(&["verify", s(&man), "--pub", s(&publica)]).status.code(), Some(1));
     fs::write(&man, &original).unwrap();
 
-    // Chave pública de outro par: recusada.
     let outra = raiz.join("outra");
     assert!(rodar(&["keygen", s(&outra)]).status.success());
     let o = rodar(&["verify", s(&man), "--pub", s(&raiz.join("outra.pub"))]);
     assert_eq!(o.status.code(), Some(1), "{}", texto(&o));
     assert!(texto(&o).contains("outra chave"), "{}", texto(&o));
 
-    // Uso errado: código 2. Sem --pub não há chave embutida.
     assert_eq!(rodar(&[]).status.code(), Some(2));
     assert_eq!(rodar(&["verify", s(&man)]).status.code(), Some(2));
     assert_eq!(rodar(&["verify", s(&man), "--pub", s(&publica), "--min-serial", "-1"]).status.code(), Some(2));

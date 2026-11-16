@@ -1,35 +1,22 @@
-//! Apresentação atômica de quadros fatiados (`docs/20`, `docs/05`): a regra de quando apresentar uma fatia e a
-//! medição que o roteiro (`atomic start` / `atomic report`) usa para provar que nenhuma imagem apresentada mistura
-//! instantes diferentes.
-//!
-//! Lógica pura, sem relógio próprio (o instante vem de fora), para testar com relógio simulado.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-/// Depois deste tempo desde a primeira fatia com `MORE`, um quadro fatiado que não terminou passa a ser
-/// apresentado fatia a fatia (num enlace lento é melhor ver a tela se formando do que ficar parado).
 pub const PROGRESS_AFTER: Duration = Duration::from_millis(250);
 
-/// O que fazer com um `FRAME` que acabou de ser decodificado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Fatia com `MORE` de um quadro que ainda está dentro do prazo: confirmar na hora, sem pedir redesenho.
     Hold,
-    /// Última fatia (ou quadro inteiro): pedir redesenho e confirmar na apresentação.
     Present,
-    /// Fatia com `MORE` de um quadro em curso há mais de [`PROGRESS_AFTER`]: apresentar assim mesmo.
     PresentProgress,
 }
 
-/// Estado do quadro fatiado de uma janela. A marca do tempo é do cliente, a partir da primeira fatia com `MORE`.
 #[derive(Debug, Default)]
 pub struct SliceGate {
     started: Option<Instant>,
 }
 
 impl SliceGate {
-    /// Chegou um `FRAME` (`more` = a fatia não é a última do quadro).
     pub fn on_frame(&mut self, more: bool, now: Instant) -> Verdict {
         if !more {
             self.started = None;
@@ -43,18 +30,15 @@ impl SliceGate {
         }
     }
 
-    /// Há um quadro fatiado em curso (já chegou fatia com `MORE` e a última ainda não).
     pub fn in_progress(&self) -> bool {
         self.started.is_some()
     }
 
-    /// Esquece o quadro em curso (a janela mudou de tamanho).
     pub fn reset(&mut self) {
         self.started = None;
     }
 }
 
-/// Contadores da medição `atomic start` / `atomic report`.
 #[derive(Debug, Default)]
 pub struct AtomicProbe {
     start: Option<Instant>,
@@ -64,25 +48,20 @@ pub struct AtomicProbe {
     progressive: u64,
 }
 
-/// Resultado de uma medição.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomicReport {
     pub presentations: u64,
-    /// Apresentações cujos marcadores tinham números de quadro diferentes.
     pub mixed: u64,
     pub distinct_frames: u64,
-    /// Apresentações pedidas por fatias de um quadro em curso há mais de 250 ms (modo de progresso).
     pub progressive: u64,
     pub secs: f64,
 }
 
 impl AtomicReport {
-    /// Quadros distintos por segundo.
     pub fn fps(&self) -> f64 {
         self.distinct_frames as f64 / self.secs.max(1e-9)
     }
 
-    /// A linha impressa pelo roteiro.
     pub fn line(&self) -> String {
         format!(
             "ATOMIC apresentacoes={} mistas={} quadros_distintos={} fps={:.1} progressivas={} janela={:.1}s",
@@ -105,7 +84,6 @@ impl AtomicProbe {
         *self = AtomicProbe { start: Some(now), ..AtomicProbe::default() };
     }
 
-    /// Uma apresentação causada por `FRAME`, com os marcadores da imagem que vai para a tela.
     pub fn observe(&mut self, markers: &[u32]) {
         if !self.is_on() {
             return;
@@ -119,14 +97,12 @@ impl AtomicProbe {
         }
     }
 
-    /// Uma apresentação pedida por uma fatia no modo de progresso.
     pub fn progressive(&mut self) {
         if self.is_on() {
             self.progressive += 1;
         }
     }
 
-    /// Fecha a medição; `None` se nenhuma foi aberta.
     pub fn finish(&mut self, now: Instant) -> Option<AtomicReport> {
         let p = std::mem::take(self);
         let inicio = p.start?;
@@ -165,7 +141,6 @@ mod tests {
         let t = Instant::now();
         let mut g = SliceGate::default();
         for i in 0..=25 {
-            // 0, 10, ..., 250 ms: no limite exato (250 ms) ainda não é "mais de 250 ms".
             assert_eq!(g.on_frame(true, ms(t, i * 10)), Verdict::Hold, "fatia em {} ms", i * 10);
         }
         assert_eq!(g.on_frame(false, ms(t, 255)), Verdict::Present);
@@ -181,7 +156,6 @@ mod tests {
         assert_eq!(g.on_frame(true, ms(t, 300)), Verdict::PresentProgress);
         assert_eq!(g.on_frame(true, ms(t, 2000)), Verdict::PresentProgress);
         assert_eq!(g.on_frame(false, ms(t, 2100)), Verdict::Present);
-        // O quadro seguinte começa a contar do zero, a partir da própria primeira fatia com MORE.
         assert_eq!(g.on_frame(true, ms(t, 2200)), Verdict::Hold);
         assert_eq!(g.on_frame(true, ms(t, 2400)), Verdict::Hold);
         assert_eq!(g.on_frame(true, ms(t, 2451)), Verdict::PresentProgress);
@@ -201,14 +175,14 @@ mod tests {
     fn medicao_conta_mistas_distintos_e_progressivas() {
         let t = Instant::now();
         let mut p = AtomicProbe::default();
-        p.observe(&[1, 1]); // fora da medição: não conta
+        p.observe(&[1, 1]);
         assert!(p.finish(t).is_none());
         p.start(t);
         p.observe(&[5, 5, 5]);
         p.observe(&[5, 5, 5]);
         p.observe(&[6, 6, 6]);
-        p.observe(&[7, 6, 6]); // mista
-        p.observe(&[u32::MAX, u32::MAX]); // não é do gerador: conta como mista
+        p.observe(&[7, 6, 6]);
+        p.observe(&[u32::MAX, u32::MAX]);
         p.progressive();
         let r = p.finish(ms(t, 2000)).unwrap();
         assert_eq!((r.presentations, r.mixed, r.distinct_frames, r.progressive), (5, 2, 2, 1));

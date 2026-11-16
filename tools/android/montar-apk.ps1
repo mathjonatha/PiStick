@@ -1,36 +1,5 @@
-<#
-.SYNOPSIS
-    Monta o APK do cliente Android do PiStick (marco 6, docs/26, decisao 2), sem Gradle e sem baixar nada.
 
-.DESCRIPTION
-    Passos: cargo build (alvo aarch64-linux-android, ligador clang do NDK) -> aapt2 link (manifesto, recursos) ->
-    javac contra o android.jar -> d8 (dex) -> junta classes.dex e lib/arm64-v8a/libps_android.so ao APK ->
-    zipalign -> apksigner (chave de depuracao padrao do Android, fora do repositorio) -> apksigner verify.
 
-    Tudo o que e preciso ja deve estar instalado: o roteiro nao baixa nada. Se faltar algo, ele diz o que e onde
-    procurou. Saida em target\android\ (pistick-cliente.apk e a pasta obj\ com os intermediarios).
-
-    A chave de depuracao e %USERPROFILE%\.android\debug.keystore (criada pelo keytool se nao existir). A senha nunca
-    e impressa nem gravada no repositorio: vai ao keytool e ao apksigner por variavel de ambiente. Se o repositorio
-    de chaves tiver senha diferente da padrao do Android, defina PISTICK_KS_PASS antes de rodar.
-
-.PARAMETER Sdk
-    Pasta do Android SDK (padrao: C:\Users\math\Documents\02. REA\android-sdk).
-.PARAMETER Ndk
-    Versao do NDK dentro de <Sdk>\ndk (padrao 27.1.12297006).
-.PARAMETER BuildTools
-    Versao das build-tools (padrao 36.0.0).
-.PARAMETER Plataforma
-    Plataforma do android.jar (padrao android-36).
-.PARAMETER Jdk
-    Pasta do JDK (padrao: a variavel JAVA_HOME).
-.PARAMETER Keystore
-    Repositorio de chaves de depuracao (padrao %USERPROFILE%\.android\debug.keystore).
-.PARAMETER Saida
-    Pasta de saida (padrao <repositorio>\target\android).
-.PARAMETER Perfil
-    Perfil do cargo: release (padrao) ou debug.
-#>
 [CmdletBinding()]
 param(
     [string]$Sdk,
@@ -43,7 +12,6 @@ param(
     [ValidateSet('release', 'debug')][string]$Perfil = 'release'
 )
 
-# No Windows PowerShell 5.1 $PSScriptRoot e vazio dentro dos padroes de param: tudo o que depende dele e preenchido aqui.
 $ErrorActionPreference = 'Stop'
 $Raiz = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Sdk) { $Sdk = 'C:\Users\math\Documents\02. REA\android-sdk' }
@@ -52,7 +20,7 @@ if (-not $Keystore) { $Keystore = Join-Path $env:USERPROFILE '.android\debug.key
 if (-not $Saida) { $Saida = Join-Path $Raiz 'target\android' }
 
 $Alvo = 'aarch64-linux-android'
-$Api = 30            # minSdk; o clang do NDK usa a API do prefixo do nome
+$Api = 30
 $Biblioteca = 'libps_android.so'
 
 function Falha([string]$msg) {
@@ -70,7 +38,6 @@ function Executa([string]$exe, [string[]]$argumentos, [string]$rotulo) {
     if ($LASTEXITCODE -ne 0) { Falha "$rotulo falhou (codigo $LASTEXITCODE)." }
 }
 
-# --- Ferramentas -------------------------------------------------------------------------------------------------
 $bt = Exige (Join-Path $Sdk "build-tools\$BuildTools") "build-tools $BuildTools" "Parametro -Sdk ($Sdk) e -BuildTools; o roteiro nao instala nada."
 $aapt2 = Exige (Join-Path $bt 'aapt2.exe') 'aapt2' 'Build-tools incompletas.'
 $d8 = Exige (Join-Path $bt 'd8.bat') 'd8' 'Build-tools incompletas.'
@@ -94,7 +61,6 @@ $FonteJava = Exige (Join-Path $Raiz 'android\java') 'fontes Java' 'Arvore do rep
 $versao = ([regex]::Match((Get-Content -Raw (Join-Path $Raiz 'Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
 if (-not $versao) { Falha 'Nao achei a versao em Cargo.toml.' }
 
-# --- Pastas ------------------------------------------------------------------------------------------------------
 $obj = Join-Path $Saida 'obj'
 if (Test-Path -LiteralPath $obj) { Remove-Item -LiteralPath $obj -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $obj | Out-Null
@@ -104,13 +70,10 @@ New-Item -ItemType Directory -Force -Path $classes, $dex | Out-Null
 $apkFinal = Join-Path $Saida 'pistick-cliente.apk'
 if (Test-Path -LiteralPath $apkFinal) { Remove-Item -LiteralPath $apkFinal -Force }
 
-# --- 1. Nucleo em Rust -------------------------------------------------------------------------------------------
 Write-Host "== 1/6 cargo build ($Alvo, $Perfil)"
-# O ligador fica por variavel de ambiente: nada de caminho da maquina em .cargo/config.toml.
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $clang
 $env:CC_aarch64_linux_android = $clang
 if (Test-Path -LiteralPath $llvmAr) { $env:AR_aarch64_linux_android = $llvmAr }
-# Segmentos alinhados a 16 KiB (exigencia dos aparelhos de pagina de 16 KiB; inofensivo nos de 4 KiB).
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = '-C link-arg=-Wl,-z,max-page-size=16384'
 $cargoArgs = @('build', '-p', 'ps-android', '--target', $Alvo)
 if ($Perfil -eq 'release') { $cargoArgs += '--release' }
@@ -118,19 +81,16 @@ Push-Location $Raiz
 try { Executa 'cargo' $cargoArgs 'cargo build' } finally { Pop-Location }
 $so = Exige (Join-Path $Raiz "target\$Alvo\$Perfil\$Biblioteca") $Biblioteca 'O cargo build nao gerou a biblioteca.'
 
-# --- 2. Manifesto e recursos -------------------------------------------------------------------------------------
 Write-Host '== 2/6 aapt2 link'
 $base = Join-Path $obj 'base.apk'
 Executa $aapt2 @('link', '-o', $base, '--manifest', $Manifesto, '-I', $androidJar, '--min-sdk-version', "$Api", '--target-sdk-version', '36',
     '--version-code', '1', '--version-name', $versao, '--debug-mode') 'aapt2 link'
 
-# --- 3. Java -----------------------------------------------------------------------------------------------------
 Write-Host '== 3/6 javac'
 $fontes = @(Get-ChildItem -LiteralPath $FonteJava -Recurse -Filter *.java | ForEach-Object { $_.FullName })
 if ($fontes.Count -eq 0) { Falha "Nenhum .java em $FonteJava." }
 Executa $javac (@('-encoding', 'UTF-8', '--release', '11', '-Xlint:all', '-classpath', $androidJar, '-d', $classes) + $fontes) 'javac'
 
-# --- 4. Dex ------------------------------------------------------------------------------------------------------
 Write-Host '== 4/6 d8'
 $arquivosClass = @(Get-ChildItem -LiteralPath $classes -Recurse -Filter *.class | ForEach-Object { $_.FullName })
 if ($arquivosClass.Count -eq 0) { Falha 'O javac nao gerou classes.' }
@@ -138,7 +98,6 @@ $env:JAVA_HOME = $Jdk
 Executa $d8 (@('--lib', $androidJar, '--min-api', "$Api", '--output', $dex) + $arquivosClass) 'd8'
 $classesDex = Exige (Join-Path $dex 'classes.dex') 'classes.dex' 'O d8 nao gerou o dex.'
 
-# --- 5. Montagem e alinhamento -----------------------------------------------------------------------------------
 Write-Host '== 5/6 montagem, zipalign'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -146,17 +105,13 @@ $naoAlinhado = Join-Path $obj 'nao-alinhado.apk'
 Copy-Item -LiteralPath $base -Destination $naoAlinhado
 $zip = [System.IO.Compression.ZipFile]::Open($naoAlinhado, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
-    # Nomes com barra normal (o formato do APK exige).
     [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $classesDex, 'classes.dex', [System.IO.Compression.CompressionLevel]::Optimal)
     [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $so, "lib/arm64-v8a/$Biblioteca", [System.IO.Compression.CompressionLevel]::Optimal)
 } finally { $zip.Dispose() }
 $alinhado = Join-Path $obj 'alinhado.apk'
 Executa $zipalign @('-f', '4', $naoAlinhado, $alinhado) 'zipalign'
 
-# --- 6. Assinatura -----------------------------------------------------------------------------------------------
 Write-Host '== 6/6 apksigner'
-# Senha so por variavel de ambiente, nunca na linha de comando nem na saida. O repositorio de chaves de depuracao
-# do Android tem a senha padrao publica; PISTICK_KS_PASS a substitui.
 $senha = $env:PISTICK_KS_PASS
 if (-not $senha) { $senha = 'android' }
 $env:PISTICK_KS_SENHA_INTERNA = $senha

@@ -1,12 +1,4 @@
 #!/bin/sh
-# Confere uma imagem do PiStick SEM alterá-la: monta o arquivo SOMENTE LEITURA (laço de leitura,
-# ext4 com ro,noload) e imprime ok/FALHOU por item; código 1 se algum falhou. Roda no Pi, com sudo:
-#
-#   sudo sh tools/imagem/verificar-imagem.sh ARQUIVO.img[.xz]
-#
-# Para .xz, descompacta numa pasta temporária (apagada ao final). Só opera sobre arquivos e sobre o
-# laço que ele mesmo cria; recusa dispositivo de bloco. O nome da rede Wi-Fi do desenvolvimento é
-# lido do Pi por nmcli (só leitura) apenas para procurá-lo na imagem: nunca é impresso nem gravado.
 set -eu
 
 if [ $# -ne 1 ]; then
@@ -73,7 +65,6 @@ case "$arq" in
         ;;
 esac
 
-# O laço é de LEITURA (--read-only): o arquivo da imagem não pode mudar.
 laco=$(losetup --read-only --partscan --find --show "$img") || falhou "losetup"
 case "$laco" in
     /dev/loop[0-9] | /dev/loop[0-9][0-9] | /dev/loop[0-9][0-9][0-9]) ;;
@@ -101,13 +92,11 @@ no() {
     falhas=$((falhas + 1))
     printf 'FALHOU  %s\n' "$1"
 }
-# checa DESCRIÇÃO COMANDO...: ok se o comando tem sucesso.
 checa() {
     desc=$1
     shift
     if "$@" >/dev/null 2>&1; then ok "$desc"; else no "$desc"; fi
 }
-# ausente CAMINHO...: nenhum dos caminhos existe (nem como link).
 ausentes() {
     for a in "$@"; do
         if [ -e "$a" ] || [ -L "$a" ]; then return 1; fi
@@ -115,15 +104,12 @@ ausentes() {
     return 0
 }
 
-# elf ARQUIVO: executável com o cabeçalho ELF.
 elf() {
     [ -x "$1" ] && [ "$(dd if="$1" bs=1 skip=1 count=3 2>/dev/null)" = ELF ]
 }
-# hostname_pistick ARQUIVO
 hostname_pistick() {
     [ "$(tr -d '[:space:]' < "$1")" = pistick ]
 }
-# senha_bloqueada SHADOW: o campo da senha do pistick começa com ! ou *.
 senha_bloqueada() {
     campo=$(awk -F: '$1 == "pistick" { print $2 }' "$1")
     case "$campo" in
@@ -131,16 +117,13 @@ senha_bloqueada() {
         *) return 1 ;;
     esac
 }
-# sem_sudo GROUP: o pistick não está no grupo sudo.
 sem_sudo() {
     if grep -E '^sudo:[^:]*:[^:]*:(.*,)?pistick(,|$)' "$1"; then return 1; fi
     return 0
 }
-# vazio_de DIR PADRÃO...: nada em DIR casa com o padrão de find -name (primeiro argumento depois do DIR).
 sem_achados() {
     [ -z "$(find "$@" -print -quit 2>/dev/null)" ]
 }
-# machine_id_base ARQUIVO
 machine_id_base() {
     c=$(tr -d '[:space:]' < "$1")
     [ -z "$c" ] || [ "$c" = uninitialized ]
@@ -150,7 +133,6 @@ m=$mnt
 echo "imagem: $arq"
 [ -f "$m/usr/local/share/pistick/VERSAO" ] && echo "versão: $(head -n 1 "$m/usr/local/share/pistick/VERSAO")"
 
-# ---- o que deve existir ----
 checa "psd instalado (ELF)" elf "$m/usr/local/bin/psd"
 checa "iniciar-servico.sh" test -x "$m/usr/local/libexec/pistick/iniciar-servico.sh"
 checa "primeiro-boot.sh" test -x "$m/usr/local/libexec/pistick/primeiro-boot.sh"
@@ -161,12 +143,10 @@ checa "pistick.service habilitado" test -L "$m/etc/systemd/system/multi-user.tar
 checa "pistick-primeiro-boot.service habilitado" test -L "$m/etc/systemd/system/multi-user.target.wants/pistick-primeiro-boot.service"
 checa "nome do aparelho: pistick" hostname_pistick "$m/etc/hostname"
 
-# ---- usuário pistick ----
 checa "usuário pistick existe, home /home/pistick" grep -q '^pistick:[^:]*:[0-9]*:[0-9]*:[^:]*:/home/pistick:' "$m/etc/passwd"
 checa "senha do pistick bloqueada" senha_bloqueada "$m/etc/shadow"
 checa "pistick fora do grupo sudo" sem_sudo "$m/etc/group"
 
-# ---- nada pessoal ----
 checa "sem chaves SSH de máquina" ausentes "$m"/etc/ssh/ssh_host_*
 if [ -z "$(find "$m/etc" "$m/home" "$m/root" "$m/var" "$m/usr/local" -name 'authorized_keys*' -print -quit 2>/dev/null)" ]; then
     ok "sem authorized_keys"
@@ -188,7 +168,6 @@ if [ -d "$m/boot/firmware" ]; then
     if [ -z "$achados" ]; then ok "boot/firmware sem credenciais (user-data, network-config)"; else no "boot/firmware com credenciais em:$achados"; fi
 fi
 
-# O nome da rede do desenvolvimento nunca é impresso: só a contagem de arquivos que o contêm.
 nomes=""
 if command -v nmcli >/dev/null 2>&1; then
     for c in $(nmcli -t -f TYPE,NAME connection show 2>/dev/null | sed -n 's/^802-11-wireless://p' | tr ' ' '_'); do
@@ -223,7 +202,6 @@ fi
 checa "sem ~/.cargo, rustup, rustc, cargo" ausentes \
     "$m/root/.cargo" "$m/root/.rustup" "$m/home/pistick/.cargo" "$m/home/pi/.cargo" "$m/usr/bin/rustc" "$m/usr/bin/cargo" \
     "$m/usr/local/bin/rustc" "$m/usr/local/bin/cargo" "$m/usr/local/bin/rustup"
-# O compilador C vem da base oficial (removê-lo faria o apt trocar o kernel); aqui só se informa.
 if ausentes "$m/usr/bin/gcc" "$m/usr/bin/cc"; then
     ok "sem compilador C"
 else
@@ -232,7 +210,6 @@ fi
 checa "sem repositório do projeto (Cargo.toml, .git)" sem_achados \
     "$m/home" "$m/root" "$m/opt" "$m/usr/local" "$m/srv" '(' -name Cargo.toml -o -name .git ')'
 
-# ---- /home: só pastas da base (pi) e pistick, e só com o esqueleto de /etc/skel ----
 casa_ok=1
 esqueleto=$(find "$m/etc/skel" -mindepth 1 -printf '%f\n' 2>/dev/null | sort)
 for d in "$m"/home/*; do
@@ -248,7 +225,6 @@ for d in "$m"/home/*; do
 done
 if [ "$casa_ok" -eq 1 ]; then ok "/home só com o esqueleto (pi da base e pistick)"; else no "/home tem algo além do esqueleto"; fi
 
-# ---- limpeza ----
 checa "listas do apt vazias" sem_achados "$m/var/lib/apt/lists" -type f ! -name lock
 checa "cache do apt vazio" sem_achados "$m/var/cache/apt/archives" -name '*.deb'
 checa "/var/log sem arquivos" sem_achados "$m/var/log" -type f

@@ -2,7 +2,6 @@ use crate::psa1::{decode, encode, DecodeError, EncodeError, MAX_FRAMES};
 use crate::synth;
 use crate::*;
 
-/// Gerador pseudoaleatório simples (xorshift64*), determinístico.
 struct Rng(u64);
 
 impl Rng {
@@ -43,7 +42,6 @@ fn silencio_vira_quase_nada() {
     for ch in [1usize, 2] {
         let pcm = vec![0i16; 480 * ch];
         let bytes = roundtrip(&pcm, ch);
-        // 2 de n, 2 por canal de cabeçalho, mais ~1 bit por resíduo.
         assert!(bytes < 2 + ch * (2 + 60 + 2), "silêncio ocupou {bytes} bytes");
     }
 }
@@ -63,7 +61,6 @@ fn ruido_branco_ida_e_volta_e_nao_explode() {
     for ch in [1usize, 2] {
         let pcm: Vec<i16> = (0..480 * ch).map(|_| r.i16()).collect();
         let bytes = roundtrip(&pcm, ch);
-        // Pior caso: cru, 16 bits por amostra (17 no lado: um bit a mais por quadro), mais cabeçalho.
         let limite = pcm.len() * 2 + if ch == 2 { 480 / 8 + 1 } else { 0 } + 2 + 2 * ch;
         assert!(bytes <= limite, "ruído ocupou {bytes}, limite {limite}");
     }
@@ -79,7 +76,6 @@ fn estouro_de_escala_alternado() {
             }
         }
         roundtrip(&pcm, ch);
-        // Extremos, incluindo -32768, e l = -r.
         let mut pcm = Vec::new();
         for i in 0..500 {
             let (a, b) = match i % 4 {
@@ -104,7 +100,6 @@ fn tamanhos_de_1_a_4800_quadros() {
     sizes.extend([100, 479, 480, 481, 960, 1000, 2048, 4799, 4800]);
     for n in sizes {
         for ch in [1usize, 2] {
-            // Mistura: senoide mais um pouco de ruído.
             let mut pcm = sine(n, ch, 300.0, 0.4);
             for s in pcm.iter_mut() {
                 *s = s.saturating_add(r.i16() >> 12);
@@ -118,7 +113,6 @@ fn tamanhos_de_1_a_4800_quadros() {
 
 #[test]
 fn degrau_e_impulso_usam_o_escape() {
-    // Resíduos enormes com k pequeno forçam o escape de 32 bits.
     let mut pcm = vec![0i16; 480];
     pcm[200] = 32767;
     pcm[201] = -32768;
@@ -147,13 +141,9 @@ fn decodificador_rejeita_cabecalhos_ruins() {
     assert_eq!(decode(&[0, 0], 1, &mut out), Err(DecodeError::BadFrames));
     assert_eq!(decode(&[0xFF, 0xFF, 0, 0], 1, &mut out), Err(DecodeError::BadFrames));
     assert_eq!(decode(&[1, 0, 0, 0, 0, 0], 3, &mut out), Err(DecodeError::BadChannels));
-    // ordem 5
     assert_eq!(decode(&[4, 0, 5, 0, 0, 0, 0, 0], 1, &mut out), Err(DecodeError::BadOrder));
-    // k = 16
     assert_eq!(decode(&[4, 0, 0, 16, 0, 0, 0, 0], 1, &mut out), Err(DecodeError::BadParam));
-    // cru com ordem != 0
     assert_eq!(decode(&[4, 0, 1, 255, 0, 0, 0, 0, 0, 0, 0], 1, &mut out), Err(DecodeError::BadParam));
-    // ordem maior que n
     assert_eq!(decode(&[1, 0, 2, 0, 0, 0, 0, 0], 1, &mut out), Err(DecodeError::BadOrder));
     assert!(out.is_empty());
 }
@@ -171,7 +161,6 @@ fn decodificador_rejeita_truncamento_e_sobra() {
     let mut mais = enc.clone();
     mais.push(0);
     assert!(decode(&mais, 2, &mut Vec::new()).is_err());
-    // Bit de preenchimento não nulo: muda o último byte do último canal se houver folga; ao menos nunca pânico.
     let mut sujo = enc.clone();
     *sujo.last_mut().unwrap() ^= 1;
     let _ = decode(&sujo, 2, &mut Vec::new());
@@ -183,7 +172,6 @@ fn decodificador_nao_entra_em_panico_com_10000_cargas_aleatorias() {
     for i in 0..10_000 {
         let len = (r.next() % 300) as usize;
         let mut data: Vec<u8> = (0..len).map(|_| r.next() as u8).collect();
-        // Metade das cargas com um cabeçalho plausível, para ir além da primeira checagem.
         if i % 2 == 0 && data.len() >= 4 {
             let n = 1 + (r.next() % 480) as u16;
             data[..2].copy_from_slice(&n.to_le_bytes());
@@ -255,8 +243,6 @@ fn sintetico_tem_as_frequencias_e_o_silencio() {
     assert!(is_silent(silencio));
 }
 
-/// Medição de taxa de compressão num arquivo PCM S16LE estéreo de 48 kHz (variável `PSA1_RAW`).
-/// Rodar com: `PSA1_RAW=arquivo.raw cargo test -p ps-audio --release -- --ignored --nocapture compressao`.
 #[test]
 #[ignore]
 fn compressao_de_arquivo_pcm() {
@@ -303,7 +289,6 @@ fn tom_continuo_tem_a_frequencia_e_a_amplitude_pedidas_o_tempo_todo() {
         })
         .collect();
     let (l, r) = synth::split_stereo(&x);
-    // Os dois segundos têm som (diferente do sintético do marco 7, que alterna som e silêncio).
     for metade in [&l[..48_000], &l[48_000..]] {
         assert!((synth::goertzel(metade, 440.0) - 0.25).abs() < 0.002);
     }

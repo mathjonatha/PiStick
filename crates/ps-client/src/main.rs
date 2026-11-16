@@ -1,4 +1,3 @@
-//! `psc <endereço>`: cliente do PiStick.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -107,7 +106,6 @@ fn main() -> ExitCode {
         return listar();
     }
 
-    // `--type` e `--resize` são atalhos de roteiro; o arquivo de `--script` roda depois deles.
     let mut script = legacy_script(type_text, resize_to);
     if let Some(f) = script_file {
         let texto = match std::fs::read_to_string(&f) {
@@ -125,7 +123,6 @@ fn main() -> ExitCode {
             }
         }
     }
-    // Arquivo de `--mic-file` inválido: erro antes de conectar.
     if let Some(f) = &mic.file {
         if let Err(e) = ps_client::mic::load_wav(f) {
             eprintln!("[psc] --mic-file: {e}");
@@ -139,7 +136,6 @@ fn main() -> ExitCode {
 
     let mut seg = SecurityOptions::new(insecure, client_name);
     seg.force_noise = force_noise;
-    // Com `endereço:porta` conecta direto; sem endereço ou com um nome de instância, procura por mDNS.
     let resultado = match addr.as_deref() {
         Some(a) if a.contains(':') => match ps_transport::TcpTransport::connect(a) {
             Ok(t) => run_connected(t, a, &seg, opts),
@@ -156,7 +152,6 @@ fn main() -> ExitCode {
             Err(codigo) => return codigo,
         },
     };
-    // Verificação ou espera de vídeo reprovada no roteiro: código 3, mesmo que o roteiro tenha chegado ao `quit`.
     let reprovado = SCRIPT_FAILED.load(Ordering::SeqCst);
     if reprovado {
         eprintln!("[psc] o roteiro teve verificações reprovadas (veja as linhas VERIFY ... FALHOU).");
@@ -172,7 +167,6 @@ fn main() -> ExitCode {
             sucesso
         }
         Ok(ExitReason::Goodbye { reason, text }) => {
-            // Sem reconexão automática: dois computadores não ficam roubando a sessão um do outro.
             eprintln!("[psc] sessão encerrada pelo aparelho: {}.", ps_client::net::goodbye_text(reason, &text));
             ExitCode::from(match reason {
                 ps_proto::GOODBYE_REPLACED => 6,
@@ -195,7 +189,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// `psc --forget NOME|IMPRESSÃO`: esquece um aparelho conhecido.
 fn esquecer(seletor: &str) -> ExitCode {
     let dir = secure::keys_dir();
     match secure::forget(&dir, seletor) {
@@ -217,7 +210,6 @@ fn esquecer(seletor: &str) -> ExitCode {
     }
 }
 
-/// `psc --list`: procura e imprime uma linha por aparelho. Código 1 se não achou nada.
 fn listar() -> ExitCode {
     let achados = discovery::search();
     if achados.is_empty() {
@@ -230,7 +222,6 @@ fn listar() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Procura por mDNS e escolhe o aparelho: o de nome `nome`, ou o único achado se não houve nome.
 fn escolher(nome: Option<&str>) -> Result<ps_discovery::Found, ExitCode> {
     println!("[psc] procurando aparelhos PiStick na rede...");
     let achados = discovery::search();

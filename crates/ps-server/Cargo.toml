@@ -20,13 +20,9 @@ ps-transport = { path = "../ps-transport" }
 ps-discovery = { path = "../ps-discovery" }
 ps-secure = { path = "../ps-secure" }
 
-# O compositor Wayland só existe no Linux. Smithay sem backends de tela nem renderizador:
-# só a parte de protocolo (wayland_frontend), com o wayland-server em Rust puro.
 [target.'cfg(target_os = "linux")'.dependencies]
 smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend"] }
 
-# Marco 4: ioctl, mmap e poll do codificador V4L2 (todo o `unsafe` fica em `video/v4l2.rs`).
-# Já está na árvore de dependências (vem com socket2 e Smithay).
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

@@ -1,14 +1,3 @@
-# Apresentação atômica de quadros fatiados (docs/20), aceite 2.
-# Fonte sintética de ruído com um marcador de quadro a cada faixa de 32 linhas; o orçamento força o fatiamento.
-# O psc lê os marcadores da imagem que vai para a tela a cada apresentação causada por FRAME: `mistas` conta as
-# imagens feitas de quadros diferentes (os "rasgos"). Com a apresentação atômica `mistas=0`; com `psc --no-atomic`
-# (cada fatia é apresentada ao chegar) `mistas` fica acima de zero e `verify-atomic` reprova (código 3).
-#
-# No Windows (127.0.0.1) ou no Pi (por exemplo pelo Wi-Fi); 16 MiB/s: quadro de 1,7 MB em 4 fatias, ~110 ms por quadro:
-#   target\release\psd.exe --synthetic --synthetic-stripes --max-rate 16384 --listen 127.0.0.1:7700
-#   target\release\psc.exe 127.0.0.1:7700 --script tools\roteiros\90-atomico.txt --shot-dir .cache\shot-atomico
-#   target\release\psc.exe 127.0.0.1:7700 --script tools\roteiros\90-atomico.txt --no-atomic    (deve sair com código 3)
-# No Pi: sh ~/pistick/tools/pi/iniciar-psd.sh --synthetic --synthetic-stripes --max-rate 16384
 waitwin 1 15000
 wait 1500
 atomic start

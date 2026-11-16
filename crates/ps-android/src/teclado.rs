@@ -1,10 +1,3 @@
-//! Teclado: texto do teclado virtual, teclas extras, Ctrl e Alt "grudentos" e teclado físico (docs/26, decisão 11).
-//! Lógica pura.
-//!
-//! O protocolo manda teclas (`KEY`, códigos evdev), não texto. O texto que o método de entrada confirma vira batidas de
-//! um teclado ABNT2 pelo `autotype` (o servidor usa o layout `br`); caractere sem batida conhecida é descartado e
-//! contado ([`Teclado::descartados_e_zerar`]). Ctrl e Alt da faixa de teclas "grudam": valem para a próxima tecla e
-//! se soltam sozinhos. O teclado físico (Bluetooth ou USB) manda o `scanCode` do Linux, que já é o código evdev.
 
 use ps_client::autotype::strokes_for;
 use ps_proto::Message;
@@ -24,17 +17,13 @@ pub const KEY_END: u32 = 107;
 pub const KEY_DOWN: u32 = 108;
 pub const KEY_DELETE: u32 = 111;
 
-/// Código evdev da tecla pelo `keyCode` do Android, para evento de teclado sem `scanCode` (`adb shell input`, alguns
-/// teclados externos). Só teclas que não dependem do layout: letras, dígitos, edição, setas, F1 a F12 e modificadores.
-/// A pontuação fica de fora de propósito: o código evdev é por posição (layout US) e o servidor usa o `br`, então a
-/// casca manda o caractere (`getUnicodeChar`) pelo caminho de texto, que já resolve a batida ABNT2.
 pub fn evdev_de_android(key_code: i32) -> Option<u32> {
     const LETRAS: [u32; 26] = [30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44];
     Some(match key_code {
-        29..=54 => LETRAS[(key_code - 29) as usize], // KEYCODE_A..KEYCODE_Z
-        7 => 11,                                     // KEYCODE_0
-        8..=16 => (key_code - 8 + 2) as u32,         // KEYCODE_1..9 -> 2..10
-        66 | 160 => KEY_ENTER,                       // ENTER, NUMPAD_ENTER
+        29..=54 => LETRAS[(key_code - 29) as usize],
+        7 => 11,
+        8..=16 => (key_code - 8 + 2) as u32,
+        66 | 160 => KEY_ENTER,
         67 => KEY_BACKSPACE,
         61 => KEY_TAB,
         111 => KEY_ESC,
@@ -45,10 +34,10 @@ pub fn evdev_de_android(key_code: i32) -> Option<u32> {
         22 => KEY_RIGHT,
         122 => KEY_HOME,
         123 => KEY_END,
-        92 => 104,  // PAGE_UP
-        93 => 109,  // PAGE_DOWN
+        92 => 104,
+        93 => 109,
         112 => KEY_DELETE,
-        131..=140 => (key_code - 131 + 59) as u32, // F1..F10
+        131..=140 => (key_code - 131 + 59) as u32,
         141 => 87,
         142 => 88,
         59 => KEY_LEFTSHIFT,
@@ -61,19 +50,15 @@ pub fn evdev_de_android(key_code: i32) -> Option<u32> {
     })
 }
 
-/// Pausa entre o apertar e o soltar de uma tecla de texto (o `psc` usa 30 ms nos roteiros).
 pub const PAUSA_TECLA_MS: u32 = 20;
-/// Limite de teclas de uma só chamada (um texto colado enorme não trava a entrada).
 const MAX_TECLAS: usize = 4096;
 
-/// Um passo da entrada: uma mensagem ou uma pausa antes da próxima.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Passo {
     Msg(Message),
     PausaMs(u32),
 }
 
-/// Modificador da faixa de teclas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mod {
     Ctrl,
@@ -85,7 +70,6 @@ pub struct Teclado {
     ctrl: bool,
     alt: bool,
     descartados: u32,
-    /// Tecla física apertada com grudentos: ao soltá-la, os modificadores (Ctrl, Alt) também se soltam.
     soltar: Option<(u32, bool, bool)>,
 }
 
@@ -98,7 +82,6 @@ impl Teclado {
         Teclado::default()
     }
 
-    /// Liga ou desliga o modificador grudento e devolve o estado novo.
     pub fn alternar(&mut self, m: Mod) -> bool {
         let v = match m {
             Mod::Ctrl => &mut self.ctrl,
@@ -108,17 +91,14 @@ impl Teclado {
         *v
     }
 
-    /// (Ctrl, Alt) ligados agora.
     pub fn grudados(&self) -> (bool, bool) {
         (self.ctrl, self.alt)
     }
 
-    /// Quantos caracteres sem tecla foram descartados desde a última chamada.
     pub fn descartados_e_zerar(&mut self) -> u32 {
         std::mem::take(&mut self.descartados)
     }
 
-    /// Aperta os modificadores grudentos (e os solta depois de `corpo`), consumindo-os.
     fn com_modificadores(&mut self, win: u32, corpo: Vec<Passo>) -> Vec<Passo> {
         let (ctrl, alt) = (self.ctrl, self.alt);
         self.ctrl = false;
@@ -140,7 +120,6 @@ impl Teclado {
         v
     }
 
-    /// Bate uma tecla (aperta, pausa, solta).
     fn bater(win: u32, code: u32, shift: bool) -> Vec<Passo> {
         let mut v = Vec::with_capacity(5);
         if shift {
@@ -155,8 +134,6 @@ impl Teclado {
         v
     }
 
-    /// Texto confirmado pelo método de entrada (`commitText`). Ctrl e Alt grudentos valem só para o **primeiro**
-    /// caractere com tecla. `\n` vira Enter.
     pub fn texto(&mut self, win: u32, texto: &str) -> Vec<Passo> {
         let mut out = Vec::new();
         let mut primeiro = true;
@@ -185,7 +162,6 @@ impl Teclado {
         out
     }
 
-    /// `deleteSurroundingText(antes, depois)`: `antes` Backspace e `depois` Delete (limitados).
     pub fn apagar(&mut self, win: u32, antes: u32, depois: u32) -> Vec<Passo> {
         let mut out = Vec::new();
         for _ in 0..antes.min(MAX_TECLAS as u32) {
@@ -197,7 +173,6 @@ impl Teclado {
         out
     }
 
-    /// Tecla da faixa (Esc, Tab, setas, Home, End...) pelo código evdev, com os modificadores grudentos.
     pub fn tecla_extra(&mut self, win: u32, code: u32) -> Vec<Passo> {
         if !(1..=255).contains(&code) {
             return Vec::new();
@@ -206,11 +181,6 @@ impl Teclado {
         self.com_modificadores(win, corpo)
     }
 
-    /// Tecla do teclado físico: o `scanCode` do Android é o código evdev. `scanCode` zero (tecla virtual sem código
-    /// de hardware) ou fora da faixa é ignorado.
-    ///
-    /// Ctrl e Alt grudentos valem para a próxima tecla que não seja modificadora: ao apertá-la saem o modificador
-    /// apertado e a tecla, o estado grudento é limpo, e ao soltá-la saem a tecla solta e o modificador solto.
     pub fn tecla_fisica(&mut self, win: u32, scan_code: i32, apertada: bool) -> Vec<Passo> {
         if !(1..=255).contains(&scan_code) {
             return Vec::new();
@@ -277,18 +247,13 @@ mod tests {
     #[test]
     fn texto_com_acentos_vira_teclas_mortas_do_abnt2() {
         let mut t = Teclado::new();
-        // ã: til (tecla morta) + a.
         assert_eq!(teclas(&t.texto(7, "ã")), [bate(40), bate(30)].concat());
-        // ç é uma tecla; Ç leva Shift.
         assert_eq!(teclas(&t.texto(7, "ç")), bate(39));
         assert_eq!(teclas(&t.texto(7, "Ç")), vec![(KEY_LEFTSHIFT, true), (39, true), (39, false), (KEY_LEFTSHIFT, false)]);
-        // Ã: til sem Shift e depois Shift + a.
         assert_eq!(teclas(&t.texto(7, "Ã")), [bate(40), vec![(KEY_LEFTSHIFT, true), (30, true), (30, false), (KEY_LEFTSHIFT, false)]].concat());
-        // A frase do aceite do marco: nada é descartado.
         let v = t.texto(7, "echo ação ç ÃÇ");
         assert!(!v.is_empty());
         assert_eq!(t.descartados_e_zerar(), 0);
-        // Todas as mensagens vão para a janela pedida.
         assert!(v.iter().all(|p| match p {
             Passo::Msg(Message::Key { win, .. }) => *win == 7,
             _ => true,
@@ -317,12 +282,9 @@ mod tests {
         let mut t = Teclado::new();
         assert!(t.alternar(Mod::Ctrl));
         assert_eq!(t.grudados(), (true, false));
-        // Ctrl+C: o "c" do teclado virtual.
         assert_eq!(teclas(&t.texto(1, "c")), vec![(KEY_LEFTCTRL, true), (46, true), (46, false), (KEY_LEFTCTRL, false)]);
         assert_eq!(t.grudados(), (false, false), "consumido");
-        // Já solto: a tecla seguinte vem sem Ctrl.
         assert_eq!(teclas(&t.texto(1, "l")), bate(38));
-        // Ctrl + L pela faixa depois de ligar de novo.
         t.alternar(Mod::Ctrl);
         assert_eq!(teclas(&t.texto(1, "l")), vec![(KEY_LEFTCTRL, true), (38, true), (38, false), (KEY_LEFTCTRL, false)]);
     }
@@ -345,7 +307,6 @@ mod tests {
         assert!(t.alternar(Mod::Alt));
         assert!(!t.alternar(Mod::Alt), "o segundo toque desliga");
         assert_eq!(teclas(&t.tecla_extra(1, KEY_ESC)), bate(KEY_ESC));
-        // Ctrl ligado e depois desligado sem usar: a próxima tecla sai sem nada.
         t.alternar(Mod::Ctrl);
         t.alternar(Mod::Ctrl);
         assert_eq!(teclas(&t.texto(1, "x")), bate(45));
@@ -365,7 +326,6 @@ mod tests {
         let v = teclas(&t.apagar(1, 2, 1));
         assert_eq!(v, [bate(KEY_BACKSPACE), bate(KEY_BACKSPACE), bate(KEY_DELETE)].concat());
         assert!(t.apagar(1, 0, 0).is_empty());
-        // Número absurdo é limitado.
         assert!(teclas(&t.apagar(1, u32::MAX, 0)).len() <= 2 * MAX_TECLAS);
     }
 
@@ -394,16 +354,12 @@ mod tests {
         for code in [46, evdev_de_android(31).unwrap()] {
             let mut t = Teclado::new();
             t.alternar(Mod::Ctrl);
-            // Shift sozinho não consome o grudento.
             assert_eq!(teclas(&t.tecla_fisica(1, KEY_LEFTSHIFT as i32, true)), vec![(KEY_LEFTSHIFT, true)]);
             assert_eq!(t.grudados(), (true, false));
             assert_eq!(teclas(&t.tecla_fisica(1, KEY_LEFTSHIFT as i32, false)), vec![(KEY_LEFTSHIFT, false)]);
-            // Aperta: Ctrl e a tecla; o estado já está limpo.
             assert_eq!(teclas(&t.tecla_fisica(1, code as i32, true)), vec![(KEY_LEFTCTRL, true), (code, true)]);
             assert_eq!(t.grudados(), (false, false));
-            // Solta: a tecla e o Ctrl.
             assert_eq!(teclas(&t.tecla_fisica(1, code as i32, false)), vec![(code, false), (KEY_LEFTCTRL, false)]);
-            // Próxima tecla sai simples.
             assert_eq!(teclas(&t.tecla_fisica(1, code as i32, true)), vec![(code, true)]);
         }
         let mut t = Teclado::new();
@@ -438,11 +394,9 @@ mod tests {
         assert_eq!(evdev_de_android(59), Some(KEY_LEFTSHIFT));
         assert_eq!(evdev_de_android(113), Some(KEY_LEFTCTRL));
         assert_eq!(evdev_de_android(58), Some(100));
-        // Sem mapeamento: Voltar, Home do sistema, volume, energia, pontuação (vai como texto).
         for k in [4, 3, 24, 25, 26, 69, 74, 0, -1] {
             assert_eq!(evdev_de_android(k), None, "keyCode {k}");
         }
-        // Letras: todos os códigos distintos e válidos.
         let mut vistos: Vec<u32> = (29..=54).filter_map(evdev_de_android).collect();
         vistos.sort_unstable();
         vistos.dedup();

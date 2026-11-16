@@ -1,4 +1,3 @@
-//! Codificador V4L2 do Pi (só Linux; pulado com mensagem se `/dev/video11` não existe).
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
@@ -22,8 +21,6 @@ fn disponivel() -> bool {
     }
 }
 
-/// Codifica `n` quadros da região (`w`x`h` em (`x`, `y`)) da animação, como a sessão faz: um recorte
-/// do quadro da janela com o `stride` da janela.
 fn codifica(enc: &mut V4l2Encoder, n: u64, x: usize, y: usize) -> (Vec<Vec<u8>>, Vec<bool>, Vec<f64>) {
     let (mut dados, mut chaves, mut tempos) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..n {
@@ -55,7 +52,6 @@ fn codifica_60_quadros_da_animacao_em_640x384() {
     assert!(neg.bytes_per_line >= 640 * 4);
     let (dados, chaves, tempos) = codifica(&mut enc, 60, 64, 64);
 
-    // Primeiro quadro: SPS, PPS e IDR; os demais, só fatias que não são IDR.
     let tipos0: Vec<u8> = nal_units(&dados[0]).iter().map(|(t, _)| *t).collect();
     eprintln!("NAL do primeiro quadro: {tipos0:?}");
     assert!(chaves[0] && tipos0.contains(&NAL_SPS) && tipos0.contains(&NAL_PPS) && tipos0.contains(&NAL_IDR), "{tipos0:?}");
@@ -68,14 +64,11 @@ fn codifica_60_quadros_da_animacao_em_640x384() {
     assert_eq!((sps.width, sps.height), (640, 384));
     assert_eq!((sps.profile_idc, sps.level_idc), (100, 40), "perfil High, nível 4.0");
 
-    // Taxa de bits: 60 quadros a 30 por segundo duram 2 s.
     let total: usize = dados.iter().map(Vec::len).sum();
     let real = total as f64 * 8.0 / 2.0;
     let media = tempos.iter().sum::<f64>() / tempos.len() as f64;
     let max = tempos.iter().cloned().fold(0.0, f64::max);
     eprintln!("{total} bytes, {:.0} kbit/s (pedido {} kbit/s); tempo por quadro: média {media:.2} ms, máx {max:.2} ms; primeiro quadro {} bytes", real / 1000.0, pedido / 1000, dados[0].len());
-    // Em VBR o firmware do Pi só gasta o que o conteúdo pede (a animação suave fica em ~780 kbit/s
-    // mesmo com 5 Mbit/s pedidos), então o teto de +30% é o que se pode exigir; veja o relatório.
     assert!(real <= f64::from(pedido) * 1.30, "taxa de bits {:.0} kbit/s acima de +30% de {} kbit/s", real / 1000.0, pedido / 1000);
     assert!(real >= f64::from(pedido) * 0.05, "taxa de bits {:.0} kbit/s absurdamente baixa", real / 1000.0);
     assert!(max < 200.0);

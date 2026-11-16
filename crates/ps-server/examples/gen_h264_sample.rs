@@ -1,13 +1,3 @@
-//! Gera uma amostra H.264 com o codificador do Pi (só Linux) a partir da animação sintética.
-//!
-//! USO: `gen_h264_sample --size LxA --frames N --bitrate BITS --origin X,Y --out ARQUIVO [--first-frame N] [--content anim|bars]`
-//!
-//! Formato do arquivo ("PSH2", inteiros em little-endian):
-//! `"PSH2"`, `u32 largura, altura, quadros, origem x, origem y, primeiro quadro da animação, bitrate,
-//! conteúdo` (0 = animação, 1 = barras de cor), e para cada quadro `u8 flags (bit 0 = quadro-chave)`, `u32 tamanho`, dados Annex B de uma unidade
-//! de acesso. Conteúdo 0: a região codificada é o recorte (largura x altura) em (x, y) de
-//! `ps_codec::testutil::video::render(1280, 720, quadro)`, para o quadro `primeiro + i`. Conteúdo 1:
-//! `ps_codec::testutil::bars::render(largura, altura, quadro)` (a origem não conta).
 
 #[cfg(target_os = "linux")]
 fn main() {

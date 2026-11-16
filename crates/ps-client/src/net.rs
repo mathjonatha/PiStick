@@ -1,8 +1,3 @@
-//! Rede do cliente: tudo que bloqueia fica fora da thread da interface.
-//!
-//! - thread de leitura: lê mensagens, decodifica quadros e avisa a interface por eventos;
-//! - thread de escrita: serializa tudo que a interface e as estatísticas querem enviar;
-//! - thread de estatísticas: PING periódico e linha de estatísticas a cada segundo.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -20,26 +15,19 @@ use crate::registry::{Registry, WinInfo};
 use crate::stats::Stats;
 use crate::video::{open_decoder, VideoDecoder};
 
-/// Quadro decodificado de uma janela remota, compartilhado entre a thread de rede
-/// (que decodifica) e a thread da interface (que apresenta).
 pub struct SharedWindow {
     pub inner: Mutex<WindowBuf>,
 }
 
 pub struct WindowBuf {
     pub decoder: Decoder,
-    /// `seq` dos quadros decodificados e ainda não apresentados; viram FRAME_ACK.
     pub acks: Vec<u32>,
-    /// Estado do vídeo por região, lido pelo roteiro (`verify-video`, `waitvideostart` e afins).
     pub video: VideoState,
-    /// Cópia do último quadro **completo** enquanto um quadro fatiado está em curso e retido (fatias com `MORE`
-    /// ainda sem a última): a janela apresenta esta cópia, e não o `decoder`, que já tem fatias do quadro novo.
     partial: Vec<u8>,
     held: bool,
 }
 
 impl WindowBuf {
-    /// Os pixels que a janela deve mostrar agora (a cópia do último quadro completo, se há quadro fatiado retido).
     pub fn display_pixels(&self) -> &[u8] {
         if self.held {
             &self.partial
@@ -48,7 +36,6 @@ impl WindowBuf {
         }
     }
 
-    /// Começa a reter um quadro fatiado: guarda o quadro completo que está na tela antes de aplicar a fatia.
     fn hold_begin(&mut self) {
         if !self.held {
             self.partial.clear();
@@ -57,12 +44,10 @@ impl WindowBuf {
         }
     }
 
-    /// O quadro fatiado acabou (ou passou a ser apresentado em progresso, ou a janela mudou de tamanho).
     fn hold_end(&mut self) {
         self.held = false;
     }
 
-    /// Escreve um quadro de vídeo decodificado na região; se há quadro retido, também na cópia que a janela mostra.
     fn write_video_region(&mut self, r: Rect, src: &[u8]) {
         self.decoder.write_region(r, src);
         if self.held {
@@ -85,32 +70,25 @@ impl WindowBuf {
     }
 }
 
-/// O que o roteiro precisa saber do vídeo de uma janela (instantes na hora do cliente).
 #[derive(Debug, Clone, Default)]
 pub struct VideoState {
-    /// Fluxo e região ativos (`VIDEO_START` sem `VIDEO_STOP`).
     pub active: Option<(u32, Rect)>,
-    /// Primeiro `FRAME` da janela: a origem dos tempos impressos no log.
     pub first_frame_at: Option<Instant>,
     pub starts: u32,
     pub stops: u32,
     pub start_at: Option<Instant>,
     pub stop_at: Option<Instant>,
     pub last_video_frame_at: Option<Instant>,
-    /// Última vez que os pixels da janela mudaram (`FRAME` ou `VIDEO_FRAME` aplicado).
     pub last_update_at: Option<Instant>,
-    /// `capture_us` (relógio da sessão do servidor) do último quadro, de blocos ou de vídeo.
     pub last_capture_us: Option<u64>,
     pub video_frames: u64,
 }
 
 impl VideoState {
-    /// Segundos de `at` desde o primeiro `FRAME` da janela.
     pub fn rel(&self, at: Instant) -> Option<f64> {
         self.first_frame_at.map(|f| at.saturating_duration_since(f).as_secs_f64())
     }
 
-    /// `rel` formatado para o log.
     pub fn rel_text(&self, at: Instant) -> String {
         self.rel(at).map_or_else(|| "sem-FRAME".to_string(), |t| format!("{t:.2}s"))
     }
@@ -130,7 +108,6 @@ impl VideoState {
         }
     }
 
-    /// Registra o fim do fluxo; devolve o texto de tempo para o log.
     fn stopped(&mut self, now: Instant) -> String {
         self.active = None;
         self.stops += 1;
@@ -145,17 +122,14 @@ impl SharedWindow {
     }
 }
 
-/// Um fluxo de vídeo aberto numa janela: o decodificador e a região que ele preenche.
 struct VideoStream {
     stream: u32,
     rect: Rect,
     decoder: Box<dyn VideoDecoder>,
-    /// Último quadro decodificado (BGRX, só a região).
     buf: Vec<u8>,
     frames: u64,
 }
 
-/// `HashMap<janela, fluxo>` com a remoção condicionada ao identificador do fluxo.
 trait StreamTable {
     fn remove_if_stream(&mut self, win: u32, stream: u32) -> Option<VideoStream>;
 }
@@ -170,50 +144,36 @@ impl StreamTable for HashMap<u32, VideoStream> {
     }
 }
 
-/// Eventos da rede para a interface.
 pub enum UserEvent {
     WinCreate { win: u32, width: u32, height: u32, title: String, shared: Arc<SharedWindow> },
     WinResize { win: u32, width: u32, height: u32 },
     WinTitle { win: u32, title: String },
     WinDestroy { win: u32 },
-    /// Há quadro novo (ou ACK pendente) nesta janela.
     Frame { win: u32, shared: Arc<SharedWindow> },
-    /// Popup (menu ou dica): posição relativa ao conteúdo do pai.
     PopupCreate { win: u32, parent: u32, x: i32, y: i32, width: u32, height: u32, grab: bool, shared: Arc<SharedWindow> },
     PopupMove { win: u32, x: i32, y: i32, width: u32, height: u32 },
     WinParent { win: u32, parent: u32 },
     WinLimits { win: u32, min_w: u32, min_h: u32, max_w: u32, max_h: u32 },
     Cursor { win: u32, shape: CursorShape },
-    /// O roteiro de teste pediu para encerrar.
     Quit,
     Disconnected(String),
-    /// O aparelho se despediu (`GOODBYE`, `CAP_SESSION`): `reason` 1 = outro cliente assumiu a sessão (`text` = nome dele; o
-    /// cliente **não** reconecta sozinho), 2 = o serviço está parando. A conexão acaba logo depois, sem `Disconnected`.
     Goodbye { reason: u8, text: String },
-    /// Estado do aparelho (`STATUS`): bits `STATUS_*` e a temperatura em décimos de grau (`None` = desconhecida).
     Status { flags: u32, temp_dc: Option<i16> },
 }
 
-/// Para onde as threads de rede mandam os [`UserEvent`]: a interface do cliente. O `psc` o implementa com o
-/// `EventLoopProxy` do `winit`; o cliente Android, com uma fila própria. Chamado de várias threads.
 pub trait UiSink: Send + Sync {
-    /// Entrega o evento à interface. `false` quando a interface já terminou (a thread de rede deve parar).
     fn send(&self, ev: UserEvent) -> bool;
 }
 
-/// Microssegundos desde `t0`, o relógio do PING.
 pub fn micros_since(t0: Instant) -> u64 {
     t0.elapsed().as_micros() as u64
 }
 
-/// O que a thread de socket entrega à thread de processamento.
 enum Inbound {
     Msg(Message),
     End(ProtoError),
 }
 
-/// Duas threads: a de socket só lê e trata `PONG` na hora (a medida de latência da conexão não
-/// espera decodificação de quadro); a de processamento decodifica os quadros e avisa a interface.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
@@ -256,7 +216,6 @@ pub fn spawn_reader<R: Read + Send + 'static>(
                 Err(ProtoError::Closed) => "o servidor fechou a conexão".to_string(),
                 Err(e) => e.to_string(),
             };
-            // Depois de um `GOODBYE` a interface já sabe por que a conexão acabou.
             if !despedido {
                 let _ = ui.send(UserEvent::Disconnected(motivo));
             }
@@ -279,18 +238,14 @@ fn process_loop(
     despedido: &mut bool,
 ) -> Result<(), ProtoError> {
     let mut windows: HashMap<u32, Arc<SharedWindow>> = HashMap::new();
-    // Quadro fatiado em curso, por janela (a regra dos 250 ms; só com `CAP_ATOMIC`).
     let mut gates: HashMap<u32, SliceGate> = HashMap::new();
-    // Fluxos de vídeo abertos, por janela (um por vez na conexão, mas a tabela não depende disso).
     let mut streams: HashMap<u32, VideoStream> = HashMap::new();
-    // Falha que derruba a conexão (o transporte é confiável: decodificação com erro é defeito).
     macro_rules! fatal {
         ($($arg:tt)*) => {{
             let _ = ui.send(UserEvent::Disconnected(format!($($arg)*)));
             return Ok(());
         }};
     }
-    // `send` falha só quando a interface já terminou.
     macro_rules! notify {
         ($ev:expr) => {
             if !ui.send($ev) {
@@ -376,7 +331,6 @@ fn process_loop(
                     continue;
                 };
                 let Some(vs) = streams.get_mut(&win).filter(|v| v.stream == stream) else {
-                    // Fluxo desconhecido: descartado e confirmado.
                     let _ = out.send(Message::FrameAck { win, seq });
                     continue;
                 };
@@ -393,7 +347,6 @@ fn process_loop(
                         g.acks.push(seq);
                         g.video.video_frame_arrived(Instant::now(), capture_us, true);
                     }
-                    // A MFT ainda não devolveu quadro (latência do decodificador): confirma mesmo assim.
                     Ok(None) => {
                         let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                         g.acks.push(seq);
@@ -427,7 +380,6 @@ fn process_loop(
                     fatal!("{e}");
                 }
             }
-            // Só o fluxo 1 (microfone) existe; o `Mic` conta o pedido e só captura se foi anunciado.
             Message::AudioRequest { stream: ps_proto::AUDIO_STREAM_MIC, on } => mic.request(on),
             Message::AudioRequest { stream, .. } => println!("[psc] microfone: pedido para o fluxo {stream} desconhecido; ignorado"),
             Message::AudioStop { stream } => {
@@ -437,10 +389,8 @@ fn process_loop(
                 println!("[psc] áudio: fluxo {stream} encerrado pelo servidor");
             }
             Message::WinResize { win, width, height } => {
-                // `WIN_RESIZE` encerra o fluxo de vídeo da janela sem `VIDEO_STOP`.
                 let tinha_fluxo = streams.remove(&win).is_some();
                 if let Some(shared) = windows.get(&win) {
-                    // Zera a referência dos dois lados (o servidor também zerou a dele).
                     let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     g.decoder.reset(width, height);
                     g.hold_end();
@@ -466,7 +416,6 @@ fn process_loop(
             }
             Message::Frame { win, seq, capture_us, width, height, codec, more, data } => {
                 let Some(shared) = windows.get(&win).cloned() else {
-                    // Janela já destruída: confirma mesmo assim para não travar o fluxo.
                     let _ = out.send(Message::FrameAck { win, seq });
                     continue;
                 };
@@ -474,11 +423,8 @@ fn process_loop(
                 let verdict = {
                     let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     let valid = codec == CODEC_BLOCKS && (g.decoder.width(), g.decoder.height()) == (width, height);
-                    // Sem `CAP_ATOMIC` anunciada o servidor nunca marca MORE; quadro de outro tamanho ou de codec
-                    // desconhecido é descartado e confirmado como sempre, sem entrar na regra das fatias.
                     let verdict = if atomic && valid { gates.entry(win).or_default().on_frame(more, now) } else { Verdict::Present };
                     if verdict == Verdict::Hold {
-                        // O quadro que está na tela fica guardado enquanto as fatias do quadro novo chegam.
                         g.hold_begin();
                     } else {
                         g.hold_end();
@@ -494,14 +440,12 @@ fn process_loop(
                         }
                     }
                     if verdict != Verdict::Hold {
-                        // Confirma na apresentação.
                         g.acks.push(seq);
                         g.video.frame_arrived(now, capture_us);
                     }
                     verdict
                 };
                 if verdict == Verdict::Hold {
-                    // Fatia retida: confirma na hora (senão o fluxo trava) e não pede redesenho.
                     stats.acks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = out.send(Message::FrameAck { win, seq });
                     continue;
@@ -522,13 +466,11 @@ fn process_loop(
                 println!("[psc] estado do aparelho: {}", status_text(flags, temp_dc));
                 notify!(UserEvent::Status { flags, temp_dc });
             }
-            // HELLO repetido ou mensagens do sentido cliente -> servidor: ignoradas.
             _ => {}
         }
     }
 }
 
-/// Texto da despedida do aparelho, para o terminal e para a interface.
 pub fn goodbye_text(reason: u8, text: &str) -> String {
     match reason {
         GOODBYE_REPLACED if text.is_empty() => "outro cliente assumiu a sessão".to_string(),
@@ -538,7 +480,6 @@ pub fn goodbye_text(reason: u8, text: &str) -> String {
     }
 }
 
-/// Estado do aparelho em texto, sempre por palavras (nunca só por cor): o que está ligado e a temperatura.
 pub fn status_text(flags: u32, temp_dc: Option<i16>) -> String {
     let mut partes: Vec<String> = Vec::new();
     partes.push(if flags & STATUS_UNDERVOLT_NOW != 0 { "energia fraca agora (subtensão)".into() } else { "energia normal".into() });
@@ -558,7 +499,6 @@ pub fn status_text(flags: u32, temp_dc: Option<i16>) -> String {
     partes.join("; ")
 }
 
-/// Título de uma janela com os avisos de estado do aparelho (por palavras, não só por cor).
 pub fn decorated_title(base: &str, flags: u32) -> String {
     let mut t = base.to_string();
     if flags & STATUS_UNDERVOLT_NOW != 0 {
@@ -573,7 +513,6 @@ pub fn decorated_title(base: &str, flags: u32) -> String {
     t
 }
 
-/// Primeiros caracteres de um texto, para o log.
 fn preview(t: &str) -> String {
     let mut p: String = t.chars().take(60).collect();
     if t.chars().count() > 60 {
@@ -582,7 +521,6 @@ fn preview(t: &str) -> String {
     p
 }
 
-/// Thread de escrita: encerra quando todos os `Sender` somem ou a escrita falha.
 pub fn spawn_writer<W: Write + Send + 'static>(mut writer: W, rx: Receiver<Message>, ui: Arc<dyn UiSink>) {
     std::thread::Builder::new()
         .name("psc-escrita".into())
@@ -597,7 +535,6 @@ pub fn spawn_writer<W: Write + Send + 'static>(mut writer: W, rx: Receiver<Messa
         .expect("criar thread de escrita");
 }
 
-/// PING a cada 250 ms; linha de estatísticas a cada segundo.
 pub fn spawn_stats(out: Sender<Message>, stats: Arc<Stats>, t0: Instant, audio: Option<Arc<AudioEngine>>) {
     std::thread::Builder::new()
         .name("psc-estatisticas".into())
@@ -652,7 +589,6 @@ mod tests {
         px
     }
 
-    /// A interface de teste: uma fila (é o que o cliente Android faz); `send` devolve `false` quando ela some.
     struct FilaSink(Mutex<std::sync::mpsc::Sender<UserEvent>>);
 
     impl UiSink for FilaSink {
@@ -661,8 +597,6 @@ mod tests {
         }
     }
 
-    /// O núcleo de rede fala com qualquer interface pelo `UiSink`, sem `winit`: uma `WIN_CREATE` chega como
-    /// `UserEvent::WinCreate` e o fim da conexão como `Disconnected`.
     #[test]
     fn a_rede_entrega_eventos_a_uma_interface_qualquer() {
         let mut bytes = Vec::new();
@@ -682,8 +616,6 @@ mod tests {
         assert!(matches!(ev_rx.recv_timeout(espera).expect("Disconnected"), UserEvent::Disconnected(_)));
     }
 
-    /// Enquanto um quadro fatiado está retido, a janela mostra o quadro completo anterior, mesmo com fatias do
-    /// quadro novo já decodificadas; a última fatia solta o quadro novo, inteiro.
     #[test]
     fn quadro_retido_mostra_o_anterior_ate_a_ultima_fatia() {
         let (w, h) = (64u32, 192u32);
@@ -695,7 +627,6 @@ mod tests {
         enc.encode(&velho, (w * 4) as usize, None, &mut o);
         g.decoder.decode(&o).unwrap();
         assert_eq!(g.display_pixels(), velho.as_slice());
-        // Três faixas de 64 linhas, uma fatia por faixa.
         let dano = [Rect::new(0, 0, w, h)];
         for faixa in 0..3usize {
             let mut o = Vec::new();
@@ -712,14 +643,12 @@ mod tests {
             }
         }
         assert_eq!(g.display_pixels(), novo.as_slice(), "a última fatia apresenta o quadro novo inteiro");
-        // Quadro de vídeo durante a retenção: entra no que a janela mostra.
         g.hold_begin();
         g.write_video_region(Rect::new(0, 0, 2, 2), &[7u8; 2 * 2 * 4]);
         assert_eq!(&g.display_pixels()[..3], &[7, 7, 7]);
         assert_eq!(g.display_pixels()[3], 0xFF);
     }
 
-    /// Marco 8A: `STATUS` e `GOODBYE` viram eventos para a interface; depois do `GOODBYE` não vem `Disconnected`.
     #[test]
     fn status_e_goodbye_chegam_a_interface_e_depois_do_goodbye_nao_ha_desconexao() {
         let mut bytes = Vec::new();
@@ -737,7 +666,6 @@ mod tests {
         assert!(matches!(ev_rx.recv_timeout(espera).unwrap(), UserEvent::Status { flags, temp_dc: Some(487) } if flags == 9));
         assert!(matches!(ev_rx.recv_timeout(espera).unwrap(), UserEvent::Status { flags: 0, temp_dc: None }));
         assert!(matches!(ev_rx.recv_timeout(espera).unwrap(), UserEvent::Goodbye { reason: 1, text } if text == "outro"));
-        // A thread termina sem mandar `Disconnected` (o que o fim do fluxo de bytes faria).
         assert!(ev_rx.recv_timeout(Duration::from_millis(500)).is_err());
     }
 

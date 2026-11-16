@@ -1,14 +1,3 @@
-//! Captura do microfone no Windows por WASAPI, modo compartilhado, dirigida por evento (marco 7B). Junto do
-//! `wasapi.rs`, é o único arquivo do projeto de áudio com `unsafe` (chamadas COM do `windows`; cada bloco tem o
-//! `// SAFETY:` da sua invariante).
-//!
-//! - **Só é chamado depois de um `AUDIO_REQUEST on=1`** (veja `crate::mic`). Nada aqui abre dispositivo antes disso.
-//! - O formato é pedido sempre em 48 kHz, 16 bits, estéreo, com `AUTOCONVERTPCM` e `SRC_DEFAULT_QUALITY` (as mesmas
-//!   opções da reprodução): o sistema converte taxa e número de canais; um microfone mono sai duplicado nos dois canais.
-//! - **Liberação:** [`run`] só retorna depois de soltar todos os objetos COM (cliente de áudio, cliente de captura,
-//!   enumerador) e fechar o evento; o indicador de microfone em uso do Windows apaga nesse instante. Vale para o fim
-//!   normal (`stop`), para erro e para sessão encerrada.
-//! - Dispositivo perdido no meio (desconectado, invalidado): tenta reabrir a cada segundo enquanto `stop` não vem.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,11 +13,8 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use crate::mic::BLOCK_FRAMES;
 
-/// Buffer pedido ao WASAPI (50 ms, em unidades de 100 ns): folga para o escalonador do sistema.
 const BUFFER_100NS: i64 = 500_000;
 
-/// Um dispositivo de captura aberto e iniciado. O `Drop` o para e fecha o evento; os objetos COM são soltos logo depois,
-/// pelos `Drop` do próprio `windows`.
 struct Capture {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -37,8 +23,6 @@ struct Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // SAFETY: `client` é válido; parar um cliente já parado é inofensivo. `event` foi criado por `CreateEventW`
-        // em `Capture::open` e só é fechado aqui, uma vez (o `Capture` só existe depois do evento criado).
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.event);
@@ -47,16 +31,12 @@ impl Drop for Capture {
 }
 
 impl Capture {
-    /// Abre o microfone padrão. `Err` com o motivo se não há dispositivo de gravação ou ele não abre.
     fn open(enumerator: &IMMDeviceEnumerator) -> Result<Capture, String> {
-        // SAFETY: sequência de chamadas COM sobre objetos recém-criados e válidos. `fmt` vive até depois do
-        // `Initialize`, que copia o formato. O evento criado é entregue ao `Capture` na mesma instrução em que nasce
-        // o objeto, então qualquer erro depois dali o fecha pelo `Drop`.
         unsafe {
             let dev = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).map_err(|e| format!("sem dispositivo de gravação padrão ({e})"))?;
             let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).map_err(|e| format!("não foi possível ativar o dispositivo de gravação ({e})"))?;
             let fmt = WAVEFORMATEX {
-                wFormatTag: 1, // WAVE_FORMAT_PCM
+                wFormatTag: 1,
                 nChannels: 2,
                 nSamplesPerSec: 48_000,
                 nAvgBytesPerSec: 48_000 * 4,
@@ -83,13 +63,7 @@ impl Capture {
         }
     }
 
-    /// Espera o evento (até 20 ms) e acrescenta a `acc` tudo o que o dispositivo já entregou (estéreo S16 intercalado).
-    /// `Err` pede para reabrir.
     fn read(&self, acc: &mut Vec<i16>) -> windows::core::Result<()> {
-        // SAFETY: `event` é um evento válido de propriedade de `self`. `GetBuffer` devolve um ponteiro para `frames`
-        // quadros de 4 bytes (estéreo S16) válido até o `ReleaseBuffer` seguinte; a cópia é feita byte a byte para um
-        // `Vec<i16>` redimensionado antes (sem exigir alinhamento do ponteiro do sistema), com exatamente `frames * 4`
-        // bytes, e o `ReleaseBuffer(frames)` vem logo depois, sem outra chamada ao `capture` no meio.
         unsafe {
             let _ = WaitForSingleObject(self.event, 20);
             loop {
@@ -113,7 +87,6 @@ impl Capture {
     }
 }
 
-/// Entrega de `acc` os pacotes inteiros de 480 quadros a `sink`.
 fn drain_blocks(acc: &mut Vec<i16>, sink: &mut dyn FnMut(&[i16])) {
     let block = BLOCK_FRAMES * 2;
     let mut used = 0;
@@ -124,7 +97,6 @@ fn drain_blocks(acc: &mut Vec<i16>, sink: &mut dyn FnMut(&[i16])) {
     acc.drain(..used);
 }
 
-/// Pausa de até `total` que acorda cedo se `stop` vier.
 fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) {
     let t0 = std::time::Instant::now();
     while t0.elapsed() < total && !stop.load(Ordering::SeqCst) {
@@ -132,9 +104,7 @@ fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) {
     }
 }
 
-/// Todos os objetos COM vivem aqui dentro e são soltos antes de voltar.
 fn run_inner(stop: &AtomicBool, on_open: &mut dyn FnMut(), sink: &mut dyn FnMut(&[i16])) -> Result<(), String> {
-    // SAFETY: criação do enumerador padrão do sistema; COM já está inicializado nesta thread por `run`.
     let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("não foi possível criar o enumerador de dispositivos ({e})"))?;
     let mut announced = false;
     let mut acc: Vec<i16> = Vec::new();
@@ -164,22 +134,16 @@ fn run_inner(stop: &AtomicBool, on_open: &mut dyn FnMut(), sink: &mut dyn FnMut(
             }
             drain_blocks(&mut acc, sink);
         }
-        // `dev` sai de escopo aqui: o cliente de áudio para, o evento fecha e os objetos COM são soltos.
     }
     Ok(())
 }
 
-/// Captura o microfone padrão até `stop`. Chama `on_open` quando o dispositivo abre e `sink` com cada pacote de
-/// 480 quadros estéreo. Só retorna depois de liberar o dispositivo.
 pub fn run(stop: &AtomicBool, on_open: &mut dyn FnMut(), sink: &mut dyn FnMut(&[i16])) -> Result<(), String> {
-    // SAFETY: COM inicializado nesta thread antes de qualquer uso e desinicializado no fim dela, depois de
-    // `run_inner` ter soltado todos os objetos COM.
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if com.is_err() {
         return Err(format!("CoInitializeEx falhou ({com:?})"));
     }
     let result = run_inner(stop, on_open, sink);
-    // SAFETY: par do `CoInitializeEx` acima, na mesma thread; nenhum objeto COM sobrou em `run_inner`.
     unsafe { CoUninitialize() };
     result
 }

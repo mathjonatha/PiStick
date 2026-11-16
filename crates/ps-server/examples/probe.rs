@@ -1,10 +1,3 @@
-//! Sonda do `psd`: cliente do protocolo sem janela, para testes manuais e medições.
-//!
-//! Conecta, decodifica e confirma todos os quadros, e imprime por segundo quantos quadros e
-//! bytes chegaram. Pode pedir redimensionamento e fechamento da primeira janela.
-//!
-//! Uso: `cargo run --release -p ps-server --example probe -- ENDEREÇO [--seconds N]
-//!        [--resize LxA] [--close] [--hold-ack]`
 
 use std::time::{Duration, Instant};
 

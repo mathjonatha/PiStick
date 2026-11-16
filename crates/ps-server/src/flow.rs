@@ -1,26 +1,16 @@
-//! Controle de fluxo do servidor: lógica de decisão pura, sem socket e sem relógio próprio
-//! (o instante é sempre passado de fora). Veja "Controle de fluxo" e "Orçamento de bytes e
-//! prioridade" em `docs/05-protocolo.md`.
-//!
-//! Duas camadas: no máximo [`MAX_FRAMES_PER_WINDOW`] quadros sem confirmação por janela, e um
-//! orçamento de bytes em voo por conexão, calculado a partir da vazão estimada.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 
 use ps_codec::{Rect, BLOCK};
 
-/// Quadros sem confirmação por janela.
 pub const MAX_FRAMES_PER_WINDOW: usize = 2;
 pub const MIN_BUDGET: usize = 64 * 1024;
 pub const MAX_BUDGET: usize = 8 * 1024 * 1024;
-/// O orçamento é a vazão estimada multiplicada por este tempo.
 pub const BUDGET_SECONDS: f64 = 0.060;
 pub const INITIAL_THROUGHPUT: f64 = 4.0 * 1024.0 * 1024.0;
-/// Só quadros maiores que isto servem para estimar a vazão (os menores medem latência).
 pub const SAMPLE_MIN_BYTES: usize = 16 * 1024;
 const EMA_ALPHA: f64 = 0.25;
-/// Estimativa de bytes por bloco codificado enquanto uma janela ainda não tem histórico.
 const DEFAULT_BYTES_PER_BLOCK: f64 = 4096.0;
 
 struct InFlight {
@@ -31,28 +21,22 @@ struct InFlight {
 
 struct WinFlow {
     id: u32,
-    /// Janela mãe de um popup (0 = é uma janela raiz).
     parent: u32,
     frames: VecDeque<InFlight>,
     last_sent_us: u64,
     bytes_per_block: f64,
 }
 
-/// Uma janela com dano pendente que quer enviar um quadro.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Candidate {
     pub win: u32,
-    /// Blocos que o quadro vai codificar, no máximo (blocos tocados pelo dano).
     pub pending_blocks: usize,
-    /// `false` quando o quadro não pode ter SKIP: o primeiro depois da criação ou de `WIN_RESIZE`.
     pub can_slice: bool,
 }
 
-/// O que enviar agora.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pick {
     pub win: u32,
-    /// `Some(bytes)`: enviar só uma fatia de cerca de `bytes` bytes codificados.
     pub slice_bytes: Option<usize>,
 }
 
@@ -64,8 +48,6 @@ pub struct Flow {
 }
 
 impl Flow {
-    /// `initial_throughput` em bytes por segundo. Com `adaptive = false` a estimativa nunca muda
-    /// (testes e medições controladas).
     pub fn new(initial_throughput: f64, adaptive: bool) -> Self {
         Flow { throughput: initial_throughput, adaptive, focus: None, wins: Vec::new() }
     }
@@ -76,14 +58,12 @@ impl Flow {
         }
     }
 
-    /// Registra o pai de um popup: para a prioridade, ele herda o foco da janela raiz.
     pub fn set_parent(&mut self, id: u32, parent: u32) {
         if let Some(w) = self.wins.iter_mut().find(|w| w.id == id) {
             w.parent = parent;
         }
     }
 
-    /// Janela raiz da cadeia de `id`.
     fn root_of(&self, id: u32) -> u32 {
         let mut cur = id;
         for _ in 0..16 {
@@ -102,12 +82,10 @@ impl Flow {
         }
     }
 
-    /// A janela que acabou de receber `FOCUS` com `focused = 1`.
     pub fn set_focus(&mut self, id: u32) {
         self.focus = Some(id);
     }
 
-    /// `FOCUS` com `focused = 0`: tira a prioridade se era essa janela que a tinha.
     pub fn clear_focus(&mut self, id: u32) {
         if self.focus == Some(id) {
             self.focus = None;
@@ -118,7 +96,6 @@ impl Flow {
         self.throughput
     }
 
-    /// Orçamento de bytes em voo, de todas as janelas.
     pub fn budget(&self) -> usize {
         ((self.throughput * BUDGET_SECONDS) as usize).clamp(MIN_BUDGET, MAX_BUDGET)
     }
@@ -131,12 +108,10 @@ impl Flow {
         self.wins.iter().find(|w| w.id == win).map_or(0, |w| w.frames.len())
     }
 
-    /// Estimativa de bytes por bloco codificado da janela (para fatiar).
     pub fn bytes_per_block(&self, win: u32) -> f64 {
         self.wins.iter().find(|w| w.id == win).map_or(DEFAULT_BYTES_PER_BLOCK, |w| if w.bytes_per_block > 0.0 { w.bytes_per_block } else { DEFAULT_BYTES_PER_BLOCK })
     }
 
-    /// Registra o resultado de uma codificação, para estimar o tamanho dos próximos quadros.
     pub fn record_encoded(&mut self, win: u32, coded_blocks: usize, bytes: usize) {
         if coded_blocks == 0 {
             return;
@@ -154,20 +129,17 @@ impl Flow {
         }
     }
 
-    /// `FRAME_ACK`: tira o quadro do ar e, se for grande, atualiza a vazão estimada.
     pub fn on_ack(&mut self, win: u32, seq: u32, now_us: u64) {
         let Some(w) = self.wins.iter_mut().find(|w| w.id == win) else { return };
         let Some(pos) = w.frames.iter().position(|f| f.seq == seq) else { return };
         let Some(f) = w.frames.remove(pos) else { return };
         if self.adaptive && f.bytes > SAMPLE_MIN_BYTES {
-            let dt = (now_us.saturating_sub(f.sent_us)).max(1000) as f64 / 1e6; // no mínimo 1 ms
+            let dt = (now_us.saturating_sub(f.sent_us)).max(1000) as f64 / 1e6;
             let sample = f.bytes as f64 / dt;
             self.throughput = (1.0 - EMA_ALPHA) * self.throughput + EMA_ALPHA * sample;
         }
     }
 
-    /// Escolhe o próximo quadro a enviar, ou `None` se nada pode sair agora.
-    /// Ordem: janela com foco, depois quem está há mais tempo sem enviar.
     pub fn decide(&self, cands: &[Candidate]) -> Option<Pick> {
         let budget = self.budget();
         let total = self.in_flight_bytes();
@@ -191,8 +163,6 @@ impl Flow {
             if total + est <= budget {
                 return Some(Pick { win: c.win, slice_bytes });
             }
-            // Exceção de progresso: a janela está parada e nenhuma outra tem um quadro maior que o
-            // orçamento em voo; sem isso um quadro maior que o orçamento nunca sairia.
             let others_big = self.wins.iter().filter(|o| o.id != c.win).flat_map(|o| o.frames.iter()).any(|f| f.bytes > budget);
             if w.frames.is_empty() && !others_big {
                 return Some(Pick { win: c.win, slice_bytes });
@@ -202,10 +172,6 @@ impl Flow {
     }
 }
 
-/// Escolhe o intervalo de faixas de uma fatia. Começa na primeira faixa suja a partir de `cursor`
-/// (volta ao início se não houver), para que o fim do quadro nunca fique sem vez quando o dano
-/// do começo se renova a cada tick. Cresce até a estimativa de bytes alcançar `target_bytes`,
-/// com pelo menos uma faixa. Intervalo vazio se não há dano.
 pub fn plan_slice(strip_dirty: &[usize], cursor: usize, bytes_per_block: f64, target_bytes: usize) -> Range<usize> {
     let n = strip_dirty.len();
     let start = (cursor.min(n)..n).chain(0..cursor.min(n)).find(|&i| strip_dirty[i] > 0);
@@ -222,7 +188,6 @@ pub fn plan_slice(strip_dirty: &[usize], cursor: usize, bytes_per_block: f64, ta
     start..end
 }
 
-/// Remove do dano pendente a banda de linhas `y0..y1` (as faixas que acabaram de ser enviadas).
 pub fn subtract_band(rects: &mut Vec<Rect>, y0: u32, y1: u32) {
     let mut out = Vec::with_capacity(rects.len() + 2);
     for r in rects.drain(..) {
@@ -241,7 +206,6 @@ pub fn subtract_band(rects: &mut Vec<Rect>, y0: u32, y1: u32) {
     *rects = out;
 }
 
-/// Linhas de pixels cobertas pelas faixas `strips`.
 pub fn strip_rows(strips: &Range<usize>) -> (u32, u32) {
     ((strips.start * BLOCK) as u32, (strips.end * BLOCK) as u32)
 }
@@ -277,7 +241,7 @@ mod tests {
     fn janela_parada_com_quadro_pequeno_sai() {
         let f = flow2();
         let mut f = f;
-        f.record_encoded(1, 10, 10 * 100); // 100 B por bloco
+        f.record_encoded(1, 10, 10 * 100);
         assert_eq!(f.decide(&[cand(1, 10)]), Some(Pick { win: 1, slice_bytes: None }));
     }
 
@@ -285,16 +249,11 @@ mod tests {
     fn orcamento_e_respeitado() {
         let mut f = flow2();
         let budget = f.budget();
-        // A janela 2 já tem um quadro quase do tamanho do orçamento em voo.
         f.on_sent(2, 0, budget - 1000, 0);
-        f.record_encoded(1, 1, 2000); // 2000 B por bloco: 1 bloco = 2000 B > 1000 B livres
-        // A janela 1 está parada (sem quadro em voo), mas a exceção de progresso só vale se nenhuma
-        // outra janela tiver um quadro MAIOR que o orçamento: aqui não tem, então ela sai.
+        f.record_encoded(1, 1, 2000);
         assert!(f.decide(&[cand(1, 1)]).is_some());
-        // Com a janela 1 já tendo um quadro em voo, não há exceção e o orçamento barra.
         f.on_sent(1, 0, 10, 0);
         assert_eq!(f.decide(&[cand(1, 1)]), None);
-        // Um quadro menor que a folga passa.
         for _ in 0..11 {
             f.record_encoded(1, 1, 100);
         }
@@ -306,17 +265,13 @@ mod tests {
     fn excecao_de_progresso() {
         let mut f = flow2();
         let budget = f.budget();
-        f.record_encoded(1, 1, budget * 3); // um quadro estimado em 3 orçamentos
-        // Tudo parado: sai mesmo estourando (fatiado, pois passa da metade e pode fatiar).
+        f.record_encoded(1, 1, budget * 3);
         let p = f.decide(&[cand(1, 1)]).expect("progresso");
         assert_eq!(p, Pick { win: 1, slice_bytes: Some(budget / 2) });
-        // Não fatiável: sai inteiro, também por progresso.
         let c = Candidate { win: 1, pending_blocks: 1, can_slice: false };
         assert_eq!(f.decide(&[c]), Some(Pick { win: 1, slice_bytes: None }));
-        // Outra janela com quadro MAIOR que o orçamento em voo: a exceção deixa de valer.
         f.on_sent(2, 0, budget + 1, 0);
         assert_eq!(f.decide(&[c]), None);
-        // Depois da confirmação volta a valer.
         f.on_ack(2, 0, 1_000_000);
         assert!(f.decide(&[c]).is_some());
     }
@@ -334,14 +289,11 @@ mod tests {
     #[test]
     fn janela_com_foco_passa_na_frente() {
         let mut f = flow2();
-        f.on_sent(1, 0, 10, 100); // janela 1 enviou por último
+        f.on_sent(1, 0, 10, 100);
         f.on_ack(1, 0, 200);
-        // Sem foco: vence quem está há mais tempo sem enviar (a janela 2, last_sent = 0).
         assert_eq!(f.decide(&[cand(1, 1), cand(2, 1)]).unwrap().win, 2);
-        // Com foco na 1: ela passa na frente.
         f.set_focus(1);
         assert_eq!(f.decide(&[cand(1, 1), cand(2, 1)]).unwrap().win, 1);
-        // O foco só decide a ordem: se a focada não cabe, a outra pode sair.
         f.on_sent(1, 1, 10, 300);
         f.on_sent(1, 2, 10, 300);
         assert_eq!(f.decide(&[cand(1, 1), cand(2, 1)]).unwrap().win, 2);
@@ -350,20 +302,17 @@ mod tests {
     #[test]
     fn popup_herda_o_foco_da_janela_raiz() {
         let mut f = flow2();
-        f.add_window(3, 0); // popup da janela 1
+        f.add_window(3, 0);
         f.set_parent(3, 1);
-        f.add_window(4, 0); // popup do popup (submenu)
+        f.add_window(4, 0);
         f.set_parent(4, 3);
         f.on_sent(1, 0, 10, 100);
         f.on_ack(1, 0, 200);
-        // Sem foco: vence quem está há mais tempo sem enviar; o foco na raiz (1) leva os popups dela junto.
         f.set_focus(1);
         assert_eq!(f.decide(&[cand(2, 1), cand(3, 1)]).unwrap().win, 3);
         assert_eq!(f.decide(&[cand(2, 1), cand(4, 1)]).unwrap().win, 4);
-        // `FOCUS 0` da raiz tira a prioridade de toda a cadeia.
         f.clear_focus(1);
         assert_eq!(f.decide(&[cand(2, 1), cand(3, 1)]).unwrap().win, 2);
-        // Um `FOCUS 0` de outra janela não mexe no foco atual.
         f.set_focus(2);
         f.clear_focus(1);
         assert_eq!(f.decide(&[cand(2, 1), cand(3, 1)]).unwrap().win, 2);
@@ -385,12 +334,11 @@ mod tests {
         let mut f = flow2();
         let antes = f.throughput();
         f.on_sent(1, 0, 4 * KIB, 0);
-        f.on_ack(1, 0, 500_000); // lento, mas pequeno: não conta
+        f.on_ack(1, 0, 500_000);
         assert_eq!(f.throughput(), antes);
         f.on_sent(1, 1, 1024 * KIB, 0);
-        f.on_ack(1, 1, 1_000_000); // 1 MiB em 1 s = 1 MiB/s
+        f.on_ack(1, 1, 1_000_000);
         assert!(f.throughput() < antes && f.throughput() > 1.0 * 1024.0 * 1024.0);
-        // Não adaptativo: não muda.
         let mut g = Flow::new(INITIAL_THROUGHPUT, false);
         g.add_window(1, 0);
         g.on_sent(1, 0, 1024 * KIB, 0);
@@ -413,20 +361,15 @@ mod tests {
     fn plan_slice_percorre_o_quadro_sem_deixar_faixas_sem_vez() {
         let dirty = [4usize, 4, 0, 4, 4, 4];
         let bpb = 100.0;
-        // Alvo de 800 B: duas faixas sujas por fatia.
         let a = plan_slice(&dirty, 0, bpb, 800);
         assert_eq!(a, 0..2);
         let b = plan_slice(&dirty, a.end, bpb, 800);
-        assert_eq!(b, 3..5); // a faixa 2 não tem dano: a fatia começa na próxima suja
+        assert_eq!(b, 3..5);
         let c = plan_slice(&dirty, b.end, bpb, 800);
         assert_eq!(c, 5..6);
-        // Cursor no fim: volta ao começo.
         assert_eq!(plan_slice(&dirty, 6, bpb, 800), 0..2);
-        // Sempre ao menos uma faixa, mesmo com alvo minúsculo.
         assert_eq!(plan_slice(&dirty, 0, bpb, 1), 0..1);
-        // Sem dano, nada.
         assert_eq!(plan_slice(&[0, 0, 0], 1, bpb, 800), 0..0);
-        // Cursor numa faixa sem dano pula para a próxima suja.
         assert_eq!(plan_slice(&dirty, 2, bpb, 100), 3..4);
     }
 
@@ -437,8 +380,6 @@ mod tests {
         assert_eq!(r, vec![Rect::new(0, 0, 10, 64), Rect::new(0, 128, 10, 72), Rect::new(5, 300, 4, 4)]);
     }
 
-    /// Fatiamento completo: fatias escolhidas pelo planejador, codificadas com `encode_range`,
-    /// o dano removido a cada passo, aplicadas em sequência no Decoder: o resultado é o quadro novo.
     #[test]
     fn fatias_do_planejador_reproduzem_o_quadro_inteiro() {
         let (w, h) = (300usize, 500usize);

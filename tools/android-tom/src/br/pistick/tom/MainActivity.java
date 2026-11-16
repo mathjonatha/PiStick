@@ -8,12 +8,6 @@ import android.media.AudioTrack;
 import android.os.Bundle;
 import android.widget.TextView;
 
-/**
- * Toca um tom por AudioTrack: 440 Hz no canal esquerdo e 880 Hz no direito, amplitude 0,25 (o mesmo sinal do
- * gerador sintético do psd e do clipe som-720p30.mp4), em PCM de 16 bits, 48 kHz, por 60 s. Começa ao abrir
- * e para ao fechar a janela. Põe o volume de mídia no máximo ao abrir. Nada além de AudioTrack e AudioManager: sem
- * permissões e sem arquivos.
- */
 public class MainActivity extends Activity {
     private static final int TAXA = 48000;
     private static final double AMPLITUDE = 0.25;
@@ -29,8 +23,6 @@ public class MainActivity extends Activity {
         t.setText("Tom PiStick: 440 Hz (esquerda) e 880 Hz (direita)");
         t.setTextSize(20f);
         setContentView(t);
-        // Volume de mídia no máximo (um app comum pode mudar o STREAM_MUSIC): num Android recém-instalado o padrão é
-        // baixo (a amplitude 0,25 sairia 0,006) e o roteiro de som precisa do sinal inteiro.
         AudioManager am = getSystemService(AudioManager.class);
         am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0);
         fio = new Thread(this::tocar, "tom");
@@ -54,7 +46,6 @@ public class MainActivity extends Activity {
                 .build();
         faixa.setVolume(1.0f);
         faixa.play();
-        // Blocos de 20 ms; a fase continua de um bloco para o outro.
         short[] bloco = new short[TAXA / 50 * 2];
         long n = 0;
         long total = (long) TAXA * SEGUNDOS;

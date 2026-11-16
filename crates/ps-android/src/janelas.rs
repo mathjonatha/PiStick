@@ -1,16 +1,6 @@
-//! Quais janelas remotas existem, qual está em foco e quais são as abas (docs/26, decisão 5). Lógica pura.
-//!
-//! O celular mostra **uma janela de nível superior por vez**, com os popups dela por cima; as outras aparecem como
-//! abas. Regras:
-//! - uma janela nova de nível superior ganha o foco na hora (um diálogo "Salvar como" aparece em foco);
-//! - ao fechar a janela em foco, o foco volta à anterior (a que estava em foco antes dela, que ainda existe);
-//! - fechar uma janela que não está em foco não muda o foco;
-//! - um popup pertence à janela de nível superior de que descende; só os popups da janela em foco são mostrados;
-//! - fechar uma janela fecha os popups dela.
 
 use std::collections::HashMap;
 
-/// Limites de tamanho que o servidor informa (`WIN_LIMITS`); zero = sem limite.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Limites {
     pub min_w: u32,
@@ -31,7 +21,6 @@ struct Entrada {
     titulo: String,
 }
 
-/// Um popup visível, com a posição **absoluta** (relativa à janela de nível superior) e o tamanho.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PopupVisivel {
     pub id: u32,
@@ -42,12 +31,10 @@ pub struct PopupVisivel {
     pub h: u32,
 }
 
-/// O que uma mudança fez com o foco e com a lista de abas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mudanca {
     pub foco_antes: Option<u32>,
     pub foco_depois: Option<u32>,
-    /// A lista de abas ou o título de alguma mudou.
     pub abas: bool,
 }
 
@@ -59,9 +46,7 @@ impl Mudanca {
 
 #[derive(Debug, Default)]
 pub struct Janelas {
-    /// Todas as janelas e popups vivos, na ordem de criação.
     entradas: Vec<Entrada>,
-    /// Janelas de nível superior, a mais recente em foco no fim.
     pilha: Vec<u32>,
     limites: HashMap<u32, Limites>,
 }
@@ -75,7 +60,6 @@ impl Janelas {
         self.entradas.iter().position(|e| e.id == id)
     }
 
-    /// A janela de nível superior em foco.
     pub fn foco(&self) -> Option<u32> {
         self.pilha.last().copied()
     }
@@ -84,11 +68,9 @@ impl Janelas {
         Mudanca { foco_antes: antes, foco_depois: self.foco(), abas }
     }
 
-    /// Janela de nível superior nova: ganha o foco.
     pub fn criar(&mut self, id: u32, w: u32, h: u32, titulo: &str) -> Mudanca {
         let antes = self.foco();
         if let Some(i) = self.idx(id) {
-            // Id repetido (o servidor não deveria): substitui.
             self.entradas.remove(i);
             self.pilha.retain(|&p| p != id);
         }
@@ -97,7 +79,6 @@ impl Janelas {
         self.mudanca(antes, true)
     }
 
-    /// Popup novo: `x, y` relativos ao conteúdo da mãe. Mãe desconhecida: ignorado.
     pub fn criar_popup(&mut self, id: u32, parent: u32, x: i32, y: i32, w: u32, h: u32) -> bool {
         if self.idx(parent).is_none() {
             return false;
@@ -143,13 +124,11 @@ impl Janelas {
         self.limites.get(&id).copied().unwrap_or_default()
     }
 
-    /// Fecha a janela (ou o popup) e tudo que descende dela. Se era a janela em foco, o foco volta à anterior.
     pub fn destruir(&mut self, id: u32) -> Mudanca {
         let antes = self.foco();
         if self.idx(id).is_none() {
             return self.mudanca(antes, false);
         }
-        // A janela e os descendentes (popups e filhos de popups), em qualquer ordem de criação.
         let mut mortos = vec![id];
         loop {
             let novos: Vec<u32> = self.entradas.iter().filter(|e| mortos.contains(&e.parent) && !mortos.contains(&e.id)).map(|e| e.id).collect();
@@ -167,7 +146,6 @@ impl Janelas {
         self.mudanca(antes, era_aba)
     }
 
-    /// Passa o foco a uma janela de nível superior (toque numa aba). Devolve a mudança (sem efeito se não existe).
     pub fn focar(&mut self, id: u32) -> Mudanca {
         let antes = self.foco();
         if self.pilha.contains(&id) {
@@ -177,7 +155,6 @@ impl Janelas {
         self.mudanca(antes, false)
     }
 
-    /// As abas: janelas de nível superior na ordem de criação, com o título.
     pub fn abas(&self) -> Vec<(u32, String)> {
         self.entradas.iter().filter(|e| !e.popup).map(|e| (e.id, e.titulo.clone())).collect()
     }
@@ -186,7 +163,6 @@ impl Janelas {
         self.idx(id).map(|i| (self.entradas[i].w, self.entradas[i].h))
     }
 
-    /// A janela de nível superior de que `id` descende (ela mesma se já é de nível superior).
     pub fn raiz_de(&self, id: u32) -> Option<u32> {
         let mut atual = id;
         for _ in 0..32 {
@@ -200,8 +176,6 @@ impl Janelas {
         None
     }
 
-    /// Os popups da janela `raiz` (a mãe direta ou ancestral), na ordem de criação (a de empilhamento), com a
-    /// posição absoluta em relação à janela raiz.
     pub fn popups_de(&self, raiz: u32) -> Vec<PopupVisivel> {
         let mut abs: HashMap<u32, (i32, i32)> = HashMap::new();
         abs.insert(raiz, (0, 0));
@@ -239,8 +213,8 @@ mod tests {
         j.criar(1, 10, 10, "a");
         j.criar(2, 10, 10, "b");
         j.criar(3, 10, 10, "c");
-        j.focar(1); // a ordem de foco agora é 2, 3, 1
-        j.criar(4, 10, 10, "d"); // 2, 3, 1, 4
+        j.focar(1);
+        j.criar(4, 10, 10, "d");
         let m = j.destruir(4);
         assert_eq!(m.foco_depois, Some(1), "volta a que estava em foco antes");
         let m = j.destruir(1);
@@ -260,7 +234,6 @@ mod tests {
         let m = j.destruir(1);
         assert!(!m.foco_mudou() && m.abas);
         assert_eq!(j.foco(), Some(2));
-        // Fechar o que não existe não faz nada.
         let m = j.destruir(99);
         assert!(!m.foco_mudou() && !m.abas);
     }
@@ -275,7 +248,6 @@ mod tests {
         let m = j.focar(77);
         assert!(!m.foco_mudou());
         assert_eq!(j.foco(), Some(1));
-        // As abas continuam na ordem de criação, não na de foco.
         assert_eq!(j.abas().iter().map(|a| a.0).collect::<Vec<_>>(), vec![1, 2]);
     }
 
@@ -290,15 +262,12 @@ mod tests {
         assert_eq!(j.raiz_de(11), Some(1));
         assert_eq!(j.raiz_de(2), Some(2));
         assert_eq!(j.raiz_de(999), None);
-        // Posição absoluta: o filho soma a do pai.
         assert_eq!(j.popups_de(1), vec![PopupVisivel { id: 10, parent: 1, x: 5, y: 6, w: 50, h: 40 }, PopupVisivel { id: 11, parent: 10, x: 25, y: 36, w: 10, h: 10 }]);
         assert!(j.popups_de(2).is_empty(), "os popups da janela 1 não aparecem na 2");
         j.mover_popup(10, 1, 1, 60, 45);
         assert_eq!(j.popups_de(1)[0], PopupVisivel { id: 10, parent: 1, x: 1, y: 1, w: 60, h: 45 });
-        // Fechar o popup mãe leva o filho junto.
         j.destruir(10);
         assert!(j.popups_de(1).is_empty());
-        // Fechar a janela leva os popups.
         j.criar_popup(13, 1, 0, 0, 5, 5);
         let m = j.destruir(1);
         assert!(m.abas);

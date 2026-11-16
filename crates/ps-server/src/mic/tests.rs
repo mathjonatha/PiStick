@@ -9,9 +9,6 @@ use ps_audio::{encode, samples_to_pcm, synth};
 
 use super::*;
 
-// Saída real de `pw-link --links --monitor` no Pi (PipeWire 1.4.2) com um `pw-record --target pistick-mic` já
-// gravando quando o monitor abre (despejo com `=`), depois um segundo gravador com o mesmo nome entra e o primeiro
-// sai. As linhas `+ pw-record:monitor_FL` são portas e não ligações.
 const DESPEJO: &str = "\
 = pistick-mic:capture_FL
 =   |-> pw-record:input_FL
@@ -51,7 +48,6 @@ fn despejo_inicial_com_gravador_conta_como_gravando() {
     assert!(t.recording());
     assert_eq!(t.consumers(), vec!["pw-record".to_string()]);
     assert!(mudou.contains(&true));
-    // O lado de entrada do despejo (`|<-`) não conta a mesma ligação duas vezes.
     assert_eq!(t.counts.values().sum::<u32>(), 2);
 }
 
@@ -64,7 +60,6 @@ fn dois_gravadores_com_o_mesmo_nome_so_apagam_um_por_vez() {
     alimenta(&mut t, PRIMEIRO_SAI);
     assert!(t.recording(), "o segundo gravador continua ligado");
     assert_eq!(t.counts.values().sum::<u32>(), 2);
-    // O segundo sai também.
     alimenta(&mut t, PRIMEIRO_SAI);
     assert!(!t.recording());
     assert!(t.consumers().is_empty());
@@ -73,7 +68,6 @@ fn dois_gravadores_com_o_mesmo_nome_so_apagam_um_por_vez() {
 #[test]
 fn portas_e_outras_ligacoes_nao_contam() {
     let mut t = LinkTracker::new();
-    // A saída de som (pistick) e a escrita do soquete não são gravação do microfone.
     for l in [
         "+ pistick:monitor_FL",
         "+ pistick:monitor_FL -> pistick-saida:input_FL",
@@ -97,7 +91,6 @@ fn nomes_com_espacos_e_crlf_funcionam() {
     assert_eq!(t.consumers(), vec!["Chromium input".to_string()]);
     assert!(t.feed_line("- pistick-mic:capture_FL -> Chromium input:input_FL\r"));
     assert!(!t.recording());
-    // Remover o que não existe não quebra nada.
     assert!(!t.feed_line("- pistick-mic:capture_FL -> Chromium input:input_FL"));
 }
 
@@ -107,7 +100,6 @@ fn reset_esquece_o_estado() {
     alimenta(&mut t, DESPEJO);
     t.reset();
     assert!(!t.recording());
-    // O cabeçalho do despejo também foi esquecido: uma linha `|->` solta não conta.
     assert!(!t.feed_line("=   |-> pw-record:input_FL"));
 }
 
@@ -126,8 +118,6 @@ fn analisador_aguenta_entrada_arbitraria() {
     }
 }
 
-// --- porta dos pedidos ---------------------------------------------------------------------------------------------
-
 #[test]
 fn porta_liga_na_hora_e_desliga_depois_da_espera() {
     let t0 = Instant::now();
@@ -135,11 +125,9 @@ fn porta_liga_na_hora_e_desliga_depois_da_espera() {
     assert_eq!(g.update(false, t0), None);
     assert_eq!(g.update(true, t0), Some(true));
     assert_eq!(g.update(true, t0 + Duration::from_secs(1)), None);
-    // Some o gravador: ainda não desliga.
     assert_eq!(g.update(false, t0 + Duration::from_secs(2)), None);
     assert_eq!(g.next_deadline(), Some(t0 + Duration::from_secs(2) + OFF_DELAY));
     assert_eq!(g.update(false, t0 + Duration::from_secs(2) + OFF_DELAY - Duration::from_millis(1)), None);
-    // Voltou antes do prazo (um app que reabre o dispositivo): nada a fazer, e o prazo zera.
     assert_eq!(g.update(true, t0 + Duration::from_secs(2) + Duration::from_millis(300)), None);
     assert_eq!(g.next_deadline(), None);
     assert_eq!(g.update(false, t0 + Duration::from_secs(3)), None);
@@ -149,9 +137,6 @@ fn porta_liga_na_hora_e_desliga_depois_da_espera() {
     assert_eq!(g.update(true, t0 + Duration::from_secs(9)), Some(true));
 }
 
-// --- fila de jitter, com relógio simulado ------------------------------------------------------------------------
-
-/// A maior parte dos testes usa o máximo de 150 ms (`psd --mic-max-ms 150`), com o qual os números ficam redondos.
 fn nova() -> MicQueue {
     MicQueue::with_max_ms(150)
 }
@@ -160,7 +145,6 @@ fn bloco_de(valor: i16) -> Vec<i16> {
     vec![valor; BLOCK_FRAMES * CHANNELS]
 }
 
-/// Enche a fila com `n` blocos de uma vez no instante 0 (o alvo inicial é de 150 ms: com 15 blocos ela começa a tocar).
 fn fila_cheia(n: u64) -> MicQueue {
     let mut q = nova();
     for _ in 0..n {
@@ -175,7 +159,6 @@ fn fila_constante_nao_esvazia_nem_descarta_e_o_atraso_do_comeco_encolhe_aos_pouc
     let mut out = vec![0i16; BLOCK_FRAMES * CHANNELS];
     let mut cheios = 0;
     for i in 1..=6000u64 {
-        // Um pacote a cada 10 ms, exatos; a escrita lê a cada 10 ms, logo depois da chegada.
         q.push(&bloco_de(1000), i * 10_000);
         if q.pop_block(&mut out) == Pop::Full {
             cheios += 1;
@@ -188,7 +171,6 @@ fn fila_constante_nao_esvazia_nem_descarta_e_o_atraso_do_comeco_encolhe_aos_pouc
     assert!(s.skipped_frames > 0, "o excesso do começo foi consumido aos poucos");
     assert!(q.target_ms() <= 30.0, "alvo {}", q.target_ms());
     assert!(q.level_ms() <= 40.0, "nível {}", q.level_ms());
-    // Durante os 6 s de aquecimento o alvo não desce de 150 ms e nada é consumido a mais.
     let mut q = nova();
     for i in 0..550u64 {
         q.push(&bloco_de(1), i * 10_000);
@@ -202,7 +184,6 @@ fn fila_sem_dados_entrega_silencio_e_espera_encher_ate_o_alvo() {
     let mut out = vec![7i16; BLOCK_FRAMES * CHANNELS];
     assert_eq!(q.pop_block(&mut out), Pop::Silence);
     assert!(out.iter().all(|&s| s == 0));
-    // Abaixo do alvo inicial (150 ms) a fila só entrega silêncio.
     for i in 0..14u64 {
         q.push(&bloco_de(500), i * 10_000);
         assert_eq!(q.pop_block(&mut out), Pop::Silence, "bloco {i}");
@@ -219,12 +200,10 @@ fn fila_esvaziada_completa_com_zeros_e_reenche() {
     for _ in 0..15 {
         assert_eq!(q.pop_block(&mut out), Pop::Full);
     }
-    // Esvaziou: nenhum dado novo. O próximo é silêncio puro (a fila voltou a encher), não repete lixo.
     assert_eq!(q.pop_block(&mut out), Pop::Underrun);
     assert!(out.iter().all(|&s| s == 0));
     assert_eq!(q.stats().underruns, 1);
     assert_eq!(q.pop_block(&mut out), Pop::Silence);
-    // Meio bloco sobrando é entregue com zeros no fim.
     let mut q = fila_cheia(15);
     q.push(&vec![9i16; 240 * CHANNELS], 0);
     for _ in 0..15 {
@@ -238,13 +217,11 @@ fn fila_esvaziada_completa_com_zeros_e_reenche() {
 #[test]
 fn fila_descarta_o_excesso_acima_do_alvo() {
     let mut q = nova();
-    // Rajada: 30 blocos (300 ms) de uma vez.
     for i in 0..30u64 {
         q.push(&bloco_de(i as i16), i * 100);
     }
     assert!(q.level_ms() <= 200.0, "nível {}", q.level_ms());
     assert!(q.stats().dropped_frames > 0);
-    // O que sobrou é o mais novo: o último bloco com som é o 29, e o primeiro é bem mais novo que o 0.
     let mut out = vec![0i16; BLOCK_FRAMES * CHANNELS];
     let mut primeiro = None;
     let mut maior = -1;
@@ -256,7 +233,6 @@ fn fila_descarta_o_excesso_acima_do_alvo() {
     assert!(primeiro.unwrap() >= 9, "primeiro bloco entregue {primeiro:?}");
 }
 
-/// Passa `segundos` de chegadas regulares (um bloco a cada 10 ms, lido logo depois) a partir de `t`.
 fn regular(q: &mut MicQueue, t: &mut u64, segundos: u64) {
     let mut out = vec![0i16; BLOCK_FRAMES * CHANNELS];
     for _ in 0..segundos * 100 {
@@ -270,11 +246,9 @@ fn regular(q: &mut MicQueue, t: &mut u64, segundos: u64) {
 fn alvo_sobe_com_o_jitter_e_desce_depois() {
     let mut q = nova();
     let mut t = 0u64;
-    // 8 s regulares: acabou o aquecimento e o alvo desceu ao mínimo.
     regular(&mut q, &mut t, 8);
     let calmo = q.target_ms();
     assert!(calmo <= 30.0, "alvo calmo {calmo}");
-    // Um atraso de 60 ms seguido de rajada.
     t += 60_000;
     for _ in 0..7 {
         q.push(&bloco_de(1), t);
@@ -282,7 +256,6 @@ fn alvo_sobe_com_o_jitter_e_desce_depois() {
     let agitado = q.target_ms();
     assert!(agitado >= 60.0, "alvo agitado {agitado}");
     assert!(agitado <= QUEUE_MAX_MS as f64);
-    // Passam 35 s regulares: a janela de 30 s esquece o susto.
     regular(&mut q, &mut t, 35);
     assert!(q.target_ms() <= 40.0, "alvo depois {}", q.target_ms());
     assert!(q.target_ms() >= QUEUE_MIN_MS as f64);
@@ -292,16 +265,13 @@ fn alvo_sobe_com_o_jitter_e_desce_depois() {
 fn depois_de_uma_rajada_a_fila_volta_ao_alvo_sem_descarte_nem_vazio() {
     let mut q = nova();
     let mut t = 0u64;
-    // 30 s: acabou o aquecimento e o excesso do começo (150 ms) já foi consumido.
     regular(&mut q, &mut t, 30);
     let antes = q.stats();
-    // Wi-Fi: 80 ms sem pacote e depois tudo de uma vez.
     t += 80_000;
     for _ in 0..9 {
         q.push(&bloco_de(1), t);
     }
     assert!(q.level_ms() >= 70.0, "nível logo depois da rajada {}", q.level_ms());
-    // Dali em diante, chegadas regulares: o nível desce sozinho até perto do alvo.
     let mut out = vec![0i16; BLOCK_FRAMES * CHANNELS];
     for _ in 0..1500 {
         t += 10_000;
@@ -320,11 +290,9 @@ fn o_consumo_acelerado_pula_quadros_espalhados_e_em_ordem() {
     let mut q = nova();
     let mut t = 0u64;
     regular(&mut q, &mut t, 30);
-    // 17 blocos de uma rampa de quadros (L = R = índice): 170 ms, acima do alvo.
     let rampa: Vec<i16> = (0..BLOCK_FRAMES * 17).flat_map(|k| [(k + 1000) as i16, (k + 1000) as i16]).collect();
     q.push(&rampa, t);
     let mut out = vec![0i16; BLOCK_FRAMES * CHANNELS];
-    // Os primeiros blocos levam a sobra do trecho regular (valor 1); procura o primeiro todo da rampa.
     let antes = q.stats().skipped_frames;
     let mut achou = false;
     for _ in 0..10 {
@@ -355,31 +323,24 @@ fn o_maximo_da_fila_e_configuravel() {
     q.push(&bloco_de(1), 0);
     q.push(&bloco_de(1), 2_000_000);
     assert_eq!(q.target_ms(), 60.0);
-    // Rajada: o que passa de 60 + 50 ms é jogado fora até 60 ms.
     for i in 0..30u64 {
         q.push(&bloco_de(1), 2_000_000 + i * 100);
     }
     assert!(q.level_ms() <= 110.0, "nível {}", q.level_ms());
-    // Valores absurdos são limitados.
     assert_eq!(MicQueue::with_max_ms(5).target_ms(), QUEUE_MIN_MS as f64);
     assert_eq!(MicQueue::with_max_ms(5000).target_ms(), 300.0);
-    // O reset mantém o máximo configurado.
     q.reset();
     assert_eq!(q.target_ms(), 60.0);
 }
 
 #[test]
 fn alvo_nunca_passa_do_maximo() {
-    // O padrão do `psd`: 100 ms.
     let mut q = MicQueue::new();
     q.push(&bloco_de(1), 0);
     q.push(&bloco_de(1), 2_000_000);
     assert_eq!(q.target_ms(), QUEUE_MAX_MS as f64);
 }
 
-// --- hub e sessão com um PipeWire falso ----------------------------------------------------------------------------
-
-/// Origem falsa do monitor: o teste escreve linhas pelo canal; `None` fecha (fim de texto).
 struct Falso {
     tx: mpsc::Sender<Option<Vec<u8>>>,
     abertas: Arc<AtomicU32>,
@@ -471,21 +432,18 @@ fn sem_gravador_nao_ha_pedido_nem_escrita_e_com_gravador_o_pcm_chega() {
     let (w, acordou) = waker();
     let mut sessao = hub.attach(w);
 
-    // O monitor sobe; sem ligação nenhuma, a sessão não pede nada e ninguém conecta no PipeWire.
     assert!(espera(|| falso.abertas.load(Ordering::SeqCst) == 1, Duration::from_secs(2)));
     assert_eq!(sessao.poll(Instant::now()), None);
     servidor_pcm.set_nonblocking(true).unwrap();
     std::thread::sleep(Duration::from_millis(100));
     assert!(servidor_pcm.accept().is_err(), "ninguém deve conectar sem pedido");
 
-    // Aparece um gravador.
     falso.tx.send(Some(b"+ pistick-mic:capture_FL -> pw-record:input_FL\n+ pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     assert!(espera(|| acordou.load(Ordering::SeqCst) > 0, Duration::from_secs(2)), "o waker deve acordar a sessão");
     assert_eq!(sessao.recording(), (true, vec!["pw-record".to_string()]));
     assert_eq!(sessao.poll(Instant::now()), Some(true));
     assert!(sessao.requested());
 
-    // Dados antes do AUDIO_START são descartados; depois, entram na fila e saem no soquete.
     assert!(sessao.on_data(0, &[0; 4], 0).is_err());
     sessao.on_start(CODEC_PSA1, 2, 48000, 480).unwrap();
     servidor_pcm.set_nonblocking(false).unwrap();
@@ -494,7 +452,6 @@ fn sem_gravador_nao_ha_pedido_nem_escrita_e_com_gravador_o_pcm_chega() {
     let t0 = Instant::now();
     let mut seq = 0u32;
     let mut enviados = 0usize;
-    // 600 ms de som em pacotes de 10 ms em tempo real (grade absoluta: o `sleep` do Windows tem passo de 15 ms).
     while t0.elapsed() < Duration::from_millis(600) {
         while (seq as u128) * 10 <= t0.elapsed().as_millis() {
             let bloco = tom_estereo(480, enviados);
@@ -506,8 +463,6 @@ fn sem_gravador_nao_ha_pedido_nem_escrita_e_com_gravador_o_pcm_chega() {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    // Lê 550 ms do soquete (a escrita começou antes do primeiro pacote, então o começo é silêncio) e procura o tom
-    // nos canais certos entre 200 e 500 ms.
     let mut recebido = Vec::new();
     let mut buf = [0u8; 4096];
     while recebido.len() < 480 * 4 * 55 {
@@ -521,7 +476,6 @@ fn sem_gravador_nao_ha_pedido_nem_escrita_e_com_gravador_o_pcm_chega() {
     assert!((synth::goertzel(&r, 880.0) - 0.25).abs() < 0.02, "dir 880: {}", synth::goertzel(&r, 880.0));
     assert!(synth::goertzel(&l, 880.0) < 0.03 && synth::goertzel(&r, 440.0) < 0.03);
 
-    // O gravador sai: só depois da espera o pedido é desligado, e a escrita encerra a conexão.
     falso.tx.send(Some(b"- pistick-mic:capture_FL -> pw-record:input_FL\n- pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     assert!(espera(|| !sessao.recording().0, Duration::from_secs(2)));
     assert_eq!(sessao.poll(Instant::now()), None);
@@ -539,12 +493,10 @@ fn sem_gravador_nao_ha_pedido_nem_escrita_e_com_gravador_o_pcm_chega() {
         Duration::from_secs(3),
     );
     assert!(fechou, "o PipeWire deve ver a conexão fechar");
-    // Pacotes que ainda chegam depois do pedido de parar são descartados.
     assert!(sessao.on_data(seq, &[0; 4], 0).is_err());
     assert_eq!(sessao.on_data(seq + 1, &[0; 4], 0), Ok(()), "só o primeiro descarte do episódio é relatado");
     assert!(sessao.discarded() >= 3);
 
-    // Fim da sessão: o monitor é encerrado.
     drop(sessao);
     assert!(espera(|| falso.mortes.load(Ordering::SeqCst) >= 1, Duration::from_secs(2)));
 }
@@ -570,13 +522,10 @@ fn mono_e_pcm_viram_estereo() {
     assert_eq!(q.buf[2], 1);
     assert_eq!(q.buf[3], 1);
     drop(q);
-    // Taxa errada e codec desconhecido são recusados.
     assert!(s.on_start(CODEC_PCM, 2, 44100, 480).is_err());
     assert!(s.on_start(9, 2, 48000, 480).is_err());
-    // PCM com número ímpar de amostras para estéreo é descartado.
     s.on_start(CODEC_PCM, 2, 48000, 480).unwrap();
     assert!(s.on_data(0, &[1, 0, 2, 0, 3, 0], 0).is_err());
-    // PSA1 corrompido não derruba nada.
     s.on_start(CODEC_PSA1, 2, 48000, 480).unwrap();
     assert!(s.on_data(1, &[0xFF; 9], 0).is_err());
     assert!(s.on_stop());
@@ -620,7 +569,6 @@ fn monitor_que_termina_e_reaberto_e_o_estado_zera() {
     let tx1 = rx_atual.recv_timeout(Duration::from_secs(2)).unwrap();
     tx1.send(Some(b"+ pistick-mic:capture_FL -> x:input_FL\n".to_vec())).unwrap();
     assert!(espera(|| s.recording().0, Duration::from_secs(2)));
-    // O pw-link morre: o estado volta a "sem gravador" e o monitor é reaberto em cerca de 1 s.
     tx1.send(None).unwrap();
     assert!(espera(|| !s.recording().0, Duration::from_secs(2)));
     let tx2 = rx_atual.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -644,7 +592,6 @@ fn falha_ao_abrir_o_monitor_tenta_de_novo_sem_travar() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(s.poll(Instant::now()), None);
     assert!(abertas.load(Ordering::SeqCst) >= 1);
-    // Largar a sessão encerra a thread do monitor (ela confere a geração a cada 50 ms).
     drop(s);
     let n = abertas.load(Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(2300));
@@ -655,7 +602,6 @@ fn falha_ao_abrir_o_monitor_tenta_de_novo_sem_travar() {
 fn so_um_cliente_recebe_o_microfone_por_vez_e_o_seguinte_assume_quando_o_primeiro_sai() {
     let servidor_pcm = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = servidor_pcm.local_addr().unwrap().to_string();
-    // Origem que aceita várias aberturas: cada uma cria um canal novo, e `atual` guarda o da última.
     type Canal = mpsc::Sender<Option<Vec<u8>>>;
     let atual: Arc<Mutex<Option<Canal>>> = Arc::new(Mutex::new(None));
     let abertas = Arc::new(AtomicU32::new(0));
@@ -674,7 +620,6 @@ fn so_um_cliente_recebe_o_microfone_por_vez_e_o_seguinte_assume_quando_o_primeir
     let (w2, acordou2) = waker();
     let mut s1 = hub.attach(w1);
     let mut s2 = hub.attach(w2);
-    // Um monitor só, o da dona.
     assert!(espera(|| abertas.load(Ordering::SeqCst) == 1, Duration::from_secs(2)));
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(abertas.load(Ordering::SeqCst), 1, "a que espera não sobe monitor");
@@ -688,9 +633,7 @@ fn so_um_cliente_recebe_o_microfone_por_vez_e_o_seguinte_assume_quando_o_primeir
     assert_eq!(s1.poll(Instant::now()), Some(true));
     assert_eq!(s2.poll(Instant::now()), None, "a segunda nunca recebe pedido enquanto a primeira está conectada");
     assert_eq!(acordou2.load(Ordering::SeqCst), 0);
-    // Dados da segunda são descartados (sem pedido em vigor).
     assert!(s2.on_data(0, &[0; 4], 0).is_err());
-    // A primeira sai: a segunda assume, com um monitor novo; o gravador ainda está lá (a lista recomeça do despejo).
     drop(s1);
     assert!(espera(|| abertas.load(Ordering::SeqCst) == 2, Duration::from_secs(2)), "monitor novo para a nova dona");
     assert!(espera(|| acordou2.load(Ordering::SeqCst) > 0, Duration::from_secs(2)), "a nova dona é acordada");
@@ -700,7 +643,6 @@ fn so_um_cliente_recebe_o_microfone_por_vez_e_o_seguinte_assume_quando_o_primeir
 ".to_vec())).unwrap();
     assert!(espera(|| s2.recording().0, Duration::from_secs(2)));
     assert_eq!(s2.poll(Instant::now()), Some(true));
-    // Uma terceira que entra e sai enquanto espera não atrapalha a dona.
     let (w3, _) = waker();
     let s3 = hub.attach(w3);
     drop(s3);

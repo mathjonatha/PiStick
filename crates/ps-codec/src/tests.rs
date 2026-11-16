@@ -1,20 +1,18 @@
 use super::*;
 use crate::testutil::{normalize_x, Rng};
 
-// ---------- geradores de imagem (BGRX, stride = w*4) ----------
-
 fn img_solida(w: usize, h: usize, bgr: [u8; 3]) -> Vec<u8> {
     let mut v = vec![0u8; w * h * 4];
     for px in v.chunks_exact_mut(4) {
         px[..3].copy_from_slice(&bgr);
-        px[3] = 0x00; // X "sujo" de propósito
+        px[3] = 0x00;
     }
     v
 }
 
 fn img_aleatoria(w: usize, h: usize, rng: &mut Rng) -> Vec<u8> {
     let mut v = vec![0u8; w * h * 4];
-    rng.fill(&mut v); // inclui bytes X aleatórios
+    rng.fill(&mut v);
     v
 }
 
@@ -60,8 +58,6 @@ fn pinta(img: &mut [u8], w: usize, r: Rect, rng: &mut Rng, ruido: bool) {
     }
 }
 
-// ---------- verificação ----------
-
 fn igual_normalizado(a: &[u8], b: &[u8]) -> bool {
     let mut a = a.to_vec();
     let mut b = b.to_vec();
@@ -70,7 +66,6 @@ fn igual_normalizado(a: &[u8], b: &[u8]) -> bool {
     a == b
 }
 
-/// Codifica um quadro e confere a ida e volta bit a bit (após normalizar X).
 fn passo_rects(enc: &mut Encoder, dec: &mut Decoder, w: usize, frame: &[u8], damage: Option<&[Rect]>) -> (Vec<u8>, Vec<Rect>) {
     let mut out = Vec::new();
     enc.encode(frame, w * 4, damage, &mut out);
@@ -87,14 +82,11 @@ fn ida_e_volta_inteiro(w: usize, h: usize, frame: &[u8]) -> Vec<u8> {
     let mut enc = Encoder::new(w as u32, h as u32);
     let mut dec = Decoder::new(w as u32, h as u32);
     let out = passo(&mut enc, &mut dec, w, frame, None);
-    // Segundo envio do mesmo quadro: tudo SKIP, um byte por bloco.
     let out2 = passo(&mut enc, &mut dec, w, frame, None);
     assert_eq!(out2.len(), blocks_across(w) * blocks_across(h));
     assert!(out2.iter().all(|&m| m == MODE_SKIP));
     out
 }
-
-// ---------- testes ----------
 
 const TAMANHOS: &[(usize, usize)] = &[(1, 1), (3, 2), (63, 63), (64, 64), (65, 70), (130, 129), (200, 17), (1920, 1080)];
 
@@ -112,7 +104,6 @@ fn ida_e_volta_solida() {
     for &(w, h) in TAMANHOS {
         let img = img_solida(w, h, [10, 200, 33]);
         let out = ida_e_volta_inteiro(w, h, &img);
-        // Todos os blocos SOLID: 4 bytes cada.
         assert_eq!(out.len(), blocks_across(w) * blocks_across(h) * 4);
     }
 }
@@ -148,14 +139,12 @@ fn modo_escolhido_por_tipo_de_bloco() {
     assert_eq!(modo(&img_solida(64, 64, [1, 2, 3])), MODE_SOLID);
     assert_eq!(modo(&img_poucas_cores(64, 64, 2, &mut rng)), MODE_PALETTE);
     assert_eq!(modo(&img_poucas_cores(64, 64, 16, &mut rng)), MODE_PALETTE);
-    // Degradê horizontal: todas as linhas iguais, o LZ acha as repetições.
     let mut faixa = vec![0u8; 64 * 64 * 4];
     for (i, px) in faixa.chunks_exact_mut(4).enumerate() {
         px[..3].copy_from_slice(&[(i % 64) as u8 * 4, 100, 200 - (i % 64) as u8]);
     }
     assert_eq!(modo(&faixa), MODE_LZ);
     assert_eq!(modo(&img_aleatoria(64, 64, &mut rng)), MODE_RAW);
-    // 17 cores aleatórias: não cabe em paleta.
     assert_ne!(modo(&img_poucas_cores(64, 64, 40, &mut rng)), MODE_PALETTE);
 }
 
@@ -165,7 +154,6 @@ fn tamanho_da_paleta() {
     for (k, bits) in [(2usize, 1usize), (3, 2), (4, 2), (5, 4), (16, 4)] {
         let mut img = vec![0u8; 64 * 64 * 4];
         for (i, px) in img.chunks_exact_mut(4).enumerate() {
-            // As k cores aparecem todas, em ordem embaralhada.
             let c = if i < k { i } else { rng.below(k as u32) as usize };
             px[..3].copy_from_slice(&[c as u8 * 10, 7, 9]);
         }
@@ -223,7 +211,6 @@ fn sequencia_com_dano_parcial() {
             }
             let (out, rects) = passo_rects(&mut enc, &mut dec, w, &img, Some(&dano));
             menor = menor.min(out.len());
-            // Os retângulos devolvidos pelo decodificador cobrem todo pixel que mudou.
             for y in 0..h {
                 for x in 0..w {
                     let i = (y * w + x) * 4;
@@ -249,12 +236,10 @@ fn dano_vazio_gera_so_skips() {
     let mut dec = Decoder::new(w as u32, h as u32);
     passo(&mut enc, &mut dec, w, &img, None);
     let mut out = Vec::new();
-    // Mesmo que o conteúdo mude, sem dano declarado nada é enviado.
     pinta(&mut img, w, Rect::new(0, 0, 10, 10), &mut rng, true);
     enc.encode(&img, w * 4, Some(&[]), &mut out);
     assert_eq!(out.len(), blocks_across(w) * blocks_across(h));
     assert!(out.iter().all(|&m| m == MODE_SKIP));
-    // E a referência não foi atualizada: um quadro inteiro depois envia a diferença.
     let mut out2 = Vec::new();
     enc.encode(&img, w * 4, None, &mut out2);
     dec.decode(&out).unwrap();
@@ -280,13 +265,12 @@ fn alteracao_so_no_byte_x_vira_skip() {
 #[test]
 fn primeiro_quadro_depois_do_reset_nao_tem_skip() {
     let (w, h) = (130usize, 70usize);
-    let img = img_solida(w, h, [0, 0, 0]); // igual ao decodificador recém-criado
+    let img = img_solida(w, h, [0, 0, 0]);
     let mut enc = Encoder::new(w as u32, h as u32);
     let mut out = Vec::new();
-    enc.encode(&img, w * 4, Some(&[]), &mut out); // dano vazio, mas sem referência
+    enc.encode(&img, w * 4, Some(&[]), &mut out);
     assert_eq!(out.len(), blocks_across(w) * blocks_across(h) * 4);
     assert!(out.chunks(4).all(|b| b[0] == MODE_SOLID));
-    // Depois do reset o mesmo vale, inclusive com novo tamanho.
     let mut dec = Decoder::new(w as u32, h as u32);
     dec.decode(&out).unwrap();
     enc.reset(64, 64);
@@ -315,7 +299,6 @@ fn dano_fora_do_quadro_e_ignorado() {
 #[test]
 fn decoder_com_dados_truncados_nunca_entra_em_panico() {
     let mut rng = Rng::new(9);
-    // Uma tira com todos os modos: sólido, paleta, LZ e RAW.
     let (w, h) = (256usize, 64usize);
     let mut img = vec![0u8; w * h * 4];
     let blocos = [
@@ -340,7 +323,6 @@ fn decoder_com_dados_truncados_nunca_entra_em_panico() {
         let mut d = Decoder::new(w as u32, h as u32);
         assert!(d.decode(&out[..corte]).is_err(), "corte {corte} deveria falhar");
     }
-    // Bytes sobrando
     let mut mais = out.clone();
     mais.push(0);
     assert_eq!(Decoder::new(w as u32, h as u32).decode(&mais), Err(DecodeError::TrailingData));
@@ -365,7 +347,6 @@ fn decoder_com_dados_corrompidos_nunca_entra_em_panico() {
         let mut d = Decoder::new(w as u32, h as u32);
         let _ = d.decode(&x);
     }
-    // Lixo puro
     for _ in 0..5_000 {
         let mut x = vec![0u8; rng.below(300) as usize];
         rng.fill(&mut x);
@@ -380,13 +361,10 @@ fn erros_especificos() {
     assert_eq!(d.decode(&[9]), Err(DecodeError::BadMode(9)));
     assert_eq!(d.decode(&[MODE_PALETTE, 1, 0, 0, 0]), Err(DecodeError::BadPalette(1)));
     assert_eq!(d.decode(&[MODE_PALETTE, 17]), Err(DecodeError::BadPalette(17)));
-    // Paleta de 3 cores (2 bits) com índice 3 na primeira linha.
     let mut x = vec![MODE_PALETTE, 3, 0, 0, 0, 1, 1, 1, 2, 2, 2];
     x.extend(std::iter::repeat_n(0b11, 64 * 16));
     assert_eq!(d.decode(&x), Err(DecodeError::BadPaletteIndex));
-    // LZ com clen maior que o disponível
     assert_eq!(d.decode(&[MODE_LZ, 255, 255, 0, 0, 1]), Err(DecodeError::Truncated));
-    // LZ com clen absurdo
     assert_eq!(d.decode(&[MODE_LZ, 255, 255, 255, 255, 1]), Err(DecodeError::Truncated));
     assert_eq!(d.decode(&[]), Err(DecodeError::Truncated));
 }
@@ -401,8 +379,6 @@ fn rect_uniao_e_intersecao() {
     assert_eq!(Rect::default().union(b), b);
 }
 
-/// O paralelismo não pode mudar nenhum byte do fluxo: 1, 2, 4 e 7 threads (com o limiar em 0,
-/// para forçar o caminho paralelo mesmo em quadros pequenos) geram exatamente os mesmos bytes.
 #[test]
 fn threads_geram_bytes_identicos() {
     let mut rng = Rng::new(21);
@@ -450,8 +426,6 @@ fn threads_geram_bytes_identicos() {
     }
 }
 
-/// Fatiar um quadro em intervalos de faixas e aplicar as fatias em sequência dá o mesmo
-/// resultado que o quadro inteiro, com 1 ou 4 threads e bytes idênticos entre elas.
 #[test]
 fn fatias_em_sequencia_equivalem_ao_quadro_inteiro() {
     let mut rng = Rng::new(31);
@@ -480,7 +454,6 @@ fn fatias_em_sequencia_equivalem_ao_quadro_inteiro() {
             passo(e, d, w, &a, None);
         }
         let n = fatiado[0].strip_count();
-        // Fatias de 2 faixas, a última pode ser menor; a referência das demais não avança.
         let mut ini = 0;
         while ini < n {
             let fim = (ini + 2).min(n);
@@ -504,7 +477,7 @@ fn fatias_em_sequencia_equivalem_ao_quadro_inteiro() {
 
 #[test]
 fn fatia_nao_atualiza_a_referencia_das_faixas_nao_enviadas() {
-    let (w, h) = (128usize, 256usize); // 2 x 4 blocos
+    let (w, h) = (128usize, 256usize);
     let mut rng = Rng::new(32);
     let a = img_solida(w, h, [1, 2, 3]);
     let mut b = a.clone();
@@ -512,12 +485,10 @@ fn fatia_nao_atualiza_a_referencia_das_faixas_nao_enviadas() {
     let mut enc = Encoder::with_threads(w as u32, h as u32, 1);
     let mut o = Vec::new();
     enc.encode(&a, w * 4, None, &mut o);
-    // Só as faixas 0..1 são enviadas: o resto sai SKIP.
     let mut o1 = Vec::new();
     let n1 = enc.encode_range(&b, w * 4, None, 0..1, &mut o1);
     assert_eq!(n1, 2);
     assert!(o1[o1.len() - 6..].iter().all(|&m| m == MODE_SKIP) || o1.iter().rev().take(6).all(|&m| m == MODE_SKIP));
-    // Um quadro inteiro depois ainda precisa enviar as faixas 1..4 (e só elas).
     let mut o2 = Vec::new();
     let n2 = enc.encode(&b, w * 4, None, &mut o2);
     assert_eq!(n2, 6);
@@ -542,16 +513,13 @@ fn contagem_de_blocos_sujos_por_faixa() {
     assert!(dirty_blocks_per_strip(None, 0, 5).is_empty());
 }
 
-// ---------- marco 4: blocos codificados, exclusão e invalidação ----------
-
-/// Índices (linha a linha) dos blocos marcados em `flags`.
 fn marcados(flags: &[bool]) -> Vec<usize> {
     flags.iter().enumerate().filter(|(_, &f)| f).map(|(i, _)| i).collect()
 }
 
 #[test]
 fn blocos_codificados_marcam_so_os_que_nao_sairam_skip() {
-    let (w, h) = (320usize, 256usize); // 5 x 4 blocos
+    let (w, h) = (320usize, 256usize);
     for threads in [1usize, 3] {
         let mut rng = Rng::new(40);
         let a = img_aleatoria(w, h, &mut rng);
@@ -564,21 +532,18 @@ fn blocos_codificados_marcam_so_os_que_nao_sairam_skip() {
         enc.encode(&a, w * 4, None, &mut o);
         assert!(enc.coded_blocks().iter().all(|&c| c), "o primeiro quadro não tem SKIP");
 
-        // Muda os blocos 7 e 13; o dano declarado cobre também o bloco 8, que não mudou.
         let mut b = a.clone();
-        pinta(&mut b, w, Rect::new(2 * 64, 64, 64, 64), &mut rng, true); // bloco (2,1) = 7
-        pinta(&mut b, w, Rect::new(3 * 64, 2 * 64, 64, 64), &mut rng, true); // bloco (3,2) = 13
+        pinta(&mut b, w, Rect::new(2 * 64, 64, 64, 64), &mut rng, true);
+        pinta(&mut b, w, Rect::new(3 * 64, 2 * 64, 64, 64), &mut rng, true);
         let dano = [Rect::new(2 * 64, 64, 2 * 64, 64), Rect::new(3 * 64, 2 * 64, 64, 64)];
         let mut o = Vec::new();
         let n = enc.encode(&b, w * 4, Some(&dano), &mut o);
         assert_eq!(n, 2);
         assert_eq!(marcados(enc.coded_blocks()), vec![7, 13], "{threads} threads");
 
-        // Quadro igual: tudo SKIP, e os flags são zerados.
         enc.encode(&b, w * 4, None, &mut Vec::new());
         assert!(marcados(enc.coded_blocks()).is_empty());
 
-        // Fatia: só os blocos das faixas pedidas aparecem.
         let mut c = b.clone();
         pinta(&mut c, w, Rect::new(0, 0, w as u32, h as u32), &mut rng, true);
         enc.encode_range(&c, w * 4, None, 1..3, &mut Vec::new());
@@ -590,7 +555,7 @@ fn blocos_codificados_marcam_so_os_que_nao_sairam_skip() {
 
 #[test]
 fn blocos_tentados_sao_os_sujos_dentro_das_faixas_e_incluem_os_que_sairam_skip() {
-    let (w, h) = (320usize, 256usize); // 5 x 4 blocos
+    let (w, h) = (320usize, 256usize);
     let mut rng = Rng::new(41);
     let a = img_aleatoria(w, h, &mut rng);
     let mut enc = Encoder::with_threads(w as u32, h as u32, 1);
@@ -599,7 +564,6 @@ fn blocos_tentados_sao_os_sujos_dentro_das_faixas_e_incluem_os_que_sairam_skip()
     assert_eq!(enc.attempted_blocks().len(), 20);
     assert!(enc.attempted_blocks().iter().all(|&t| t), "o primeiro quadro tenta tudo");
 
-    // Muda só o bloco 7; o dano declarado cobre 7 e 8: 8 foi tentado e saiu SKIP, o resto nem foi examinado.
     let mut b = a.clone();
     pinta(&mut b, w, Rect::new(2 * 64, 64, 64, 64), &mut rng, true);
     let dano = [Rect::new(2 * 64, 64, 2 * 64, 64)];
@@ -607,14 +571,11 @@ fn blocos_tentados_sao_os_sujos_dentro_das_faixas_e_incluem_os_que_sairam_skip()
     assert_eq!(marcados(enc.coded_blocks()), vec![7]);
     assert_eq!(marcados(enc.attempted_blocks()), vec![7, 8]);
 
-    // Fatia: só as faixas pedidas entram, mesmo com o quadro todo sujo.
     let mut c = b.clone();
     pinta(&mut c, w, Rect::new(0, 0, w as u32, h as u32), &mut rng, true);
     enc.encode_range(&c, w * 4, None, 1..3, &mut Vec::new());
     assert_eq!(marcados(enc.attempted_blocks()), (5..15).collect::<Vec<_>>());
-    // Todo bloco codificado foi tentado.
     assert!(enc.coded_blocks().iter().zip(enc.attempted_blocks()).all(|(&c, &t)| !c || t));
-    // Bloco excluído nunca é tentado.
     enc.set_excluded(Some(Rect::new(64, 64, 128, 128)));
     enc.encode(&c, w * 4, None, &mut Vec::new());
     assert!(![6usize, 7, 11, 12].iter().any(|&i| enc.attempted_blocks()[i]));
@@ -622,7 +583,6 @@ fn blocos_tentados_sao_os_sujos_dentro_das_faixas_e_incluem_os_que_sairam_skip()
     assert!(marcados(enc.attempted_blocks()).is_empty(), "reset zera os flags");
 }
 
-/// Região de 2x2 blocos em (64, 64) de um quadro de 5x4 blocos.
 const REGIAO: Rect = Rect::new(64, 64, 128, 128);
 
 fn indices_da_regiao() -> Vec<usize> {
@@ -641,7 +601,6 @@ fn bloco_excluido_sai_skip_e_nao_toca_a_referencia() {
         passo(&mut enc, &mut dec, w, &a, None);
 
         enc.set_excluded(Some(REGIAO));
-        // O quadro todo muda, com dano total: a região excluída continua SKIP.
         let mut b = a.clone();
         pinta(&mut b, w, Rect::new(0, 0, w as u32, h as u32), &mut rng, true);
         assert_eq!(enc.dirty_per_strip(None).iter().sum::<usize>(), 16, "a estimativa já desconta a região");
@@ -651,7 +610,6 @@ fn bloco_excluido_sai_skip_e_nao_toca_a_referencia() {
         let esperado: Vec<usize> = (0..20).filter(|i| !indices_da_regiao().contains(i)).collect();
         assert_eq!(marcados(enc.coded_blocks()), esperado, "{threads} threads");
         let rects = dec.decode(&o).unwrap();
-        // O decodificador não mexeu na região: continua com o quadro antigo.
         let mut a_norm = a.clone();
         normalize_x(&mut a_norm);
         for y in 64..192usize {
@@ -659,7 +617,6 @@ fn bloco_excluido_sai_skip_e_nao_toca_a_referencia() {
         }
         assert!(rects.iter().all(|r| r.intersect(REGIAO).is_none()), "{rects:?}");
 
-        // Dano só dentro da região: nada a codificar.
         let mut c = b.clone();
         pinta(&mut c, w, Rect::new(70, 70, 10, 10), &mut rng, true);
         assert_eq!(enc.dirty_per_strip(Some(&[Rect::new(70, 70, 10, 10)])).iter().sum::<usize>(), 0);
@@ -683,13 +640,11 @@ fn depois_de_invalidar_a_regiao_sai_sem_skip_e_o_decodificador_reproduz_o_quadro
         let mut b = a.clone();
         pinta(&mut b, w, REGIAO, &mut rng, true);
         pinta(&mut b, w, Rect::new(0, 0, 64, 64), &mut rng, true);
-        // Durante a exclusão só o bloco 0 sai.
         let mut o = Vec::new();
         enc.encode(&b, w * 4, Some(&[Rect::new(0, 0, w as u32, h as u32)]), &mut o);
         dec.decode(&o).unwrap();
         assert_eq!(marcados(enc.coded_blocks()), (0..20).filter(|i| !indices_da_regiao().contains(i) && *i == 0).collect::<Vec<_>>());
 
-        // Fim da exclusão e invalidação: sem dano nenhum, os 4 blocos da região saem sem SKIP.
         enc.set_excluded(None);
         enc.invalidate_rect(REGIAO);
         assert_eq!(enc.dirty_per_strip(Some(&[])).iter().sum::<usize>(), 4);
@@ -700,7 +655,6 @@ fn depois_de_invalidar_a_regiao_sai_sem_skip_e_o_decodificador_reproduz_o_quadro
         dec.decode(&o).unwrap();
         assert!(igual_normalizado(dec.pixels(), &b), "o quadro inteiro tem de bater bit a bit");
 
-        // A invalidação vale uma vez só.
         let n = enc.encode(&b, w * 4, Some(&[]), &mut Vec::new());
         assert_eq!(n, 0);
     }
@@ -727,20 +681,17 @@ fn exclusao_num_quadro_sem_referencia_invalida_os_blocos_excluidos() {
     let a = img_aleatoria(w, h, &mut rng);
     let mut enc = Encoder::with_threads(w as u32, h as u32, 1);
     let mut dec = Decoder::new(w as u32, h as u32);
-    // Logo depois de `new` (sem referência) com a região excluída: ela sai SKIP...
     enc.set_excluded(Some(REGIAO));
     let mut o = Vec::new();
     let n = enc.encode(&a, w * 4, None, &mut o);
     assert_eq!(n, 16);
     dec.decode(&o).unwrap();
-    // ... mas a referência dela não existe, então ao tirar a exclusão ela é codificada sem SKIP.
     enc.set_excluded(None);
     let mut o = Vec::new();
     let n = enc.encode(&a, w * 4, Some(&[]), &mut o);
     assert_eq!(n, 4);
     dec.decode(&o).unwrap();
     assert!(igual_normalizado(dec.pixels(), &a));
-    // `reset` também tira a exclusão e as invalidações.
     enc.set_excluded(Some(REGIAO));
     enc.invalidate_rect(REGIAO);
     enc.reset(w as u32, h as u32);
@@ -758,7 +709,7 @@ fn invalidacao_espera_a_faixa_quando_o_quadro_e_fatiado() {
     passo(&mut enc, &mut dec, w, &a, None);
     let mut b = a.clone();
     pinta(&mut b, w, REGIAO, &mut rng, true);
-    enc.invalidate_rect(REGIAO); // faixas 1 e 2
+    enc.invalidate_rect(REGIAO);
 
     let mut o = Vec::new();
     enc.encode_range(&b, w * 4, Some(&[]), 1..2, &mut o);
@@ -779,7 +730,6 @@ fn sem_exclusao_nem_invalidacao_dirty_per_strip_e_igual_ao_calculo_antigo() {
     let (w, h) = (200u32, 200u32);
     let mut enc = Encoder::with_threads(w, h, 1);
     let dano = [Rect::new(10, 10, 100, 10), Rect::new(0, 130, 200, 5)];
-    // Sem referência: o quadro inteiro, como `dirty_blocks_per_strip(None, ..)`.
     assert_eq!(enc.dirty_per_strip(Some(&dano)), dirty_blocks_per_strip(None, w, h));
     enc.encode(&vec![0u8; (w * h * 4) as usize], (w * 4) as usize, None, &mut Vec::new());
     assert_eq!(enc.dirty_per_strip(Some(&dano)), dirty_blocks_per_strip(Some(&dano), w, h));
@@ -799,13 +749,10 @@ fn write_region_escreve_pixels_de_fora_do_codec_e_recorta() {
             assert_eq!(dec.pixels()[d + 3], 0xFF);
         }
     }
-    // Fora do retângulo nada mudou (preto, X = 0xFF).
     assert_eq!(&dec.pixels()[0..4], &[0, 0, 0, 0xFF]);
-    // Retângulo que passa da borda é recortado; src pequeno demais não escreve.
     assert!(dec.write_region(Rect::new(80, 70, 40, 30), &vec![7u8; 40 * 30 * 4]));
     assert_eq!(&dec.pixels()[(79 * 100 + 99) * 4..(79 * 100 + 99) * 4 + 3], &[7, 7, 7]);
     assert!(!dec.write_region(Rect::new(0, 0, 10, 10), &[0u8; 8]));
-    // Um quadro de blocos com SKIP em cima não mexe no que foi escrito.
     let mut enc = Encoder::with_threads(100, 80, 1);
     let mut o = Vec::new();
     enc.encode(&vec![0u8; 100 * 80 * 4], 400, None, &mut o);

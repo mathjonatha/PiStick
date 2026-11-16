@@ -1,9 +1,3 @@
-//! Descoberta de aparelhos PiStick na rede por mDNS (marco 2.5, parte A).
-//!
-//! O cliente pergunta de portas efêmeras (nunca a 5353), uma por interface IPv4 local, para
-//! `224.0.0.251:5353`. Pela RFC 6762, seção 6.7, o servidor responde por unicast à origem, então o
-//! cliente não entra no grupo multicast nem disputa a porta com o mDNS do sistema.
-//! O `unsafe` da listagem de interfaces e da escolha da interface de saída fica neste arquivo.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
@@ -13,15 +7,10 @@ use std::time::{Duration, Instant};
 use ps_discovery::{build_query, parse_response, Found, MDNS_ADDR, MDNS_PORT};
 use ps_transport::TcpTransport;
 
-/// Duração total da procura.
 pub const SEARCH_TIME: Duration = Duration::from_millis(1500);
-/// Instantes (desde o começo) em que a pergunta é enviada.
 const SEND_AT: [Duration; 3] = [Duration::from_millis(0), Duration::from_millis(250), Duration::from_millis(750)];
-/// Limite de conexão por endereço de um aparelho achado.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Junta uma resposta ao que já foi achado: mesmo nome de instância (sem diferenciar maiúsculas)
-/// vira um só aparelho, com os endereços unidos sem repetir, na ordem de chegada.
 pub fn merge(all: &mut Vec<Found>, f: Found) {
     match all.iter_mut().find(|x| x.instance.eq_ignore_ascii_case(&f.instance)) {
         Some(x) => {
@@ -42,12 +31,10 @@ pub fn merge(all: &mut Vec<Found>, f: Found) {
     }
 }
 
-/// Procura aparelhos por [`SEARCH_TIME`].
 pub fn search() -> Vec<Found> {
     search_for(SEARCH_TIME, local_interfaces(), SocketAddr::V4(SocketAddrV4::new(MDNS_ADDR, MDNS_PORT)))
 }
 
-/// Procura por `total`, perguntando por cada interface de `locals` para `dest`.
 pub fn search_for(total: Duration, locals: Vec<Option<Ipv4Addr>>, dest: SocketAddr) -> Vec<Found> {
     let id = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0) & 0xFFFF) as u16;
     let (tx, rx) = mpsc::channel::<Found>();
@@ -56,7 +43,7 @@ pub fn search_for(total: Duration, locals: Vec<Option<Ipv4Addr>>, dest: SocketAd
     for local in locals {
         let sock = match open_socket(local) {
             Ok(s) => s,
-            Err(_) => continue, // interface que não deu para usar: segue com as outras
+            Err(_) => continue,
         };
         let tx = tx.clone();
         threads.push(std::thread::spawn(move || {
@@ -76,7 +63,6 @@ pub fn search_for(total: Duration, locals: Vec<Option<Ipv4Addr>>, dest: SocketAd
                 let wait = next.saturating_sub(t0.elapsed()).clamp(Duration::from_millis(5), Duration::from_millis(100));
                 let _ = sock.set_read_timeout(Some(wait));
                 if let Ok((n, _)) = sock.recv_from(&mut buf) {
-                    // Só respostas à nossa pergunta (o servidor repete o ID no unicast).
                     if n >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
                         for f in parse_response(&buf[..n]) {
                             let _ = tx.send(f);
@@ -97,8 +83,6 @@ pub fn search_for(total: Duration, locals: Vec<Option<Ipv4Addr>>, dest: SocketAd
     all
 }
 
-/// Abre um soquete UDP em porta efêmera; com `local`, preso a esse endereço e com a interface de
-/// saída multicast escolhida por ele.
 fn open_socket(local: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
     let sock = UdpSocket::bind((local.unwrap_or(Ipv4Addr::UNSPECIFIED), 0))?;
     sock.set_multicast_ttl_v4(255)?;
@@ -108,8 +92,6 @@ fn open_socket(local: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
     Ok(sock)
 }
 
-/// Tenta os endereços do aparelho na ordem, com [`CONNECT_TIMEOUT`] cada; devolve a primeira conexão
-/// que abrir e o endereço usado.
 pub fn connect_found(f: &Found) -> Result<(TcpTransport, SocketAddr), String> {
     let mut erros = Vec::new();
     for a in &f.addrs {
@@ -122,7 +104,6 @@ pub fn connect_found(f: &Found) -> Result<(TcpTransport, SocketAddr), String> {
     Err(format!("não foi possível conectar a \"{}\" por nenhum dos endereços ({})", f.instance, erros.join("; ")))
 }
 
-/// Linha de `psc --list`: `nome  endereço:porta[, endereço:porta…]  v=N[  sec=1  pair=open|closed]`.
 pub fn format_line(f: &Found) -> String {
     let addrs: Vec<String> = f.addrs.iter().map(|a| format!("{a}:{}", f.port)).collect();
     let v = f.proto_version.map_or("v=?".to_string(), |v| format!("v={v}"));
@@ -136,11 +117,6 @@ pub fn format_line(f: &Found) -> String {
     l
 }
 
-// ---------------------------------------------------------------------------------------------
-// Interfaces locais
-// ---------------------------------------------------------------------------------------------
-
-/// Endereços IPv4 locais por onde perguntar. `None` = um só soquete em `0.0.0.0` (interface padrão).
 #[cfg(windows)]
 pub fn local_interfaces() -> Vec<Option<Ipv4Addr>> {
     let v = windows_impl::ipv4_addresses();
@@ -177,19 +153,14 @@ mod windows_impl {
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::Networking::WinSock::{setsockopt, AF_INET, IPPROTO_IP, IP_MULTICAST_IF, SOCKADDR_IN, SOCKET};
 
-    /// Tipo de interface de laço (`IF_TYPE_SOFTWARE_LOOPBACK`).
     const IF_TYPE_LOOPBACK: u32 = 24;
 
-    /// Endereços IPv4 unicast das interfaces ativas que não são de laço, sem repetir.
     pub fn ipv4_addresses() -> Vec<Ipv4Addr> {
         let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        // Buffer de u64 para ficar alinhado como a estrutura exige.
         let mut size: u32 = 16 * 1024;
         let mut buf: Vec<u64> = Vec::new();
         for _ in 0..4 {
             buf.resize((size as usize).div_ceil(8), 0);
-            // SAFETY: `buf` tem pelo menos `size` bytes, alinhados em 8, e `size` é um ponteiro de
-            // entrada e saída válido; a API só escreve dentro do tamanho informado.
             let r = unsafe { GetAdaptersAddresses(AF_INET.0 as u32, flags, None, Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH), &mut size) };
             if r == ERROR_SUCCESS.0 {
                 break;
@@ -201,8 +172,6 @@ mod windows_impl {
         let mut out: Vec<Ipv4Addr> = Vec::new();
         let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
         while !cur.is_null() {
-            // SAFETY: `cur` aponta para um nó da lista que `GetAdaptersAddresses` montou dentro de
-            // `buf` (que continua vivo e sem mudar neste laço); `Next` é nulo no fim da lista.
             let a = unsafe { &*cur };
             cur = a.Next;
             if a.OperStatus != IfOperStatusUp || a.IfType == IF_TYPE_LOOPBACK {
@@ -210,17 +179,13 @@ mod windows_impl {
             }
             let mut u = a.FirstUnicastAddress;
             while !u.is_null() {
-                // SAFETY: mesma lista, mesmo buffer vivo; `Next` nulo encerra.
                 let ua = unsafe { &*u };
                 u = ua.Next;
                 let sa = ua.Address.lpSockaddr;
-                // SAFETY: `lpSockaddr` não é nulo para endereço unicast e todo SOCKADDR começa pela família.
                 if sa.is_null() || unsafe { (*sa).sa_family } != AF_INET {
                     continue;
                 }
-                // SAFETY: a família é AF_INET, então o endereço é um SOCKADDR_IN.
                 let sin = unsafe { &*(sa as *const SOCKADDR_IN) };
-                // SAFETY: leitura do campo `S_addr` da união, que é um u32 em ordem de rede.
                 let raw = unsafe { sin.sin_addr.S_un.S_addr };
                 let ip = Ipv4Addr::from(u32::from_be(raw));
                 if !ip.is_loopback() && !ip.is_unspecified() && !out.contains(&ip) {
@@ -231,10 +196,8 @@ mod windows_impl {
         out
     }
 
-    /// Escolhe a interface de saída das mensagens multicast do soquete pelo endereço dela.
     pub fn set_multicast_if(sock: &UdpSocket, addr: Ipv4Addr) -> io::Result<()> {
-        let bytes = addr.octets(); // já na ordem de rede, como a `in_addr`
-        // SAFETY: o soquete pertence ao `UdpSocket` emprestado e `bytes` vive durante a chamada.
+        let bytes = addr.octets();
         let r = unsafe { setsockopt(SOCKET(sock.as_raw_socket() as usize), IPPROTO_IP.0, IP_MULTICAST_IF, Some(&bytes)) };
         if r != 0 {
             return Err(io::Error::last_os_error());
@@ -281,7 +244,6 @@ mod tests {
         assert!(v.iter().all(|a| !a.is_loopback()));
     }
 
-    /// Procura contra um anunciante falso em 127.0.0.1 (responde por unicast como o `psd`).
     #[test]
     fn acha_um_anunciante_no_laco() {
         use ps_discovery::{build_legacy_response, parse_query, Announce};

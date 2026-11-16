@@ -1,4 +1,3 @@
-//! Implementação do cliente: registro, shm, xdg-shell, teclado e ponteiro.
 
 use std::io::Write;
 use std::os::fd::OwnedFd;
@@ -34,42 +33,23 @@ mod popup;
 
 pub use cursor::{CursorMode, IMAGE_HOTSPOT, IMAGE_PIXEL, IMAGE_SIDE};
 
-/// Opções do cliente de teste.
 pub struct Options {
-    /// Caminho do socket do compositor; `None` usa `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`.
     pub socket: Option<PathBuf>,
     pub title: String,
     pub app_id: String,
-    /// Arquivo onde registrar os eventos recebidos (um por linha).
     pub log: Option<PathBuf>,
-    /// Tamanho usado se o compositor não sugerir nenhum.
     pub default_size: (u32, u32),
-    /// Preenche com lixo tudo fora do dano declarado: quem copia mais que o dano é pego.
     pub poison: bool,
-    /// Depois de tantos quadros de faixa desde a última pintura-base, para de desenhar
-    /// (o conteúdo "assenta" e pode ser conferido exatamente). `u32::MAX` = sem limite.
     pub band_frames: u32,
-    /// Incrementado a cada quadro desenhado (incluindo as pinturas-base).
     pub counter: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
-    /// Margem (em pixels) em volta da área útil, como a sombra de um app GTK: o buffer é maior que a
-    /// geometria declarada com `set_window_geometry`, e a margem é pintada de magenta.
     pub margin: u32,
-    /// `xdg_toplevel.set_min_size` / `set_max_size` (largura, altura), antes do primeiro commit.
     pub min_size: Option<(i32, i32)>,
     pub max_size: Option<(i32, i32)>,
-    /// Ao receber a tecla "r", o app se redimensiona por conta própria para este tamanho
-    /// (sem pedido do compositor), como um app que restaura o tamanho salvo.
     pub self_resize: Option<(u32, u32)>,
-    /// Habilita as teclas de comando dos popups (veja `client/popup.rs`).
     pub popups: bool,
-    /// Cursor definido quando o ponteiro entra na janela.
     pub cursor: Option<CursorMode>,
-    /// Quantas vezes além da primeira o app repete o mesmo `set_cursor` ao entrar (como o Android faz).
     pub cursor_repeat: u32,
-    /// Texto oferecido como seleção quando o app recebe a tecla "y". Toda seleção nova que o
-    /// compositor apresenta é registrada (`selection-received`).
     pub clipboard: Option<String>,
-    /// Pede a decoração pelo protocolo do KDE (o que o GTK 3 usa) e registra o modo recebido.
     pub kde_decoration: bool,
 }
 
@@ -111,32 +91,24 @@ struct State {
     cursor_objs: cursor::CursorObjs,
     clip: clipboard::ClipObjs,
     clipboard_text: Option<String>,
-    /// Último serial recebido (entrada), usado no `xdg_popup.grab`.
     last_serial: u32,
-    /// Superfície que tem o foco de teclado, para o registro.
     kbd_focus: String,
     surfaces: Option<Surfaces>,
 
-    // tamanho atual e o sugerido pelo próximo configure
     size: (u32, u32),
     suggested: (u32, u32),
     configured: bool,
     closed: bool,
 
-    // buffers
     pool: Option<WlShmPool>,
     file: Option<std::fs::File>,
     bufs: Vec<Buf>,
     canvas: Vec<u32>,
-    /// quadro atual e quadro-base
     n: u32,
     m: u32,
-    /// Há um quadro a desenhar mas nenhum buffer livre.
     want_draw: bool,
-    /// Já existe um retorno de `frame` pedido.
     frame_pending: bool,
 
-    // entrada
     xkb_ctx: xkb::Context,
     xkb_state: Option<xkb::State>,
 }
@@ -149,7 +121,6 @@ impl State {
         }
     }
 
-    /// Recria pool e buffers para o tamanho atual.
     fn make_buffers(&mut self, qh: &QueueHandle<State>) -> std::io::Result<()> {
         for b in self.bufs.drain(..) {
             b.buffer.destroy();
@@ -173,7 +144,6 @@ impl State {
         Ok(())
     }
 
-    /// O app muda o próprio tamanho: buffers novos e uma pintura-base no tamanho novo.
     fn resize_by_app(&mut self, novo: (u32, u32), qh: &QueueHandle<State>) {
         if novo == self.size || !self.configured {
             return;
@@ -190,12 +160,10 @@ impl State {
         self.draw(qh, true);
     }
 
-    /// Tamanho do buffer: a área útil mais a margem dos dois lados.
     fn buffer_size(&self) -> (u32, u32) {
         (self.size.0 + 2 * self.margin, self.size.1 + 2 * self.margin)
     }
 
-    /// Desenha o próximo quadro e o envia. `full`: pintura-base inteira (começo ou redimensionamento).
     fn draw(&mut self, qh: &QueueHandle<State>, full: bool) {
         if self.closed || self.surfaces.is_none() || !self.configured {
             return;
@@ -221,8 +189,6 @@ impl State {
             pattern::paint_band(&mut self.canvas, w, h, self.n, self.m).to_vec()
         };
 
-        // Conteúdo do buffer: o quadro inteiro; com `poison`, lixo fora do dano declarado. A margem,
-        // quando há, é magenta e a área útil fica deslocada por ela.
         let m = self.margin;
         let (bw, bh) = self.buffer_size();
         let mut bytes = if self.opts_poison && !full { vec![0xA5u8; (bw * bh * 4) as usize] } else { vec![0u8; (bw * bh * 4) as usize] };
@@ -346,7 +312,7 @@ pub fn run(opts: Options) -> Result<(), String> {
     if opts.kde_decoration {
         kde::request_server_mode(&globals, &qh, &surface);
     }
-    surface.commit(); // pedido do configure inicial
+    surface.commit();
     st.surfaces = Some(Surfaces { surface, xdg_surface, toplevel });
 
     while !st.closed {
@@ -362,12 +328,9 @@ pub fn run(opts: Options) -> Result<(), String> {
         b.buffer.destroy();
     }
     let _ = conn.flush();
-    // Garante que o compositor viu a destruição antes de sairmos.
     let _ = queue.roundtrip(&mut st);
     Ok(())
 }
-
-// ---------------------------------------------------------------- tratadores
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(_: &mut Self, _: &WlRegistry, _: <WlRegistry as wayland_client::Proxy>::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
@@ -412,7 +375,6 @@ impl Dispatch<XdgWmBase, ()> for State {
     }
 }
 
-/// Dados do `xdg_surface`: 0 = a janela principal; N > 0 = popup de índice N - 1.
 impl Dispatch<XdgSurface, usize> for State {
     fn event(st: &mut Self, xs: &XdgSurface, ev: xdg_surface::Event, quem: &usize, _: &Connection, qh: &QueueHandle<Self>) {
         if let xdg_surface::Event::Configure { serial } = ev {
@@ -432,7 +394,7 @@ impl Dispatch<XdgSurface, usize> for State {
                     return;
                 }
                 st.configured = true;
-                st.n += 1; // nova base a cada (re)configuração: o quadro-base é o próximo número
+                st.n += 1;
                 st.draw(qh, true);
             }
         }
@@ -444,7 +406,6 @@ impl Dispatch<XdgToplevel, ()> for State {
         match ev {
             xdg_toplevel::Event::Configure { width, height, states } => {
                 st.suggested = (width.max(0) as u32, height.max(0) as u32);
-                // `states` é uma lista de u32 em little-endian (enum xdg_toplevel.state).
                 let nomes: Vec<&str> = states
                     .chunks_exact(4)
                     .map(|c| match u32::from_le_bytes([c[0], c[1], c[2], c[3]]) {
@@ -488,8 +449,6 @@ impl Dispatch<WlKeyboard, ()> for State {
     fn event(st: &mut Self, _: &WlKeyboard, ev: wl_keyboard::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
         match ev {
             wl_keyboard::Event::Keymap { fd, size, .. } => {
-                // `read_exact_at` e não `read`: o arquivo é o mesmo para todos os clientes (descrição de arquivo
-                // compartilhada) e o deslocamento dele não é nosso.
                 let mut text = vec![0u8; size as usize];
                 if std::fs::File::from(fd).read_exact_at(&mut text, 0).is_ok() {
                     while text.last() == Some(&0) {
@@ -535,11 +494,9 @@ impl Dispatch<WlKeyboard, ()> for State {
                     st.popup_key(key, qh);
                 }
                 if pressed && key == 21 {
-                    // KEY_Y: o app define a seleção de texto.
                     st.set_selection(qh);
                 }
                 if pressed && key == 19 {
-                    // KEY_R: o app decide mudar de tamanho sozinho.
                     if let Some(novo) = st.self_resize {
                         st.resize_by_app(novo, qh);
                     }

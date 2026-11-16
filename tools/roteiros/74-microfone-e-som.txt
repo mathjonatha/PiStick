@@ -1,13 +1,5 @@
-# Marco 7B, aceite 6: som (Pi para o computador) e microfone (computador para o Pi) ao mesmo tempo.
-# O mpv do Pi toca o clipe com 440 Hz à esquerda e 880 Hz à direita (saída, parte A) enquanto um pw-record grava a
-# fonte pistick-mic, alimentada pelo psc --mic-file (tom em laço). Nada toca nem grava neste computador.
-# Quem dirige o gravador é tools\testar-microfone.ps1 (-Teste aceite6); à mão:
-#   no Pi:     PSD_AUDIO=1 PSD_AUDIO_RT=1 MPV_CLIP=$HOME/clips/som-720p30.mp4 sh ~/pistick/tools/pi/iniciar-psd.sh mpv
-#   no Windows: target\release\psc.exe pi-stick --mic-file .cache\mic-tom.wav --audio-null --script tools\roteiros\74-microfone-e-som.txt
-#   no Pi, quando o roteiro pedir: pw-record de 5 s da pistick-mic e `psd verify-wav` (como no 73).
 waitwin 1 15000
 waitaudio 8000
-# 20 s para a fila de reprodução do cliente (alvo adaptativo) e o resto se acomodarem ao vídeo do mpv no Wi-Fi.
 wait 20000
 audiostats reset
 micstats start

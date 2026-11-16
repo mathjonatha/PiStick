@@ -1,44 +1,28 @@
-//! Fontes sintéticas de janela, para exercitar protocolo, codec e cliente sem compositor.
-//!
-//! - [`UiWindow`]: aparência de interface (fundo sólido, retângulos, relógio, barra de
-//!   progresso e um quadrado que anda devagar). O dano real é pequeno: só o que muda.
-//! - [`GradientWindow`]: degradê animado em tela cheia (dano = janela inteira).
-//! - [`VideoWindow`]: janela de vídeo do marco 4 (região animada de 640×384 e o resto parado).
-//! - [`StripesWindow`]: janela de ruído com marcadores de quadro, para provar a apresentação atômica (`docs/20`).
 
-#![allow(clippy::too_many_arguments)] // rotinas de desenho com coordenadas explícitas
+#![allow(clippy::too_many_arguments)]
 
 use ps_codec::Rect;
 
 pub const MIN_SIZE: u32 = 64;
 pub const MAX_SIZE: u32 = 4096;
 
-/// Conteúdo de uma janela sintética.
 pub trait Content: Send {
     fn title(&self) -> &str;
     fn app_id(&self) -> &str;
     fn size(&self) -> (u32, u32);
-    /// Muda o tamanho (já limitado a `MIN_SIZE..=MAX_SIZE`). O próximo `tick` devolve dano total.
     fn resize(&mut self, width: u32, height: u32);
-    /// Quadro atual, BGRX, stride = largura × 4.
     fn pixels(&self) -> &[u8];
-    /// Avança o conteúdo até `now_ms` (milissegundos desde o início da sessão) e devolve o dano.
     fn tick(&mut self, now_ms: u64) -> Vec<Rect>;
 }
 
-/// Limita um tamanho pedido ao intervalo aceito.
 pub fn clamp_size(w: u32, h: u32) -> (u32, u32) {
     (w.clamp(MIN_SIZE, MAX_SIZE), h.clamp(MIN_SIZE, MAX_SIZE))
 }
-
-
-// ---------------------------------------------------------------- fonte
 
 use crate::source::{SourceEvent, Waker, WindowSource};
 use ps_proto::Message;
 use std::time::Duration;
 
-/// [`WindowSource`] com duas janelas sintéticas: interface (1) e degradê (2).
 pub struct SyntheticSource {
     windows: Vec<(u32, Box<dyn Content>)>,
     queued: Vec<SourceEvent>,
@@ -61,8 +45,6 @@ impl SyntheticSource {
 }
 
 impl SyntheticSource {
-    /// Fonte do marco 4: uma só janela (id 1), 1280×720, com a região animada a 30 quadros por
-    /// segundo. `pause_after_ms`: a animação para nesse instante (para testar a volta ao modo sem perdas).
     pub fn video(pause_after_ms: Option<u64>) -> Self {
         let (w, h) = (ps_codec::testutil::video::WIDTH, ps_codec::testutil::video::HEIGHT);
         SyntheticSource {
@@ -75,8 +57,6 @@ impl SyntheticSource {
 }
 
 impl SyntheticSource {
-    /// Fonte da apresentação atômica (`docs/20`): uma só janela (id 1), 960×600, ruído que não comprime e
-    /// marcadores de quadro, a 30 quadros por segundo.
     pub fn stripes() -> Self {
         let (w, h) = (ps_codec::testutil::stripes::WIDTH, ps_codec::testutil::stripes::HEIGHT);
         SyntheticSource {
@@ -110,7 +90,7 @@ impl WindowSource for SyntheticSource {
             }
             self.next_tick_ms += self.period_ms;
             if self.next_tick_ms < now_ms {
-                self.next_tick_ms = now_ms + self.period_ms; // atrasado: não recupera quadros perdidos
+                self.next_tick_ms = now_ms + self.period_ms;
             }
         }
         out
@@ -154,15 +134,12 @@ impl WindowSource for SyntheticSource {
     fn frame_sent(&mut self, _win: u32) {}
 }
 
-// ---------------------------------------------------------------- desenho
-
 type Bgrx = [u8; 4];
 
 const fn cor(r: u8, g: u8, b: u8) -> Bgrx {
     [b, g, r, 0xFF]
 }
 
-/// Preenche um retângulo (coordenadas com sinal, recortado ao quadro).
 fn fill_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, c: Bgrx) {
     let x0 = x.clamp(0, w as i32) as usize;
     let y0 = y.clamp(0, h as i32) as usize;
@@ -179,7 +156,6 @@ fn fill_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, c
     }
 }
 
-/// Moldura de 2 px.
 fn stroke_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32, c: Bgrx) {
     fill_rect(buf, w, h, x, y, rw, 2, c);
     fill_rect(buf, w, h, x, y + rh - 2, rw, 2, c);
@@ -187,7 +163,6 @@ fn stroke_rect(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, rw: i32, rh: i32,
     fill_rect(buf, w, h, x + rw - 2, y, 2, rh, c);
 }
 
-/// Fonte 5×7: cada linha são 5 bits, o bit 4 é a coluna da esquerda.
 fn glyph(ch: char) -> [u8; 7] {
     match ch {
         '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
@@ -242,8 +217,6 @@ fn to_rect(x: i32, y: i32, rw: i32, rh: i32, w: u32, h: u32) -> Option<Rect> {
     }
 }
 
-// ---------------------------------------------------------------- janela de interface
-
 const BG: Bgrx = cor(0x2B, 0x2B, 0x30);
 const BAR: Bgrx = cor(0x1E, 0x1E, 0x22);
 const SIDE: Bgrx = cor(0x24, 0x24, 0x29);
@@ -265,7 +238,6 @@ struct UiLayout {
     lane: (i32, i32, i32, i32),
 }
 
-/// Janela com aparência de interface: quase tudo parado, três pontos pequenos em movimento.
 pub struct UiWindow {
     w: u32,
     h: u32,
@@ -308,7 +280,6 @@ impl UiWindow {
         if span == 0 {
             return 0;
         }
-        // Onda triangular: vai e volta.
         let d = now_ms * SQUARE_SPEED_PX_S / 1000;
         let m = d % (2 * span);
         (if m <= span { m } else { 2 * span - m }) as i32
@@ -333,7 +304,6 @@ impl UiWindow {
         for i in 0..6 {
             fill_rect(b, w, h, 12, 48 + i * 28, (side - 24).max(0), 16, TRACK);
         }
-        // Cartões 2×2 na área de conteúdo.
         let cx = side + 16;
         let cy = 48;
         let area_w = (wi - cx - 16).max(0);
@@ -390,7 +360,6 @@ impl Content for UiWindow {
     fn tick(&mut self, now_ms: u64) -> Vec<Rect> {
         let (w, h) = (self.w, self.h);
         let l = self.layout();
-        // Relógio: décimos de segundo, alinhado à direita em 7 posições.
         let clock = format!("{:7.1}", now_ms as f64 / 1000.0);
         let fill = self.fill_for(now_ms, l.track.2);
         let sq = self.square_x(now_ms, l.lane.2);
@@ -419,7 +388,6 @@ impl Content for UiWindow {
                 fill_rect(&mut self.buf, w, h, tx + self.last_fill, ty, fill - self.last_fill, th, FILL);
                 dano.extend(to_rect(tx + self.last_fill, ty, fill - self.last_fill, th, w, h));
             } else {
-                // A barra reiniciou: limpa a trilha inteira.
                 fill_rect(&mut self.buf, w, h, tx, ty, l.track.2, th, TRACK);
                 fill_rect(&mut self.buf, w, h, tx, ty, fill, th, FILL);
                 dano.extend(to_rect(tx, ty, l.track.2, th, w, h));
@@ -441,14 +409,10 @@ impl Content for UiWindow {
     }
 }
 
-// ---------------------------------------------------------------- degradê animado
-
-/// Degradê em tela cheia que se move a cada quadro. O dano é a janela inteira.
 pub struct GradientWindow {
     w: u32,
     h: u32,
     buf: Vec<u8>,
-    /// Fase do último quadro desenhado; `None` depois de criar ou redimensionar.
     last_phase: Option<usize>,
 }
 
@@ -489,10 +453,9 @@ impl Content for GradientWindow {
         let (w, h) = (self.w as usize, self.h as usize);
         let phase = (now_ms / 8) as usize;
         if self.last_phase == Some(phase) {
-            return Vec::new(); // nada mudou desde o quadro anterior
+            return Vec::new();
         }
         self.last_phase = Some(phase);
-        // Azul varia na horizontal (suave), verde em faixas na vertical, vermelho em diagonal lenta.
         let blue: Vec<u8> = (0..w).map(|x| ((x * 255 / w + phase) & 0xFF) as u8).collect();
         for y in 0..h {
             let g = (((y * 255 / h) + phase / 2) & 0xF0) as u8;
@@ -509,11 +472,6 @@ impl Content for GradientWindow {
     }
 }
 
-// ---------------------------------------------------------------- vídeo sintético
-
-/// Janela de vídeo (marco 4): região animada de 640×384 em (64, 64) que muda a cada quadro, e o
-/// resto parado, com texto e linhas finas. O conteúdo vem de [`ps_codec::testutil::video`], o mesmo
-/// gerador que os testes usam como origem.
 pub struct VideoWindow {
     w: u32,
     h: u32,
@@ -567,7 +525,7 @@ impl Content for VideoWindow {
             return vec![full_rect(self.w, self.h)];
         }
         if self.last_frame == Some(frame) {
-            return Vec::new(); // parado (ou ainda no mesmo quadro da animação)
+            return Vec::new();
         }
         self.last_frame = Some(frame);
         video::draw_region(&mut self.buf, self.w, self.h, frame);
@@ -575,10 +533,6 @@ impl Content for VideoWindow {
     }
 }
 
-// ---------------------------------------------------------------- listras (apresentação atômica)
-
-/// Janela de ruído com marcadores de quadro (veja [`ps_codec::testutil::stripes`]): a cada `tick` é um quadro
-/// novo, com o número do quadro em cada faixa de 32 linhas, e o dano é a janela inteira.
 pub struct StripesWindow {
     w: u32,
     h: u32,
@@ -639,7 +593,6 @@ mod tests {
         }
     }
 
-    /// O dano declarado deve cobrir toda mudança de pixel: copiar só o dano reproduz o quadro novo.
     fn confere_dano(mut c: impl Content) {
         let (w, h) = c.size();
         let mut copia = vec![0u8; (w * h * 4) as usize];
@@ -675,7 +628,6 @@ mod tests {
             let area: u64 = ui.tick(t).iter().map(|r| u64::from(r.w) * u64::from(r.h)).sum();
             max = max.max(area);
         }
-        // O reinício da barra repinta a trilha; o resto é ainda menor. Sempre bem abaixo de 10% da janela.
         assert!(max < 640 * 420 / 10, "dano máximo {max}");
     }
 
@@ -687,7 +639,6 @@ mod tests {
         let d = g.tick(500);
         assert_eq!(d, vec![Rect::new(0, 0, 100, 80)]);
         assert_ne!(a, g.pixels());
-        // Na mesma fase o conteúdo não muda e não há dano.
         assert!(g.tick(503).is_empty());
     }
 
@@ -699,7 +650,7 @@ mod tests {
         assert_eq!(ui.size(), (500, 333));
         assert_eq!(ui.pixels().len(), 500 * 333 * 4);
         assert_eq!(ui.tick(100), vec![Rect::new(0, 0, 500, 333)]);
-        ui.resize(1, 1); // abaixo do mínimo: limitado
+        ui.resize(1, 1);
         assert_eq!(ui.size(), (MIN_SIZE, MIN_SIZE));
         ui.tick(200);
     }

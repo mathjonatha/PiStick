@@ -1,56 +1,3 @@
-//! Roteiro de entrada do `psc` (`--script ARQUIVO`): um comando por linha, executado depois que a
-//! primeira janela aparece. Serve para testar de ponta a ponta sem ninguém à frente da tela.
-//!
-//! ```text
-//! wait 500                 espera em milissegundos
-//! win 1                    seleciona a janela alvo pela ordem de criação (popups contam);
-//! win title Texto          ou a primeira janela viva cujo título contém "Texto"
-//! waitwin 2 [ms]           espera a janela de número 2 existir (padrão 10000 ms); também `waitwin title Texto`
-//! move 120 40              ponteiro para x,y dentro da janela alvo
-//! click left               pressiona e solta (left, right, middle); `click left down` / `click left up`
-//! scroll 0 -45             rolagem em pixels
-//! type "texto\n"           digita como teclado ABNT2
-//! key ctrl+s               combinação: ctrl, shift, alt, altgr, super + tecla
-//! hold a 1500              segura a tecla por 1500 ms (quem repete é o app)
-//! clip "texto"             define a área de transferência do hospedeiro e força o envio
-//! showclip                 escreve no log o texto que está na área de transferência do hospedeiro
-//! shot nome                salva PNG de todas as janelas em <pasta>/nome-N.png (N = número da janela)
-//! resize 800 500           pede o tamanho da janela alvo
-//! echo texto               escreve uma linha no log do psc
-//! waitvideostart 5000      espera a região de vídeo da janela alvo ficar ativa (`VIDEO_START`); sem ela no prazo, o roteiro falha
-//! waitvideostop 15000      espera o fim do vídeo (`VIDEO_STOP`) depois de ter começado
-//! verify-video 30 [2.0]    durante o vídeo: fora da região idêntico à origem bit a bit e PSNR da região >= 30 dB
-//!                          (o 2º argumento, opcional, é o limite em s da entrada em vídeo desde o primeiro FRAME)
-//! verify-still [1500 [1500]]  parado: janela inteira idêntica à origem; tenta a cada 50 ms por até 1500 ms
-//!                          (2º argumento opcional: máximo em ms entre o último VIDEO_FRAME e a janela idêntica)
-//! verify-novideo           a janela alvo nunca teve região de vídeo (nenhum VIDEO_START) e não tem agora
-//! atomic start             abre a medição da apresentação atômica (docs/20): a cada apresentação causada por `FRAME`,
-//!                          lê os marcadores de quadro da imagem que vai para a tela (janela de `psd --synthetic-stripes`)
-//! atomic report            fecha a medição e imprime `ATOMIC apresentacoes=... mistas=... quadros_distintos=... fps=...`
-//!                          (mistas = marcadores com números de quadro diferentes na mesma imagem)
-//! verify-atomic [MIN]      exige que o último `atomic report` tenha `mistas=0` (e ao menos MIN quadros distintos, se dado)
-//! videostats start         abre uma janela de medição (quadros de vídeo por s, RTT mediano, decodificação)
-//! videostats report [MIN_FPS [MAX_RTT_MS]]   fecha a janela e imprime `VIDEOSTATS ...`; fora dos limites, falha
-//! waitaudio 5000           espera chegar o primeiro pacote de áudio; sem ele no prazo, o roteiro falha
-//! audiostats               imprime `AUDIOSTATS ...`: pacotes, kbit/s, retomadas, descartes, esvaziamentos da fila,
-//!                          estouros, quadros removidos/repetidos, nível médio, máximo e atual da fila, alvo e jitter (ms)
-//! audiostats reset         zera os contadores (o aceite conta esvaziamentos a partir daqui)
-//! verify-audio 440 880     confere por Goertzel que o som recebido tem FREQ_E no canal esquerdo e FREQ_D no direito
-//!                          (amplitude 0,25 do sintético, +-0,02; a outra frequência em cada canal abaixo de 0,02)
-//! micstats start           (marco 7B) zera os contadores do microfone e abre a janela de medição
-//! micstats report          imprime `MICSTATS pacotes=... kbit_s=... pedidos=... desligados=... pico=... anunciou=0|1 captura=aberta|fechada janela=...s`
-//!                          (pedidos = `AUDIO_REQUEST` de ligar recebidos; pico = maior amplitude capturada, 0 a 32768)
-//! waitmic on 10000         espera a captura do microfone abrir (um app do Pi gravar); sem ela no prazo, o roteiro falha
-//! waitmic off 10000        espera a captura fechar (o gravador sair); imprime quanto demorou
-//! quit                     encerra o psc
-//! ```
-//!
-//! `verify-video` e `verify-still` comparam a imagem já composta em memória (a mesma que o `shot` grava)
-//! com o gerador da janela de vídeo sintética (`psd --synthetic-video`; veja `verify.rs`) e imprimem uma
-//! linha `VERIFY ...`. Se qualquer verificação ou espera falhar, o roteiro continua até o fim e o `psc`
-//! sai com código 3 (`SCRIPT_FAILED`).
-//!
-//! Comentários começam com `#`. Textos entre aspas aceitam `\n`, `\t`, `\\` e `\"`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,7 +16,6 @@ use crate::registry::{Registry, WinInfo};
 use crate::stats::Stats;
 use crate::verify;
 
-/// Vira `true` quando uma verificação ou espera de vídeo do roteiro falha; o `psc` sai com código 3.
 pub static SCRIPT_FAILED: AtomicBool = AtomicBool::new(false);
 
 const KEY_LEFTCTRL: u32 = 29;
@@ -78,14 +24,12 @@ const KEY_LEFTALT: u32 = 56;
 const KEY_RIGHTALT: u32 = 100;
 const KEY_LEFTMETA: u32 = 125;
 
-/// Como o roteiro escolhe uma janela.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Num(usize),
     Title(String),
 }
 
-/// Combinação de teclas: modificadores (códigos evdev) e a tecla final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chord {
     pub mods: Vec<u32>,
@@ -108,38 +52,25 @@ pub enum Cmd {
     Shot(String),
     Resize(u32, u32),
     Echo(String),
-    /// `verify-video PSNR_MIN_DB [LIMITE_DE_ENTRADA_S]`
     VerifyVideo(f64, Option<f64>),
-    /// `verify-still [PRAZO_MS [MAX_DEPOIS_DO_VIDEO_MS]]`
     VerifyStill(u64, Option<u64>),
     WaitVideoStart(u64),
     WaitVideoStop(u64),
     VerifyNoVideo,
     VideoStatsStart,
-    /// `videostats report [MIN_FPS [MAX_RTT_MS]]`
     VideoStatsReport(Option<f64>, Option<f64>),
-    /// `atomic start`
     AtomicStart,
-    /// `atomic report`
     AtomicReport,
-    /// `verify-atomic [MIN_QUADROS_DISTINTOS]`
     VerifyAtomic(Option<u64>),
-    /// `waitaudio PRAZO_MS`
     WaitAudio(u64),
-    /// `audiostats [reset]`; `true` = zerar
     AudioStats(bool),
-    /// `verify-audio FREQ_E FREQ_D`
     VerifyAudio(f64, f64),
-    /// `micstats start`
     MicStatsStart,
-    /// `micstats report`
     MicStatsReport,
-    /// `waitmic on|off PRAZO_MS`; `true` = esperar abrir
     WaitMic(bool, u64),
     Quit,
 }
 
-/// Divide a linha em palavras; aspas duplas agrupam e aceitam escapes.
 fn tokenize(line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -185,7 +116,6 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Código evdev de uma tecla por nome (posição física no teclado americano) ou caractere.
 fn key_code(nome: &str) -> Option<u32> {
     let n = nome.to_lowercase();
     let fixo = match n.as_str() {
@@ -230,7 +160,6 @@ fn key_code(nome: &str) -> Option<u32> {
     let mut it = nome.chars();
     let (Some(c), None) = (it.next(), it.next()) else { return None };
     let strokes = strokes_for(c.to_ascii_lowercase())?;
-    // Só teclas simples: uma batida, sem Shift.
     match strokes.as_slice() {
         [s] if !s.shift => Some(s.code),
         _ => None,
@@ -240,7 +169,6 @@ fn key_code(nome: &str) -> Option<u32> {
 pub fn parse_chord(texto: &str) -> Result<Chord, String> {
     let mut mods = Vec::new();
     let mut partes: Vec<&str> = texto.split('+').collect();
-    // "ctrl++" não é suportado; a tecla é sempre o último pedaço.
     let tecla = partes.pop().filter(|t| !t.is_empty()).ok_or_else(|| format!("combinação vazia: {texto:?}"))?;
     for m in partes {
         mods.push(match m.to_lowercase().as_str() {
@@ -268,7 +196,6 @@ fn num<T: std::str::FromStr>(s: &str, o_que: &str) -> Result<T, String> {
     s.parse::<T>().map_err(|_| format!("{o_que} inválido: {s:?}"))
 }
 
-/// Interpreta uma linha. `Ok(None)` para linha vazia ou comentário.
 pub fn parse_line(line: &str) -> Result<Option<Cmd>, String> {
     let l = line.trim();
     if l.is_empty() || l.starts_with('#') {
@@ -290,7 +217,6 @@ pub fn parse_line(line: &str) -> Result<Option<Cmd>, String> {
         }
         "win" => Cmd::Win(parse_target(args)?),
         "waitwin" => {
-            // Prazo opcional no fim: `waitwin 2 3000` ou `waitwin title Salvar 3000`.
             let (alvo, prazo) = match args.split_last() {
                 Some((ultimo, resto)) if !resto.is_empty() && (args[0] != "title" || resto.len() >= 2) => match ultimo.parse::<u64>() {
                     Ok(ms) => (resto, ms),
@@ -441,7 +367,6 @@ pub fn parse_line(line: &str) -> Result<Option<Cmd>, String> {
     Ok(Some(c))
 }
 
-/// Interpreta o arquivo inteiro; o erro diz a linha.
 pub fn parse_script(texto: &str) -> Result<Vec<Cmd>, String> {
     let mut cmds = Vec::new();
     for (i, linha) in texto.lines().enumerate() {
@@ -454,8 +379,6 @@ pub fn parse_script(texto: &str) -> Result<Vec<Cmd>, String> {
     Ok(cmds)
 }
 
-/// Os atalhos antigos `--resize` e `--type` viram um roteiro: o pedido de tamanho 1,5 s depois
-/// da primeira janela e a digitação 2 s depois dela.
 pub fn legacy_script(type_text: Option<String>, resize_to: Option<(u32, u32)>) -> Vec<Cmd> {
     let mut cmds = Vec::new();
     let mut decorrido = 0;
@@ -471,10 +394,8 @@ pub fn legacy_script(type_text: Option<String>, resize_to: Option<(u32, u32)>) -
     cmds
 }
 
-// A composição (janela com os popups) vive no núcleo (`crate::compose`): o cliente Android a reaproveita.
 pub use crate::compose::{compose_with_popups, frame_of, paste_bgrx};
 
-/// O que o executor do roteiro precisa do resto do cliente.
 pub struct Ctx {
     pub out: Sender<Message>,
     pub registry: Arc<Registry>,
@@ -488,15 +409,11 @@ pub struct Ctx {
 
 struct Runner {
     ctx: Ctx,
-    /// Número (ordem de criação) da janela alvo.
     target: Option<usize>,
-    /// Raiz que o roteiro anunciou como focada.
     focused: Option<u32>,
-    /// Resultado do último `atomic report`, para o `verify-atomic`.
     last_atomic: Option<crate::atomic::AtomicReport>,
 }
 
-/// Inicia o roteiro numa thread própria. Espera a primeira janela aparecer (até 60 s).
 pub fn spawn(cmds: Vec<Cmd>, ctx: Ctx) {
     std::thread::Builder::new()
         .name("psc-roteiro".into())
@@ -544,7 +461,6 @@ impl Runner {
         }
     }
 
-    /// Seleciona a janela alvo; se for uma janela de nível superior, passa o foco a ela.
     fn select(&mut self, t: &Target) {
         let Some(w) = self.find(t) else {
             eprintln!("[psc] roteiro: janela {t:?} não existe");
@@ -561,7 +477,6 @@ impl Runner {
         }
     }
 
-    /// Id que recebe o teclado: a raiz da cadeia da janela alvo.
     fn key_win(&self) -> Option<u32> {
         let w = self.target_info()?;
         Some(self.ctx.registry.root_of(w.id))
@@ -586,7 +501,6 @@ impl Runner {
         }
     }
 
-    /// Executa um comando. `false` encerra o roteiro.
     fn run(&mut self, c: Cmd) -> bool {
         println!("[psc] roteiro: {c:?}");
         match c {
@@ -707,7 +621,6 @@ impl Runner {
         true
     }
 
-    /// Imagem composta da janela alvo (a mesma do `shot`, sem popups) e o estado do vídeo, no mesmo instante.
     fn snapshot(&self) -> Option<(u32, u32, Vec<u8>, VideoState)> {
         let w = self.target_info()?;
         let g = w.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -724,7 +637,6 @@ impl Runner {
         SCRIPT_FAILED.store(true, Ordering::SeqCst);
     }
 
-    /// `waitvideostart` (`ativo = true`) ou `waitvideostop`: sondagem a cada 5 ms até o prazo.
     fn wait_video(&self, ms: u64, ativo: bool) {
         let nome = if ativo { "waitvideostart" } else { "waitvideostop" };
         let fim = Instant::now() + Duration::from_millis(ms);
@@ -763,7 +675,6 @@ impl Runner {
         }
     }
 
-    /// `waitaudio`: sondagem a cada 5 ms até chegar o primeiro pacote.
     fn wait_audio(&self, ms: u64) {
         let Some(a) = &self.ctx.audio else {
             println!("[psc] roteiro: waitaudio FALHOU: o áudio está desativado (--no-audio)");
@@ -782,7 +693,6 @@ impl Runner {
         println!("[psc] roteiro: waitaudio ok: primeiro AUDIO_DATA {:.0} ms depois da abertura do áudio", a.stats().first_packet_ms.unwrap_or(0.0));
     }
 
-    /// `waitmic on|off`: sondagem a cada 5 ms até a captura abrir (ou fechar).
     fn wait_mic(&self, on: bool, ms: u64) {
         let t0 = Instant::now();
         let fim = t0 + Duration::from_millis(ms);
@@ -811,7 +721,6 @@ impl Runner {
         println!("{}", a.stats().audiostats_line());
     }
 
-    /// `verify-audio`: espera até 3 s por 200 ms contíguos de som e confere as frequências dos canais.
     fn verify_audio(&self, fe: f64, fd: f64) {
         let Some(a) = &self.ctx.audio else {
             println!("VERIFY audio FALHOU motivo=\"o áudio está desativado (--no-audio)\"");
@@ -859,7 +768,6 @@ impl Runner {
         }
     }
 
-    /// `verify-atomic`: o último `atomic report` não pode ter imagem mista (código 3 se tiver).
     fn verify_atomic(&self, min_distintos: Option<u64>) {
         let Some(r) = &self.last_atomic else {
             println!("VERIFY atomic FALHOU motivo=\"nenhum `atomic report` antes\"");
@@ -958,11 +866,8 @@ impl Runner {
             };
             tentativas += 1;
             let center = v.last_capture_us.map(verify::frame_from_capture_us);
-            // Com o vídeo ainda ativo `check_still` reprova sem comparar; o laço repete a cada 50 ms.
             let r = verify::check_still(&px, w, h, v.active.is_some(), center, verify::SEARCH_RADIUS);
             if r.ok {
-                // A janela é idêntica desde a última vez que os pixels mudaram: o tempo que vale é o dessa
-                // mudança, não o da checagem (que gasta algumas centenas de ms na busca do quadro).
                 let ms_entre = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
                     (Some(a), Some(b)) => Some(a.saturating_duration_since(b).as_millis() as u64),
                     _ => None,
@@ -1179,27 +1084,22 @@ mod tests {
     #[test]
     fn composicao_coloca_o_popup_onde_o_cliente_o_mostra() {
         let raiz = janela(1, 0, false, 0, 0, 100, 80);
-        // Sem popup: nada a compor.
         assert!(compose_with_popups(&raiz, std::slice::from_ref(&raiz)).is_none());
-        // Popup que passa da borda direita e de baixo: a tela de composição cresce.
         let menu = janela(2, 1, true, 50, 60, 100, 80);
         let (w, h, px) = compose_with_popups(&raiz, &[raiz.clone(), menu.clone()]).unwrap();
         assert_eq!((w, h), (150, 140));
         assert_eq!(px.len(), 150 * 140 * 4);
-        // Submenu relativo ao menu, com posição negativa: o canto da tela de composição se desloca.
         let sub = janela(3, 2, true, -70, -30, 40, 40);
         let (w, h, _) = compose_with_popups(&raiz, &[raiz.clone(), menu, sub]).unwrap();
-        // Submenu em (50 - 70, 60 - 30) = (-20, 30): de x = -20 a 150 e de y = 0 a 140.
         assert_eq!((w, h), (170, 140));
     }
 
     #[test]
     fn colagem_recorta_nas_bordas() {
-        // Destino 3x2 preto; origem 2x2 com B=1..4 em (-1, 1): só o pixel (1,0) da origem cai em (0,1).
         let mut dst = vec![0u8; 3 * 2 * 4];
         let src: Vec<u8> = (1..=4u8).flat_map(|b| [b, 0, 0, 0xFF]).collect();
         paste_bgrx(&mut dst, 3, 2, &src, 2, 2, -1, 1);
         assert_eq!(&dst[12..13], &[2]);
-        assert_eq!(dst.iter().filter(|b| **b != 0).count(), 2); // um pixel: B=2 e X=0xFF
+        assert_eq!(dst.iter().filter(|b| **b != 0).count(), 2);
     }
 }

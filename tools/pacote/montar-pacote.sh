@@ -1,13 +1,4 @@
 #!/bin/sh
-# Roda NO PI, como usuário comum, a partir da raiz do repositório enviada (tools\sync-pi.ps1, ou
-# `git archive` mais o arquivo VERSAO_GIT). Compila o psd em release e gera, em ~/pistick-saida/:
-#   pistick-<versão>-aarch64.tar.xz
-#   pistick-<versão>-aarch64.tar.xz.sha256
-# <versão> = versão do workspace + hash curto do commit (ex.: 0.1.0-g895b036; sem VERSAO_GIT: sem-git).
-# O mesmo commit gera o mesmo arquivo (dono root, datas fixas, ordem estável, xz de uma linha).
-# Veja docs/17-imagem-e-instalador.md.
-#
-#   sh tools/pacote/montar-pacote.sh [--saida PASTA]
 set -eu
 
 saida="$HOME/pistick-saida"
@@ -43,7 +34,6 @@ esac
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
-# Versão do workspace: primeira linha version = "..." depois de [workspace.package].
 base=$(tr -d '\r' < Cargo.toml | awk '/^\[workspace\.package\]/ { dentro = 1; next } /^\[/ { dentro = 0 } dentro && /^version[[:space:]]*=/ { split($0, partes, "\""); print partes[2]; exit }')
 if [ -z "$base" ]; then
     echo "FALHOU: não achei a versão em [workspace.package] de Cargo.toml." >&2

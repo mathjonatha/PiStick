@@ -1,13 +1,9 @@
-//! Testes do canal: aperto de mão de ponta a ponta, adulteração, repetição, truncamento, mensagens grandes
-//! e entradas aleatórias. As chaves são geradas a cada teste (nenhuma chave fixa de uso).
 
 use std::io::{Cursor, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use ps_secure::canal::{client_handshake, server_handshake, ChannelError, SecureReader, SecureWriter, MAX_PLAIN};
 use ps_secure::noise::{CipherState, HandshakeState, Keypair, NoiseError, Role};
-
-// ---- um cano em memória, em duas metades ----
 
 struct PipeR {
     rx: Receiver<Vec<u8>>,
@@ -51,7 +47,6 @@ impl Write for PipeW {
 
 type Ponta = (SecureReader<PipeR>, SecureWriter<PipeW>);
 
-/// Faz o aperto de mão completo entre duas threads e devolve as duas conexões prontas.
 fn conectar() -> (Ponta, Ponta) {
     let (c2s_r, c2s_w) = pipe();
     let (s2c_r, s2c_w) = pipe();
@@ -60,7 +55,6 @@ fn conectar() -> (Ponta, Ponta) {
     let (spub, cpub) = (*skey.public(), *ckey.public());
     let srv = std::thread::spawn(move || {
         let (mut r, mut w) = (c2s_r, s2c_w);
-        // O servidor real consome os 4 bytes de abertura antes; aqui fazemos o mesmo.
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic).unwrap();
         assert_eq!(&magic, b"PSN1");
@@ -98,7 +92,6 @@ fn ida_e_volta_pelo_canal_com_mensagens_de_varios_tamanhos() {
         cr.read_exact(&mut volta).unwrap();
         assert_eq!(volta, dados, "servidor -> cliente, {tam} bytes");
     }
-    // Fim limpo: ao largar o escritor, o leitor do outro lado vê EOF.
     drop(cw);
     let mut b = [0u8; 1];
     assert_eq!(sr.read(&mut b).unwrap(), 0);
@@ -119,12 +112,9 @@ fn verificacao_do_cliente_recusa_e_nao_envia_o_terceiro_recado() {
     let res = client_handshake(&mut r, &mut w, &Keypair::generate().unwrap(), "cliente", |_, _| Err("chave diferente da guardada".into()));
     assert!(matches!(res, Err(ChannelError::Rejected(m)) if m.contains("diferente")));
     drop((r, w));
-    // Sem o terceiro recado, o servidor termina com erro de leitura, não com sucesso.
     assert!(srv.join().unwrap().is_err());
 }
 
-/// Roda um aperto de mão de ponta a ponta, em memória, trocando o bit `bit` do recado `alvo` em trânsito
-/// (`None` = sem adulteração). Devolve `true` se algum lado detectou, ou se os hashes finais divergem.
 fn aperto_adulterado(a: &Keypair, b: &Keypair, alvo: usize, bit: Option<usize>) -> bool {
     let mut i = HandshakeState::new(Role::Initiator, b"PSN1", a.clone());
     let mut r = HandshakeState::new(Role::Responder, b"PSN1", b.clone());
@@ -146,7 +136,6 @@ fn aperto_adulterado(a: &Keypair, b: &Keypair, alvo: usize, bit: Option<usize>) 
 fn um_bit_trocado_em_qualquer_recado_do_aperto_de_mao_e_detectado() {
     let a = Keypair::generate().unwrap();
     let b = Keypair::generate().unwrap();
-    // Tamanhos dos recados: 32, 32+48+4+16, 48+4+16.
     for (n, tam) in [(0usize, 32usize), (1, 32 + 48 + 4 + 16), (2, 48 + 4 + 16)] {
         assert!(!aperto_adulterado(&a, &b, n, None), "sem adulteração tem de passar");
         for bit in 0..tam * 8 {
@@ -168,7 +157,6 @@ fn recado_truncado_ou_com_bytes_a_mais_e_recusado() {
     r.read_message(&m1).unwrap();
     let mut m2 = Vec::new();
     r.write_message(b"x", &mut m2).unwrap();
-    // O iniciador recusa todo corte do recado 2 e, depois de falhar, fica inutilizado.
     for n in 0..m2.len() {
         let mut i2 = HandshakeState::new(Role::Initiator, b"PSN1", Keypair::generate().unwrap());
         let mut tmp = Vec::new();
@@ -176,7 +164,6 @@ fn recado_truncado_ou_com_bytes_a_mais_e_recusado() {
         assert!(i2.read_message(&m2[..n]).is_err(), "corte em {n}");
         assert_eq!(i2.read_message(&m2).unwrap_err(), NoiseError::BadState);
     }
-    // Recado cheio (o do iniciador de cima) com bytes a mais no final: a carga muda e o aperto não fecha.
     let mut r3 = HandshakeState::new(Role::Responder, b"PSN1", Keypair::generate().unwrap());
     let mut longo = m1.clone();
     longo.extend_from_slice(b"sobra");
@@ -196,7 +183,6 @@ fn par_de_cifras() -> (CipherState, CipherState) {
     (i.finish().unwrap().send, r.finish().unwrap().recv)
 }
 
-/// Os registros (já enquadrados) de uma lista de textos, e o `recv` que os decifra.
 fn registros(textos: &[&[u8]]) -> (Vec<Vec<u8>>, CipherState) {
     let (send, recv) = par_de_cifras();
     let mut w = SecureWriter::new(Vec::new(), send);
@@ -204,7 +190,6 @@ fn registros(textos: &[&[u8]]) -> (Vec<Vec<u8>>, CipherState) {
     let mut antes = 0;
     for t in textos {
         w.write_all(t).unwrap();
-        // Sem acesso ao Vec por dentro, recupera os bytes no fim; os limites vêm do tamanho conhecido.
         antes += 2 + t.len() + 16;
         limites.push(antes);
     }
@@ -251,8 +236,6 @@ fn um_bit_trocado_em_qualquer_posicao_de_um_registro_e_rejeitado() {
             todos[alvo][bit / 8] ^= 1 << (bit % 8);
             let esperado: Vec<u8> = regs.concat();
             let (lido, erro) = ler_tudo(recv, todos.concat());
-            // Nunca devolve texto diferente do original como se fosse válido: ou dá erro, ou (se o registro
-            // anterior estava intacto) só entrega o que veio antes dele.
             assert!(erro.is_some(), "registro {alvo}, bit {bit}: adulteração aceita");
             let _ = esperado;
             let inicio_do_alvo: usize = if alvo == 0 { 0 } else { b"mensagem do protocolo".len() };
@@ -264,16 +247,13 @@ fn um_bit_trocado_em_qualquer_posicao_de_um_registro_e_rejeitado() {
 #[test]
 fn registro_repetido_ou_fora_de_ordem_e_rejeitado() {
     let (regs, recv) = registros(&[b"aaaa", b"bbbb", b"cccc"]);
-    // Repetição do primeiro registro no lugar do segundo.
     let (lido, erro) = ler_tudo(recv, [regs[0].clone(), regs[0].clone()].concat());
     assert_eq!(lido, b"aaaa");
     assert!(erro.is_some());
-    // Fora de ordem: 2 antes do 1.
     let (regs, recv) = registros(&[b"aaaa", b"bbbb", b"cccc"]);
     let (lido, erro) = ler_tudo(recv, [regs[1].clone(), regs[0].clone()].concat());
     assert!(lido.is_empty());
     assert!(erro.is_some());
-    // Registro faltando (1 e 3, sem o 2).
     let (regs, recv) = registros(&[b"aaaa", b"bbbb", b"cccc"]);
     let (lido, erro) = ler_tudo(recv, [regs[0].clone(), regs[2].clone()].concat());
     assert_eq!(lido, b"aaaa");
@@ -290,8 +270,6 @@ fn truncamento_nunca_entrega_registro_incompleto() {
         let (lido, erro) = ler_tudo(recv, bytes);
         let completos = if corte >= regs[0].len() { b"aaaa".len() } else { 0 };
         assert_eq!(lido.len(), completos, "corte em {corte}: entregou texto de registro incompleto");
-        // Corte exatamente nas fronteiras de registro parece um fim de conexão (como em TCP); qualquer outro
-        // corte é erro.
         let na_fronteira = corte == 0 || corte == regs[0].len();
         assert_eq!(erro.is_none(), na_fronteira, "corte em {corte}");
     }
@@ -300,12 +278,10 @@ fn truncamento_nunca_entrega_registro_incompleto() {
 #[test]
 fn comprimento_invalido_no_cabecalho_do_registro_encerra_o_canal() {
     let (_, recv) = registros(&[b"x"]);
-    // len < 16: curto demais para conter a etiqueta.
     let (_, e) = ler_tudo(recv, vec![0, 15, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     assert!(e.is_some());
 }
 
-/// Gerador xorshift determinístico para as entradas aleatórias.
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -326,7 +302,6 @@ fn dez_mil_entradas_aleatorias_no_leitor_de_handshake_nao_causam_panico() {
     for _ in 0..10_000 {
         let n = (rng.next() % 1300) as usize;
         let mut entrada = rng.bytes(n);
-        // Em parte dos casos, um prefixo de tamanho plausível, para passar da primeira checagem.
         if rng.next().is_multiple_of(2) && entrada.len() >= 2 {
             let l = (entrada.len() - 2).min(1024) as u16;
             entrada[..2].copy_from_slice(&l.to_be_bytes());
@@ -349,7 +324,6 @@ fn dez_mil_entradas_aleatorias_no_leitor_de_registros_nao_causam_panico() {
             entrada[..2].copy_from_slice(&l.to_be_bytes());
         }
         let (lido, erro) = ler_tudo(recv, entrada);
-        // Nada de aleatório autentica: nada é entregue.
         assert!(lido.is_empty());
         let _ = erro;
     }
@@ -363,8 +337,6 @@ fn nome_longo_demais_no_aperto_de_mao_e_recusado_antes_de_enviar() {
     assert!(w.is_empty());
 }
 
-/// Medição de vazão do canal em laço local (TCP em 127.0.0.1): `cargo test --release -p ps-secure --test canal
-/// vazao -- --ignored --nocapture`. Mensagens de 64 KiB, 256 MiB no total, cifra e decifra em threads diferentes.
 #[test]
 #[ignore = "medição; rodar com --release e --ignored"]
 fn vazao_do_canal_em_laco_local() {

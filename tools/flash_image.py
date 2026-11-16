@@ -8,9 +8,8 @@ import lzma
 import sys
 import time
 
-CHUNK = 4 * 1024 * 1024  # múltiplo de 512, exigido para escrita crua
+CHUNK = 4 * 1024 * 1024
 SECTOR = 512
-
 
 def main() -> int:
     image, device = sys.argv[1], sys.argv[2]
@@ -47,7 +46,6 @@ def main() -> int:
         return 2
     print(f"verificacao OK sha256={h_dst.hexdigest()}", flush=True)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,12 +1,4 @@
-//! Codec de blocos sem perdas do PiStick (codec 1, veja `docs/05-protocolo.md`).
-//!
-//! O quadro é dividido em blocos de 64×64. Cada bloco vira um byte de modo
-//! (SKIP, SOLID, PALETTE, LZ ou RAW) seguido dos dados. Formato de pixel BGRX8888:
-//! o byte X é ignorado na comparação e gravado como 0xFF pelo [`Decoder`].
 
-// O clippy do Rust 1.100 (Pi) sugere `as_chunks` no lugar de `chunks_exact(N)` e inicialização
-// direta no lugar de `let coded;`; o código atual
-// é medido e testado, e o Rust do notebook (1.95) aceita os dois. Mantido como está.
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks, clippy::needless_late_init)]
 
 use std::fmt;
@@ -15,7 +7,6 @@ pub mod lz;
 #[doc(hidden)]
 pub mod testutil;
 
-/// Lado do bloco, em pixels.
 pub const BLOCK: usize = 64;
 
 pub const MODE_SKIP: u8 = 0;
@@ -24,7 +15,6 @@ pub const MODE_PALETTE: u8 = 2;
 pub const MODE_LZ: u8 = 3;
 pub const MODE_RAW: u8 = 4;
 
-/// Retângulo em pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub x: u32,
@@ -42,7 +32,6 @@ impl Rect {
         self.w == 0 || self.h == 0
     }
 
-    /// Menor retângulo que contém os dois (ignora retângulos vazios).
     pub fn union(self, o: Rect) -> Rect {
         if self.is_empty() {
             return o;
@@ -57,7 +46,6 @@ impl Rect {
         Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
     }
 
-    /// Interseção, ou `None` se não se tocam.
     pub fn intersect(self, o: Rect) -> Option<Rect> {
         let x0 = self.x.max(o.x);
         let y0 = self.y.max(o.y);
@@ -71,20 +59,13 @@ impl Rect {
     }
 }
 
-/// Erro de decodificação. Nunca há pânico com entrada inválida.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Os dados acabaram no meio de um bloco ou faltam blocos.
     Truncated,
-    /// Byte de modo desconhecido.
     BadMode(u8),
-    /// Número de cores da paleta fora de 2..=16.
     BadPalette(u8),
-    /// Índice de paleta maior ou igual ao número de cores.
     BadPaletteIndex,
-    /// Erro no descompressor LZ.
     BadLz(lz::LzError),
-    /// Sobraram bytes depois do último bloco.
     TrailingData,
 }
 
@@ -117,21 +98,15 @@ fn palette_bits(n: usize) -> usize {
     }
 }
 
-/// Abaixo deste número de blocos sujos o codificador não usa threads: o custo de criar
-/// threads por quadro supera o ganho (medido no Pi e no notebook; veja `docs/medicoes.md`).
 pub const DEFAULT_PARALLEL_MIN_BLOCKS: usize = 8;
 
-/// Estado de trabalho de uma thread de codificação.
 struct Scratch {
-    /// Bloco em BGR (3 bytes por pixel), só preenchido quando o bloco vai para LZ ou RAW.
     bgr: Vec<u8>,
-    /// Índice de paleta de cada pixel do bloco, linha a linha.
     idx: Vec<u8>,
     lz_out: Vec<u8>,
     table: Vec<u16>,
 }
 
-/// Cor do pixel BGRX como `u32`, sem o byte X.
 #[inline(always)]
 fn px_color(p: &[u8]) -> u32 {
     u32::from_le_bytes([p[0], p[1], p[2], p[3]]) & 0x00FF_FFFF
@@ -147,7 +122,6 @@ impl Scratch {
         }
     }
 
-    /// Converte o bloco de BGRX para BGR (3 bytes por pixel, linha a linha) em `self.bgr`.
     fn gather(&mut self, frame: &[u8], stride: usize, x0: usize, y0: usize, bw: usize, bh: usize) {
         self.bgr.clear();
         self.bgr.resize(bw * bh * 3, 0);
@@ -160,13 +134,10 @@ impl Scratch {
         }
     }
 
-    /// Uma passada sobre o bloco lido direto do quadro BGRX: monta a paleta (até 16 cores) e
-    /// grava em `self.idx` o índice de cada pixel. `None` assim que aparece a 17ª cor.
     fn palette_pass(&mut self, frame: &[u8], stride: usize, x0: usize, y0: usize, bw: usize, bh: usize) -> Option<([u32; 16], usize)> {
         let mut pal = [0u32; 16];
         let mut n = 0usize;
-        // Atalho: costuma repetir a cor do pixel anterior.
-        let mut last_c = u32::MAX; // nunca é uma cor válida (acima de 24 bits)
+        let mut last_c = u32::MAX;
         let mut last_i = 0u8;
         self.idx.clear();
         for y in y0..y0 + bh {
@@ -196,7 +167,6 @@ impl Scratch {
         Some((pal, n))
     }
 
-    /// Empacota `self.idx` (linha a linha, cada linha em byte novo) com `bits` por índice.
     fn pack_indices(&self, bw: usize, bits: usize, out: &mut Vec<u8>) {
         for row in self.idx.chunks_exact(bw) {
             let mut acc = 0u8;
@@ -216,7 +186,6 @@ impl Scratch {
         }
     }
 
-    /// LZ ou RAW a partir de `self.bgr`.
     fn lz_or_raw(&mut self, out: &mut Vec<u8>) {
         self.lz_out.clear();
         let clen = lz::compress(&self.bgr, &mut self.table, &mut self.lz_out);
@@ -246,7 +215,6 @@ impl Scratch {
                 self.pack_indices(bw, palette_bits(n), out);
             }
             None => {
-                // Só aqui a conversão para BGR é necessária.
                 self.gather(frame, stride, x0, y0, bw, bh);
                 self.lz_or_raw(out);
             }
@@ -254,7 +222,6 @@ impl Scratch {
     }
 }
 
-/// Dados imutáveis de um quadro, compartilhados entre as threads.
 #[derive(Clone, Copy)]
 struct FrameCtx<'a> {
     frame: &'a [u8],
@@ -264,10 +231,6 @@ struct FrameCtx<'a> {
     ref_valid: bool,
 }
 
-/// Codifica as faixas de blocos (linhas de blocos) a partir da faixa `first_strip`.
-/// `reference` cobre exatamente essas faixas; `dirty`, `force` e `coded_flags` têm uma linha de `bw`
-/// flags por faixa. `force` pula a comparação com a referência; `coded_flags` recebe `true` nos
-/// blocos que saíram diferentes de SKIP (o chamador já os zerou).
 #[allow(clippy::too_many_arguments)]
 fn encode_strips(ctx: FrameCtx<'_>, first_strip: usize, reference: &mut [u8], dirty: &[bool], force: &[bool], coded_flags: &mut [bool], scratch: &mut Scratch, out: &mut Vec<u8>) -> usize {
     let mut coded = 0usize;
@@ -290,7 +253,6 @@ fn encode_strips(ctx: FrameCtx<'_>, first_strip: usize, reference: &mut [u8], di
             scratch.encode_block(ctx.frame, stride, x0, y0, bwpx, bhpx, out);
             coded_flags[i * bw + bx] = true;
             coded += 1;
-            // Atualiza a referência (região exclusiva desta faixa).
             for r in 0..bhpx {
                 let f = &ctx.frame[(y0 + r) * stride + x0 * 4..(y0 + r) * stride + (x0 + bwpx) * 4];
                 rstrip[(r * w + x0) * 4..(r * w + x0 + bwpx) * 4].copy_from_slice(f);
@@ -312,24 +274,15 @@ fn block_equals_reference(frame: &[u8], stride: usize, rstrip: &[u8], w: usize, 
     true
 }
 
-/// Codificador com a referência (último quadro enviado) guardada internamente.
-///
-/// Os quadros grandes são codificados em paralelo por faixas de blocos: cada thread codifica
-/// um conjunto contíguo de faixas num buffer próprio e os buffers são concatenados em ordem,
-/// então o fluxo de bytes é idêntico ao da versão de uma thread.
 pub struct Encoder {
     width: usize,
     height: usize,
     reference: Vec<u8>,
     ref_valid: bool,
     dirty: Vec<bool>,
-    /// Blocos excluídos (região de vídeo): saem sempre SKIP, sem comparar e sem tocar a referência.
     excluded: Vec<bool>,
-    /// Blocos cuja referência não vale mais: o próximo quadro os codifica sem SKIP.
     force: Vec<bool>,
-    /// Blocos que saíram diferentes de SKIP na última codificação.
     coded: Vec<bool>,
-    /// Blocos que a última codificação de fato tentou: sujos pelo dano (ou invalidados) e dentro das faixas codificadas.
     attempted: Vec<bool>,
     threads: usize,
     par_min_blocks: usize,
@@ -338,13 +291,11 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Usa `std::thread::available_parallelism()` threads (no máximo 8).
     pub fn new(width: u32, height: u32) -> Self {
         let n = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
         Self::with_threads(width, height, n)
     }
 
-    /// Fixa o número de threads (`0` vale `1`).
     pub fn with_threads(width: u32, height: u32, threads: usize) -> Self {
         let mut e = Encoder {
             width: 0,
@@ -376,12 +327,10 @@ impl Encoder {
         self.outs.resize_with(self.threads, Vec::new);
     }
 
-    /// Número mínimo de blocos sujos para usar mais de uma thread.
     pub fn set_parallel_min_blocks(&mut self, n: usize) {
         self.par_min_blocks = n;
     }
 
-    /// Descarta a referência e muda o tamanho. O próximo quadro sai sem blocos SKIP.
     pub fn reset(&mut self, width: u32, height: u32) {
         self.width = width as usize;
         self.height = height as usize;
@@ -395,36 +344,22 @@ impl Encoder {
         }
     }
 
-    /// Blocos por linha de blocos.
     pub fn block_cols(&self) -> usize {
         blocks_across(self.width)
     }
 
-    /// Linhas de blocos (o mesmo que [`Encoder::strip_count`]).
     pub fn block_rows(&self) -> usize {
         blocks_across(self.height)
     }
 
-    /// Quais blocos saíram diferentes de SKIP na última codificação, em ordem de linha
-    /// (`block_cols() * block_rows()` valores). Tudo `false` antes do primeiro quadro.
     pub fn coded_blocks(&self) -> &[bool] {
         &self.coded
     }
 
-    /// Quais blocos a última codificação **tentou** (estavam sujos pelo dano, ou invalidados, e dentro das
-    /// faixas codificadas), mesmo que tenham saído SKIP por serem iguais à referência. Fora disso, o bloco
-    /// não foi examinado: o `false` de [`Encoder::coded_blocks`] nele não quer dizer "não mudou". Tudo
-    /// `false` antes do primeiro quadro.
     pub fn attempted_blocks(&self) -> &[bool] {
         &self.attempted
     }
 
-    /// Exclui um retângulo de blocos (região de vídeo): enquanto durar, os blocos que ele toca saem
-    /// sempre SKIP, sem comparação, e a referência deles não muda. `None` tira a exclusão. O
-    /// retângulo deve estar alinhado aos blocos de 64×64; blocos só parcialmente tocados também
-    /// entram. A exclusão não invalida nada: ao tirá-la, use [`Encoder::invalidate_rect`]
-    /// (um quadro com referência ainda inválida já marca sozinho os blocos excluídos como inválidos).
-    /// `reset` tira a exclusão.
     pub fn set_excluded(&mut self, rect: Option<Rect>) {
         self.excluded.fill(false);
         if let Some(r) = rect {
@@ -434,17 +369,12 @@ impl Encoder {
         }
     }
 
-    /// Invalida a referência dos blocos que `rect` toca: o próximo quadro os codifica sem SKIP, mesmo
-    /// sem dano e mesmo que o conteúdo seja igual ao antigo. Vale até o bloco ser codificado
-    /// (um quadro fatiado deixa para depois os blocos fora das faixas pedidas).
     pub fn invalidate_rect(&mut self, rect: Rect) {
         let (w, h) = (self.width, self.height);
         let force = &mut self.force;
         for_blocks(rect, w, h, |i| force[i] = true);
     }
 
-    /// Quantos blocos o próximo `encode` com `damage` tentaria codificar, por faixa de blocos:
-    /// como [`dirty_blocks_per_strip`], mas contando também a exclusão e a invalidação do codificador.
     pub fn dirty_per_strip(&self, damage: Option<&[Rect]>) -> Vec<usize> {
         if self.width == 0 || self.height == 0 {
             return Vec::new();
@@ -454,8 +384,6 @@ impl Encoder {
         dirty.chunks(blocks_across(self.width)).map(|r| r.iter().filter(|&&d| d).count()).collect()
     }
 
-    /// Blocos a tentar codificar: os tocados pelo dano (todos sem referência válida), mais os
-    /// invalidados, menos os excluídos.
     fn compute_dirty(damage: Option<&[Rect]>, w: usize, h: usize, ref_valid: bool, excluded: &[bool], force: &[bool], dirty: &mut Vec<bool>) {
         mark_dirty(if ref_valid { damage } else { None }, w, h, dirty);
         for (i, d) in dirty.iter_mut().enumerate() {
@@ -467,24 +395,14 @@ impl Encoder {
         }
     }
 
-    /// Número de faixas de blocos (linhas de blocos de 64 px) do quadro.
     pub fn strip_count(&self) -> usize {
         blocks_across(self.height)
     }
 
-    /// Codifica `frame` (BGRX, `stride` em bytes) acrescentando a `out`.
-    /// `damage`: retângulos alterados desde o último quadro codificado; `None` = quadro inteiro.
-    /// Devolve quantos blocos foram codificados (não-SKIP).
-    /// Pânico se `frame` for menor que `stride * (altura - 1) + largura * 4`.
     pub fn encode(&mut self, frame: &[u8], stride: usize, damage: Option<&[Rect]>, out: &mut Vec<u8>) -> usize {
         self.encode_range(frame, stride, damage, 0..usize::MAX, out)
     }
 
-    /// Como [`Encoder::encode`], mas só codifica as faixas de blocos em `strips`; o resto do quadro
-    /// sai como SKIP **sem** atualizar a referência dessas faixas (o dano delas continua valendo
-    /// para um próximo quadro). O fluxo tem o mesmo formato de sempre: um `FRAME` fatiado se aplica
-    /// no `Decoder` como qualquer outro. Sem referência válida (logo depois de `new` ou `reset`)
-    /// o quadro inteiro é codificado, ignorando `strips`: o primeiro quadro não pode ter SKIP.
     pub fn encode_range(&mut self, frame: &[u8], stride: usize, damage: Option<&[Rect]>, strips: std::ops::Range<usize>, out: &mut Vec<u8>) -> usize {
         let (w, h) = (self.width, self.height);
         if w == 0 || h == 0 {
@@ -499,7 +417,6 @@ impl Encoder {
         self.coded.fill(false);
         Self::compute_dirty(damage, w, h, self.ref_valid, &self.excluded, &self.force, &mut self.dirty);
         if self.ref_valid {
-            // Faixas fora do intervalo: nada a codificar, referência intacta.
             for by in (0..bh).filter(|by| !strips.contains(by)) {
                 self.dirty[by * bw..(by + 1) * bw].fill(false);
             }
@@ -515,7 +432,6 @@ impl Encoder {
         if *threads <= 1 || bh <= 1 || n_dirty < *par_min_blocks {
             coded = encode_strips(ctx, 0, reference, dirty, force, coded_flags, &mut scratch[0], out);
         } else {
-            // Grupos contíguos de faixas com quantidade parecida de blocos sujos.
             let per_strip: Vec<usize> = dirty.chunks(bw).map(|r| r.iter().filter(|&&d| d).count()).collect();
             let mut groups: Vec<(usize, usize)> = Vec::with_capacity(*threads);
             let mut start = 0;
@@ -568,8 +484,6 @@ impl Encoder {
             coded = counts.iter().sum();
         }
         self.ref_valid = true;
-        // Blocos codificados já têm referência nova; os excluídos de um quadro sem referência
-        // continuam sem referência válida.
         for i in 0..self.coded.len() {
             if self.coded[i] {
                 self.force[i] = false;
@@ -581,7 +495,6 @@ impl Encoder {
     }
 }
 
-/// Chama `f` com o índice (em ordem de linha) de cada bloco que `r` toca num quadro `w`×`h`.
 fn for_blocks(r: Rect, w: usize, h: usize, mut f: impl FnMut(usize)) {
     if r.is_empty() || r.x as usize >= w || r.y as usize >= h {
         return;
@@ -596,7 +509,6 @@ fn for_blocks(r: Rect, w: usize, h: usize, mut f: impl FnMut(usize)) {
     }
 }
 
-/// Marca os blocos tocados pelos retângulos de dano (`None` = todos).
 fn mark_dirty(damage: Option<&[Rect]>, w: usize, h: usize, dirty: &mut Vec<bool>) {
     let bw = blocks_across(w);
     let bh = blocks_across(h);
@@ -621,8 +533,6 @@ fn mark_dirty(damage: Option<&[Rect]>, w: usize, h: usize, dirty: &mut Vec<bool>
     }
 }
 
-/// Quantos blocos de 64×64 o dano toca, por faixa de blocos, num quadro `w`×`h`.
-/// `None` = quadro inteiro. Serve ao servidor para estimar o tamanho de um quadro e fatiá-lo.
 pub fn dirty_blocks_per_strip(damage: Option<&[Rect]>, w: u32, h: u32) -> Vec<usize> {
     let (w, h) = (w as usize, h as usize);
     if w == 0 || h == 0 {
@@ -633,7 +543,6 @@ pub fn dirty_blocks_per_strip(damage: Option<&[Rect]>, w: u32, h: u32) -> Vec<us
     dirty.chunks(blocks_across(w)).map(|r| r.iter().filter(|&&d| d).count()).collect()
 }
 
-/// Compara duas linhas BGRX ignorando o byte X, de dois em dois pixels (`u64` mascarado).
 fn rows_equal_ignoring_x(a: &[u8], b: &[u8]) -> bool {
     const MASK: u64 = 0x00FF_FFFF_00FF_FFFF;
     let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
@@ -642,7 +551,6 @@ fn rows_equal_ignoring_x(a: &[u8], b: &[u8]) -> bool {
         && ra.chunks_exact(4).zip(rb.chunks_exact(4)).all(|(p, q)| p[..3] == q[..3])
 }
 
-/// Decodificador que guarda o quadro atual (BGRX, stride = largura × 4).
 pub struct Decoder {
     width: usize,
     height: usize,
@@ -657,7 +565,6 @@ impl Decoder {
         d
     }
 
-    /// Muda o tamanho e limpa o quadro (preto, X = 0xFF).
     pub fn reset(&mut self, width: u32, height: u32) {
         self.width = width as usize;
         self.height = height as usize;
@@ -676,14 +583,10 @@ impl Decoder {
         self.height as u32
     }
 
-    /// Pixels BGRX, stride = largura × 4.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
-    /// Escreve pixels BGRX de fora do codec (um quadro de vídeo decodificado) no retângulo `r` do
-    /// quadro atual, gravando X = 0xFF. `src` tem `r.w * 4` bytes por linha. O retângulo é recortado
-    /// ao quadro; devolve `false` (sem escrever nada) se `src` é pequeno demais.
     pub fn write_region(&mut self, r: Rect, src: &[u8]) -> bool {
         let (w, h) = (self.width, self.height);
         if r.is_empty() || r.x as usize >= w || r.y as usize >= h {
@@ -706,9 +609,6 @@ impl Decoder {
         true
     }
 
-    /// Aplica os dados de um quadro e devolve os retângulos que mudaram.
-    /// Em caso de erro o quadro pode ter sido alterado parcialmente; o chamador
-    /// deve tratar o erro como fatal para a conexão.
     pub fn decode(&mut self, data: &[u8]) -> Result<Vec<Rect>, DecodeError> {
         let (w, h) = (self.width, self.height);
         let bw = blocks_across(w);
@@ -808,7 +708,6 @@ impl Decoder {
     }
 }
 
-/// Copia pixels BGR de 3 bytes (linha a linha) para o bloco, gravando X = 0xFF.
 fn blit_bgr(pixels: &mut [u8], stride: usize, src: &[u8], x0: usize, y0: usize, bw: usize, bh: usize) {
     for (i, srow) in src.chunks_exact(bw * 3).take(bh).enumerate() {
         let y = y0 + i;
@@ -835,27 +734,19 @@ fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], Decod
 #[cfg(test)]
 mod tests;
 
-/// Tempo (ns) por fase, somado sobre todos os blocos de um quadro inteiro.
 #[doc(hidden)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PhaseTimes {
-    /// Comparação com a referência, com blocos iguais (varredura completa; o pior caso do SKIP).
     pub compare_ns: u64,
-    /// Passada da paleta (contagem de cores e índices); inclui as tentativas abandonadas.
     pub palette_ns: u64,
-    /// Empacotamento dos índices (só blocos com 2..=16 cores).
     pub pack_ns: u64,
-    /// Conversão BGRX para BGR (só blocos que vão para LZ ou RAW).
     pub gather_ns: u64,
-    /// Compressão LZ (só blocos com mais de 16 cores).
     pub lz_ns: u64,
     pub blocks_solid: usize,
     pub blocks_palette: usize,
     pub blocks_lz_or_raw: usize,
 }
 
-/// Mede cada fase do codificador isoladamente num quadro inteiro, em uma thread.
-/// Serve só para o benchmark; as fases rodam em sequência sobre os mesmos blocos.
 #[doc(hidden)]
 pub fn profile_phases(frame: &[u8], w: usize, h: usize) -> PhaseTimes {
     use std::time::Instant;

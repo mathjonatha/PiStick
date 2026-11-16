@@ -1,5 +1,3 @@
-# Grava o Raspberry Pi OS no cartão SD. Precisa rodar como administrador.
-# Só aceita um disco USB removível pequeno cujo nome contenha "SD"; qualquer outra coisa aborta.
 param(
     [int]$DiskNumber = 3,
     [string]$Root = "C:\Users\math\Documents\Raspberry",
@@ -20,7 +18,6 @@ try {
     }
     if (-not (Test-Path $image)) { throw "imagem nao encontrada: $image" }
 
-    # Wi-Fi atual do notebook -> mesmo Wi-Fi para o Pi (arquivo temporario, apagado por write-bootconfig.ps1)
     $ssid = (netsh wlan show interfaces | Select-String '^\s*SSID\s*:\s*(.+)$' | Select-Object -First 1).Matches.Groups[1].Value.Trim()
     if ($ssid) {
         $tmp = Join-Path $cache "wifi"

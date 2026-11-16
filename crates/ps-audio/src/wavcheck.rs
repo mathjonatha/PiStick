@@ -1,19 +1,13 @@
-//! Leitura mínima de WAV PCM de 16 bits e conferência de dois tons (um por canal), usadas pelo `psd verify-wav`
-//! (marco 7B: o que o `pw-record` gravou da fonte `pistick-mic` é o tom que o `psc --mic-file` mandou?).
 
 use crate::synth::{goertzel, split_stereo};
 
-/// WAV PCM de 16 bits lido.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wav {
     pub channels: u16,
     pub rate: u32,
-    /// Amostras intercaladas.
     pub samples: Vec<i16>,
 }
 
-/// Lê um WAV PCM de 16 bits (formato 1 ou o extensível 0xFFFE), percorrendo os blocos. Um tamanho do bloco `data`
-/// maior que o arquivo (gravação interrompida, tamanho 0xFFFFFFFF) vale até o fim do arquivo.
 pub fn parse_wav(b: &[u8]) -> Result<Wav, String> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return Err("não é um arquivo WAV (falta RIFF/WAVE)".into());
@@ -51,29 +45,19 @@ pub fn parse_wav(b: &[u8]) -> Result<Wav, String> {
     Err("sem bloco data".into())
 }
 
-/// Resultado de [`verify_tones`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToneReport {
     pub frames: usize,
     pub seconds: f64,
-    /// Janela analisada, em segundos.
     pub window: (f64, f64),
-    /// Amplitude do tom em cada canal: a **mediana** das amplitudes dos blocos de 100 ms. Descontinuidades de fase
-    /// de uma fração de milissegundo (o PipeWire jogando fora ou repetindo uns poucos quadros) derrubam a soma
-    /// coerente de vários segundos sem que ninguém as ouça; a mediana por bloco mede o que o ouvinte ouve.
     pub left: f64,
     pub right: f64,
-    /// Amplitude coerente (Goertzel sobre a janela inteira), só informativa: cai com qualquer salto de fase.
     pub coherent: (f64, f64),
-    /// Blocos de 100 ms com menos de 90% da amplitude esperada num dos canais (reprova se passam de 5% dos blocos).
     pub weak: usize,
-    /// Vazamentos: tom da direita no canal esquerdo e tom da esquerda no canal direito.
     pub leak_left: f64,
     pub leak_right: f64,
-    /// Blocos de 100 ms da janela com menos da metade da amplitude esperada (buracos).
     pub holes: usize,
     pub blocks: usize,
-    /// Problemas achados; vazio = aprovado.
     pub problems: Vec<String>,
 }
 
@@ -83,9 +67,6 @@ impl ToneReport {
     }
 }
 
-/// Confere se o canal esquerdo tem um tom de `freq_l` Hz e o direito, de `freq_r` Hz, ambos com amplitude (fração da
-/// escala cheia) `amplitude` com tolerância relativa de 5%, sem vazamento (acima de 0,02) e sem buracos. Pula o
-/// primeiro 0,5 s (a fonte ainda enche a fila) e os últimos 0,25 s da gravação.
 pub fn verify_tones(w: &Wav, freq_l: f64, freq_r: f64, amplitude: f64) -> ToneReport {
     let rate = f64::from(w.rate.max(1));
     let frames = w.samples.len() / w.channels.max(1) as usize;
@@ -107,7 +88,6 @@ pub fn verify_tones(w: &Wav, freq_l: f64, freq_r: f64, amplitude: f64) -> ToneRe
     r.window = (start as f64 / rate, end as f64 / rate);
     let (l, rr) = split_stereo(&w.samples[start * 2..end * 2]);
     r.coherent = (goertzel(&l, freq_l), goertzel(&rr, freq_r));
-    // Amplitude por bloco de 100 ms.
     let block = (rate / 10.0) as usize;
     let mut amps_l: Vec<f64> = l.chunks_exact(block).map(|c| goertzel(c, freq_l)).collect();
     let mut amps_r: Vec<f64> = rr.chunks_exact(block).map(|c| goertzel(c, freq_r)).collect();
@@ -191,7 +171,6 @@ mod tests {
         let s = tons(0.1, 440.0, 880.0, 0.25);
         let w = parse_wav(&wav_bytes(48000, 2, &s, true)).unwrap();
         assert_eq!((w.channels, w.rate, w.samples.len()), (2, 48000, s.len()));
-        // Tamanho do bloco data maior que o arquivo (gravação interrompida).
         let mut b = wav_bytes(48000, 2, &s, false);
         let pos = b.windows(4).position(|x| x == b"data").unwrap();
         b[pos + 4..pos + 8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
@@ -206,7 +185,6 @@ mod tests {
         for corte in 0..b.len() {
             let _ = parse_wav(&b[..corte]);
         }
-        // 8 bits não é aceito.
         let mut c = b.clone();
         let pos = c.windows(4).position(|x| x == b"fmt ").unwrap();
         c[pos + 8 + 14] = 8;
@@ -219,22 +197,17 @@ mod tests {
         let r = verify_tones(&w, 440.0, 880.0, 0.25);
         assert!(r.ok(), "{:?}", r.problems);
         assert!((r.left - 0.25).abs() < 0.005 && (r.right - 0.25).abs() < 0.005);
-        // Canais trocados.
         assert!(!verify_tones(&w, 880.0, 440.0, 0.25).ok());
-        // Amplitude 10% menor: fora dos 5%.
         let baixa = Wav { channels: 2, rate: 48000, samples: tons(4.0, 440.0, 880.0, 0.225) };
         assert!(!verify_tones(&baixa, 440.0, 880.0, 0.25).ok());
-        // 3% fora passa.
         let quase = Wav { channels: 2, rate: 48000, samples: tons(4.0, 440.0, 880.0, 0.2425) };
         assert!(verify_tones(&quase, 440.0, 880.0, 0.25).ok());
-        // Curta demais e mono.
         assert!(!verify_tones(&Wav { channels: 2, rate: 48000, samples: tons(1.0, 440.0, 880.0, 0.25) }, 440.0, 880.0, 0.25).ok());
         assert!(!verify_tones(&Wav { channels: 1, rate: 48000, samples: vec![0; 48000 * 3] }, 440.0, 880.0, 0.25).ok());
     }
 
     #[test]
     fn salto_de_fase_de_meio_milissegundo_nao_reprova_mas_e_informado() {
-        // Um tom de 4 s com 30 quadros jogados fora aos 2 s (0,6 ms): fase quebrada, nenhum buraco.
         let mut s = tons(4.0, 440.0, 880.0, 0.25);
         s.drain(96_000 * 2..(96_000 + 30) * 2);
         let r = verify_tones(&Wav { channels: 2, rate: 48000, samples: s }, 440.0, 880.0, 0.25);
@@ -242,7 +215,6 @@ mod tests {
         assert!((r.left - 0.25).abs() < 0.0125 && (r.right - 0.25).abs() < 0.0125);
         assert!(r.coherent.0 < 0.2, "a soma coerente cai: {:?}", r.coherent);
         assert!(r.weak <= 2, "fracos {}", r.weak);
-        // Muitos saltos (um por bloco): reprova.
         let mut ruim = tons(4.0, 440.0, 880.0, 0.25);
         for k in (1..35).rev() {
             let at = (k * 4800 + 2400) * 2;
@@ -255,7 +227,6 @@ mod tests {
     #[test]
     fn um_buraco_no_meio_e_apontado() {
         let mut s = tons(4.0, 440.0, 880.0, 0.25);
-        // 300 ms de silêncio em 2 s.
         for v in &mut s[96000 * 2..(96000 + 14400) * 2] {
             *v = 0;
         }

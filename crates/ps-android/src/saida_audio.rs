@@ -1,32 +1,19 @@
-//! A parte pura da saída de som do Android (docs/26, decisão 9): o que o retorno de chamada de dados do AAudio faz e a
-//! política de reabertura do fluxo. O que fala com o NDK está em `aaudio.rs`.
-//!
-//! O retorno de chamada de dados roda numa thread de tempo real do sistema: não aloca, não registra e nunca espera uma
-//! trava ([`encher`] usa [`AudioEngine::pull_nowait`] e só soma contadores atômicos). Uma falta (a trava estava com a
-//! thread de rede naquele instante) entrega silêncio no bloco e é contada, para o registro fora da thread de tempo real.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ps_client::audio::AudioEngine;
 
-/// Canais da saída (estéreo, `i16`, 48 kHz).
 pub const CANAIS: usize = 2;
 pub const TAXA: i32 = 48_000;
 
-/// Contadores do retorno de chamada, lidos fora dele.
 #[derive(Debug, Default)]
 pub struct Contadores {
-    /// Blocos entregues.
     pub blocos: AtomicU64,
-    /// Blocos em que a fila estava com a thread de rede e saiu silêncio.
     pub faltas: AtomicU64,
-    /// Blocos pedidos com tamanho inválido (entregues em silêncio).
     pub invalidos: AtomicU64,
 }
 
-/// O corpo do retorno de chamada de dados: preenche `dados` (`quadros * 2` amostras) com o próximo áudio da fila.
-/// Sem alocação, sem registro, sem espera. Se `dados` não tem um número par de amostras, sai silêncio.
 pub fn encher(engine: &AudioEngine, dados: &mut [i16], c: &Contadores) {
     c.blocos.fetch_add(1, Ordering::Relaxed);
     if dados.is_empty() || !dados.len().is_multiple_of(CANAIS) {
@@ -39,8 +26,6 @@ pub fn encher(engine: &AudioEngine, dados: &mut [i16], c: &Contadores) {
     }
 }
 
-/// Política de reabertura do fluxo depois de um erro (fone plugado, aparelho de som trocado): espera crescente entre
-/// as tentativas, e desiste depois de [`Reabertura::MAX_TENTATIVAS`] falhas seguidas.
 #[derive(Debug, Default)]
 pub struct Reabertura {
     falhas: u32,
@@ -55,12 +40,10 @@ impl Reabertura {
         Reabertura::default()
     }
 
-    /// A reabertura funcionou.
     pub fn sucesso(&mut self) {
         self.falhas = 0;
     }
 
-    /// A reabertura falhou: quanto esperar antes da próxima, ou `None` se é hora de desistir.
     pub fn falha(&mut self) -> Option<Duration> {
         self.falhas += 1;
         if self.falhas > Self::MAX_TENTATIVAS {
@@ -80,7 +63,6 @@ mod tests {
     use super::*;
     use ps_audio::{samples_to_pcm, CODEC_PCM};
 
-    /// Um motor com som: 440 Hz no canal esquerdo e silêncio no direito, alvo mínimo da fila.
     fn motor_com_som(blocos: usize) -> std::sync::Arc<AudioEngine> {
         let e = AudioEngine::new(None);
         e.on_start(0, CODEC_PCM, 2, 48_000, 480).unwrap();
@@ -120,7 +102,6 @@ mod tests {
     fn trava_ocupada_entrega_silencio_conta_a_falta_e_nao_espera() {
         let e = motor_com_som(20);
         let c = Contadores::default();
-        // Uma thread "de rede" segura a trava do motor durante o bloco.
         let e2 = e.clone();
         let (pronto_tx, pronto_rx) = std::sync::mpsc::channel();
         let (solta_tx, solta_rx) = std::sync::mpsc::channel::<()>();
@@ -137,7 +118,6 @@ mod tests {
         assert_eq!(c.faltas.load(Ordering::Relaxed), 1);
         solta_tx.send(()).unwrap();
         t.join().unwrap();
-        // Livre de novo: volta a puxar.
         encher(&e, &mut saida, &c);
         assert_eq!(c.faltas.load(Ordering::Relaxed), 1);
     }

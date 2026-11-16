@@ -1,16 +1,10 @@
 #!/bin/sh
-# Roda NO PI: mede memória e CPU com o psd (e o Android do Waydroid, se estiver rodando).
-#   sh ~/pistick/tools/pi/medir-android.sh [SEGUNDOS]      (padrão 30)
-# Memória: `free -m` (usada e disponível) e a memória do cgroup do contêiner. CPU: média no período, em % de UM núcleo
-# (o Pi 4 tem 4, então 400 é a máquina inteira), do psd, do contêiner (cgroup lxc.payload.waydroid), do daemon
-# waydroid-container e da máquina toda (/proc/stat).
 n="${1:-30}"
 cg=/sys/fs/cgroup/lxc.payload.waydroid
 psd=$(pgrep -x psd | head -n 1)
 
 ticks() { if [ -n "$1" ] && [ -r "/proc/$1/stat" ]; then awk '{print $14 + $15}' "/proc/$1/stat"; else echo 0; fi; }
 usec() { if [ -r "$cg/cpu.stat" ]; then awk '/^usage_usec/{print $2}' "$cg/cpu.stat"; else echo 0; fi; }
-# Ticks ocupados da máquina: user + nice + system + irq + softirq + steal (sem o idle e o iowait).
 ocupado() { awk '/^cpu /{print $2+$3+$4+$7+$8+$9}' /proc/stat; }
 
 echo "== memória"

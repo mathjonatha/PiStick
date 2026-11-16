@@ -1,8 +1,3 @@
-//! Pastas: monta o manifesto de uma pasta e confere uma pasta contra um manifesto.
-//!
-//! Só arquivos comuns entram. Link simbólico, dispositivo ou qualquer outra coisa que não seja arquivo comum ou pasta
-//! é erro (uma atualização não carrega atalhos para fora da pasta). Pastas vazias não contam (o manifesto lista
-//! arquivos). **O manifesto e a assinatura ficam fora da pasta**; se estiverem dentro, contam como arquivo a mais.
 
 use std::fs;
 use std::io::Read;
@@ -17,7 +12,6 @@ fn erro_io(c: &Path, e: std::io::Error) -> Erro {
     Erro::Io(format!("{}: {e}", c.display()))
 }
 
-/// SHA-256 e tamanho de um arquivo, lendo em blocos.
 pub fn hash_do_arquivo(c: &Path) -> Result<([u8; 32], u64), Erro> {
     let mut f = fs::File::open(c).map_err(|e| erro_io(c, e))?;
     let mut h = Sha256::new();
@@ -34,7 +28,6 @@ pub fn hash_do_arquivo(c: &Path) -> Result<([u8; 32], u64), Erro> {
     Ok((h.finalize().into(), total))
 }
 
-/// Lista os arquivos comuns da pasta, com caminho relativo (`/` como separador), em ordem crescente dos bytes.
 fn listar(raiz: &Path) -> Result<Vec<(String, std::path::PathBuf)>, Erro> {
     let mut saida = Vec::new();
     let mut pilha = vec![(raiz.to_path_buf(), String::new())];
@@ -59,7 +52,6 @@ fn listar(raiz: &Path) -> Result<Vec<(String, std::path::PathBuf)>, Erro> {
     Ok(saida)
 }
 
-/// Monta o manifesto de uma pasta (hash e tamanho de cada arquivo). Recusa caminho que o manifesto não aceita.
 pub fn montar(pasta: &Path, serial: u64, versao: &str) -> Result<Manifest, Erro> {
     let mut arquivos = Vec::new();
     for (rel, caminho) in listar(pasta)? {
@@ -72,11 +64,8 @@ pub fn montar(pasta: &Path, serial: u64, versao: &str) -> Result<Manifest, Erro>
     Ok(m)
 }
 
-/// Confere a pasta contra o manifesto: cada arquivo listado existe, com o tamanho e o SHA-256 certos; **arquivo a mais
-/// na pasta é recusado**. Devolve o número de arquivos conferidos.
 pub fn conferir(pasta: &Path, m: &Manifest) -> Result<usize, Erro> {
     let existentes = listar(pasta)?;
-    // Os dois lados estão em ordem de bytes (o manifesto, por regra; a lista, pelo `sort_by`): uma passagem só.
     let mut i = 0;
     for (rel, caminho) in &existentes {
         match m.arquivos.get(i) {

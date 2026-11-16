@@ -1,4 +1,3 @@
-//! `psd`: daemon do PiStick. Modos: `--synthetic` (janelas de teste) e `--wayland` (compositor, só Linux).
 
 use std::process::ExitCode;
 
@@ -67,12 +66,10 @@ OPÇÕES:
 ";
 
 fn main() -> ExitCode {
-    // Subcomando `psd verify-wav ARQ FREQ_ESQ FREQ_DIR [AMPLITUDE]` (marco 7B): não toca em nada do sistema.
     if std::env::args().nth(1).as_deref() == Some("verify-wav") {
         let resto: Vec<String> = std::env::args().skip(2).collect();
         return verify_wav(&resto);
     }
-    // Subcomando `psd pair ...`: fala com o psd em execução pelo soquete de controle.
     if std::env::args().nth(1).as_deref() == Some("pair") {
         #[cfg(unix)]
         {
@@ -247,7 +244,6 @@ fn main() -> ExitCode {
     #[cfg(not(target_os = "linux"))]
     let _ = video_auto;
 
-    // Áudio sintético (marco 7): o hub é criado aqui; no modo Wayland ele nasce em `run_wayland`.
     let mut audio_threads = Vec::new();
     if synthetic_audio {
         let hub = ps_server::audio::AudioHub::new(audio_codec);
@@ -261,7 +257,6 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => return erro(&format!("não foi possível escutar em {listen}: {e}")),
     };
-    // Segurança (marco 9A): chave do aparelho, lista de pareados, soquete de controle.
     if insecure {
         println!("[psd] AVISO: --insecure aceita conexões em texto claro de qualquer origem (só para desenvolvimento)");
     }
@@ -273,7 +268,6 @@ fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => return erro(&format!("não foi possível abrir {}: {e}", dir.display())),
     };
-    // Serviço parando (SIGTERM ou SIGINT): o cliente da sessão em curso recebe o `GOODBYE` com o motivo "serviço parando".
     #[cfg(target_os = "linux")]
     {
         let s = sec.clone();
@@ -291,7 +285,6 @@ fn main() -> ExitCode {
     }
     #[cfg(not(unix))]
     let _ = ctl_socket;
-    // Anúncio mDNS (só Linux, só se escutar fora do laço). Fica vivo até o fim de `main`.
     #[cfg(target_os = "linux")]
     let _announcer = start_announcer(&acceptor, announce, announce_name, &sec);
     #[cfg(not(target_os = "linux"))]
@@ -310,7 +303,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Nome do aparelho no canal cifrado quando não há `--name`: o nome da máquina.
 fn device_name() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
@@ -346,7 +338,6 @@ fn start_announcer(acceptor: &TcpAcceptor, announce: bool, name: Option<String>,
     }
 }
 
-/// Opções do áudio do modo Wayland.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct AudioCfg {
     auto: bool,
@@ -357,7 +348,6 @@ struct AudioCfg {
     mic_max_ms: usize,
 }
 
-/// `psd verify-wav ARQ FREQ_ESQ FREQ_DIR [AMPLITUDE]`.
 fn verify_wav(args: &[String]) -> ExitCode {
     use ps_audio::wavcheck::{parse_wav, verify_tones};
     let (Some(path), Some(fe), Some(fd)) = (args.first(), args.get(1).and_then(|a| a.parse::<f64>().ok()), args.get(2).and_then(|a| a.parse::<f64>().ok())) else {
@@ -424,7 +414,6 @@ fn erro(msg: &str) -> ExitCode {
 fn run_wayland(acceptor: &TcpAcceptor, opts: &ServerOptions, spawn: &[String], audio: &AudioCfg, sec: std::sync::Arc<ps_server::secure::Security>) -> ExitCode {
     use ps_server::wayland::{SocketSpec, WaylandCompositor};
 
-    // SIGTERM/SIGINT encerram também os filhos que o `psd` inicia (PipeWire e apps).
     ps_server::discovery::install_term_handler();
     let mut opts = opts.clone();
     opts.name = format!("psd {} (wayland)", env!("CARGO_PKG_VERSION"));
@@ -433,11 +422,8 @@ fn run_wayland(acceptor: &TcpAcceptor, opts: &ServerOptions, spawn: &[String], a
         Err(e) => return erro(&format!("não foi possível criar o socket Wayland: {e}")),
     };
     println!("[psd] socket Wayland: WAYLAND_DISPLAY={} (em {})", comp.socket_name, comp.socket_path.display());
-    // Áudio: o PipeWire do projeto sobe antes dos apps, para eles acharem o soquete do PulseAudio.
     let (audio_hub, _pipewire) = start_audio(audio);
     opts.audio = audio_hub.clone();
-    // Microfone (marco 7B): só com o áudio de pé (PipeWire do projeto). O monitor de ligações só sobe com um cliente
-    // que anunciou CAP_MIC.
     if audio_hub.is_some() && audio.mic {
         let log: ps_server::audio::LogFn = std::sync::Arc::new(|m: &str| println!("[psd] {m}"));
         opts.mic = Some(ps_server::mic::MicHub::with_max_ms(ps_server::mic::pw_link_feed(), &audio.mic_addr, log, audio.mic_max_ms));
@@ -477,8 +463,6 @@ fn run_wayland(acceptor: &TcpAcceptor, opts: &ServerOptions, spawn: &[String], a
     }
 }
 
-/// Sobe o PipeWire do projeto e as threads de leitura do PCM. Qualquer falha vira uma linha de log e o
-/// `psd` segue sem áudio.
 #[cfg(target_os = "linux")]
 fn start_audio(cfg: &AudioCfg) -> (Option<std::sync::Arc<ps_server::audio::AudioHub>>, Option<ps_server::audio::pipewire::PipewireProcs>) {
     use ps_server::audio::{pipewire, AudioHub, LogFn};
@@ -500,7 +484,6 @@ fn start_audio(cfg: &AudioCfg) -> (Option<std::sync::Arc<ps_server::audio::Audio
         }
     };
     let hub = AudioHub::new(cfg.codec);
-    // A thread só termina quando o hub para; o processo encerra antes disso, então ninguém espera por ela.
     let _ = ps_server::audio::spawn_pcm_reader(hub.clone(), cfg.addr.clone(), log);
     println!("[psd] áudio: {:?}, PCM lido de {}", cfg.codec, cfg.addr);
     (Some(hub), procs)

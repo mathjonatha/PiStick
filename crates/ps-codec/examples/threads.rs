@@ -1,7 +1,3 @@
-//! Mede o custo de criar threads por quadro e o limiar de blocos sujos a partir do qual
-//! a codificação paralela compensa.
-//!
-//! `cargo run --release -p ps-codec --example threads [N_THREADS]`
 
 use std::time::Instant;
 
@@ -16,7 +12,6 @@ fn mediana(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
-/// Conteúdo "de interface": fundo com traços de duas cores, diferente a cada chamada.
 fn pinta_bloco(img: &mut [u8], bx: usize, by: usize, rng: &mut Rng) {
     for y in by * BLOCK..((by + 1) * BLOCK).min(H) {
         for x in bx * BLOCK..((bx + 1) * BLOCK).min(W) {
@@ -32,13 +27,12 @@ fn mede(threads: usize, k: usize, iters: usize) -> f64 {
     let mut rng = Rng::new(5);
     let mut img = vec![0x30u8; W * H * 4];
     let mut enc = Encoder::with_threads(W as u32, H as u32, threads);
-    enc.set_parallel_min_blocks(0); // sempre paralelo quando threads > 1
+    enc.set_parallel_min_blocks(0);
     let mut out = Vec::new();
     enc.encode(&img, W * 4, None, &mut out);
     let bh = H.div_ceil(BLOCK);
     let mut tempos = Vec::new();
     for _ in 0..iters + 5 {
-        // k blocos espalhados entre as linhas de blocos (faixas), para que haja o que repartir.
         let rects: Vec<Rect> = (0..k)
             .map(|i| {
                 let (bx, by) = (i / bh, i % bh);
@@ -57,7 +51,6 @@ fn mede(threads: usize, k: usize, iters: usize) -> f64 {
 fn main() {
     let n: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
 
-    // Custo de criar e juntar `n` threads sem trabalho, por quadro.
     let mut t = Vec::new();
     for _ in 0..300 {
         let i = Instant::now();

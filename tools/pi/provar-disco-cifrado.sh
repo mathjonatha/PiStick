@@ -1,18 +1,4 @@
 #!/bin/sh
-# Roda NO PI: prova do disco cifrado do marco 9B (docs/25, decisão 6). NÃO é o produto: é só a prova de que o kernel do Pi tem
-# o Adiantum e de quanto ele custa, num ARQUIVO DE LAÇO (nunca em /dev/mmcblk* nem em partição do cartão).
-#
-#   sh tools/pi/provar-disco-cifrado.sh              prova com o arquivo na casa do usuário e, de novo, em /dev/shm (RAM)
-#   sh tools/pi/provar-disco-cifrado.sh --so-casa    só com o arquivo na casa do usuário (o cartão SD)
-#
-# Precisa do pacote cryptsetup-bin (`sudo apt-get install -y --no-install-recommends cryptsetup-bin`; sem o
-# cryptsetup-initramfs: o initramfs não pode ser regenerado por esta prova) e de sudo (laço, dm-crypt e montagem).
-# Para cada local do arquivo de 256 MiB mede, com e sem cifra (a mesma base de laço, o mesmo ext4):
-#   - bruto: dd de 256 MiB no dispositivo (escrita com oflag=direct conv=fsync, leitura com iflag=direct);
-#   - sistema de arquivos: dd de 160 MiB num arquivo do ext4 (escrita com conv=fsync, leitura com iflag=direct).
-# Cifras: xchacha20,aes-adiantum-plain64 (a do projeto) e aes-xts-plain64 (para comparar: o Pi 4 não tem AES em hardware).
-# A chave é aleatória, vive numa pasta temporária 0700 e é apagada ao final. Tudo é desfeito, mesmo se algo falhar
-# (trap): nenhum laço, mapeamento, montagem ou arquivo fica para trás.
 set -eu
 
 so_casa=0
@@ -54,7 +40,6 @@ limpar() {
 }
 trap limpar EXIT INT TERM
 
-# Só dispositivos de laço: nunca disco de verdade.
 so_laco() {
     case "$1" in
         /dev/loop[0-9]*) ;;
@@ -77,7 +62,6 @@ echo "módulos de cifra do kernel (adiantum, nhpoly1305, chacha): $modulos de 3 
 config="/boot/config-$(uname -r)"
 if [ -r "$config" ]; then grep -E '^CONFIG_(CRYPTO_ADIANTUM|CRYPTO_NHPOLY1305(_NEON)?|DM_CRYPT|BLK_DEV_LOOP)=' "$config"; fi
 
-# Alvo das escritas: só laço ou mapeamento desta prova (nunca disco de verdade).
 alvo_seguro() {
     case "$1" in
         /dev/loop[0-9]* | /dev/mapper/pistick-prova-*) ;;
@@ -88,16 +72,13 @@ alvo_seguro() {
     esac
 }
 
-# chave: 64 bytes aleatórios (o Adiantum lê 32; o XTS de 512 bits lê 64). Nunca é impressa.
 head -c 64 /dev/urandom > "$trabalho/chave"
 chmod 600 "$trabalho/chave"
 
-# vazao_dd: roda dd e imprime só "NNN MB/s" (o final da última linha).
 vazao_dd() {
     "$@" 2>&1 | tail -n 1 | sed 's/.*, \([0-9.,]* [MGk]B\/s\)$/\1/'
 }
 
-# medir ROTULO DISPOSITIVO PONTO_DE_MONTAGEM_DO_EXT4_OU_VAZIO
 medir_bruto() {
     alvo_seguro "$2"
     for i in 1 2 3; do
@@ -123,7 +104,6 @@ medir_fs() {
     montado=""
 }
 
-# prova_local ROTULO ARQUIVO
 prova_local() {
     rotulo=$1
     arq=$2
@@ -142,9 +122,7 @@ prova_local() {
     sudo cryptsetup open --type plain --cipher xchacha20,aes-adiantum-plain64 --key-size 256 --key-file "$trabalho/chave" --batch-mode "$laco" "$mapa"
     abertos="$mapa"
     sudo cryptsetup status "$mapa" | grep -E 'type|cipher|keysize|device:' | sed 's/^ */  /'
-    # O Adiantum tem de aparecer no kernel (carregado sob demanda pelo dm-crypt).
     echo "  /proc/crypto: $(grep -c -i adiantum /proc/crypto) entradas com adiantum"
-    # Cifrou de verdade? Um marcador escrito pelo mapeamento não pode aparecer no dispositivo de laço.
     echo "MARCADOR-PISTICK-CLARO-MARCADOR-PISTICK-CLARO" | sudo dd of="/dev/mapper/$mapa" bs=512 count=1 conv=fsync,sync 2>/dev/null
     lido=$(sudo dd if="/dev/mapper/$mapa" bs=512 count=1 2>/dev/null | grep -c -a 'MARCADOR-PISTICK-CLARO' || true)
     bruto=$(sudo dd if="$laco" bs=512 count=1 2>/dev/null | grep -c -a 'MARCADOR-PISTICK-CLARO' || true)

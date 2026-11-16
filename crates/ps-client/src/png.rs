@@ -1,7 +1,3 @@
-//! Escritor mínimo de PNG (RGB de 8 bits, sem compressão: blocos "stored" do deflate).
-//!
-//! Serve só para o comando `shot` do roteiro de teste. Os arquivos ficam grandes, mas não
-//! exigem nenhuma dependência.
 
 use std::io;
 use std::path::Path;
@@ -35,10 +31,8 @@ fn chunk(out: &mut Vec<u8>, tipo: &[u8; 4], dados: &[u8]) {
     out.extend_from_slice(&crc32(&[tipo, dados]).to_be_bytes());
 }
 
-/// Codifica um quadro BGRX (`stride` = `width * 4`) como PNG RGB.
 pub fn encode_bgrx(width: u32, height: u32, bgrx: &[u8]) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
-    // Cada linha: byte de filtro 0 + RGB.
     let mut raw = Vec::with_capacity(h * (w * 3 + 1));
     for y in 0..h {
         raw.push(0);
@@ -46,7 +40,6 @@ pub fn encode_bgrx(width: u32, height: u32, bgrx: &[u8]) -> Vec<u8> {
             raw.extend_from_slice(&[px[2], px[1], px[0]]);
         }
     }
-    // zlib com blocos stored de até 65535 bytes.
     let mut z = vec![0x78, 0x01];
     let mut blocos = raw.chunks(65535).peekable();
     if blocos.peek().is_none() {
@@ -64,14 +57,13 @@ pub fn encode_bgrx(width: u32, height: u32, bgrx: &[u8]) -> Vec<u8> {
     let mut ihdr = Vec::with_capacity(13);
     ihdr.extend_from_slice(&width.to_be_bytes());
     ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8 bits, RGB, deflate, filtro 0, sem entrelaçamento
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
     chunk(&mut out, b"IHDR", &ihdr);
     chunk(&mut out, b"IDAT", &z);
     chunk(&mut out, b"IEND", &[]);
     out
 }
 
-/// Grava o quadro BGRX em `path`, criando o diretório se preciso.
 pub fn save_bgrx(path: &Path, width: u32, height: u32, bgrx: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -91,14 +83,12 @@ mod tests {
 
     #[test]
     fn estrutura_do_png() {
-        // 2x2: vermelho, verde / azul, branco (BGRX).
         let px = [0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 255, 255, 255];
         let png = encode_bgrx(2, 2, &px);
         assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         assert_eq!(&png[12..16], b"IHDR");
         assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 2);
         assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
-        // O dado bruto (filtro + RGB por linha) aparece inteiro no bloco stored.
         let bruto = [0, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255];
         assert!(png.windows(bruto.len()).any(|j| j == bruto));
     }
@@ -106,7 +96,6 @@ mod tests {
     #[test]
     fn quadro_grande_usa_varios_blocos() {
         let png = encode_bgrx(300, 300, &vec![0x80; 300 * 300 * 4]);
-        // 300 * (300*3+1) = 270300 bytes -> 5 blocos stored.
         assert!(png.len() > 270_300);
     }
 }

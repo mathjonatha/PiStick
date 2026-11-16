@@ -15,7 +15,6 @@ fn found_of(a: &Announce) -> Found {
     Found { instance: a.instance.clone(), host: a.host.clone(), port: a.port, addrs: a.addrs.clone(), proto_version: Some(a.proto_version), ..Default::default() }
 }
 
-/// Pergunta montada à mão: cabeçalho, nome, tipo e classe.
 fn question(id: u16, name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
     let mut p = Vec::new();
     put_header(&mut p, id, 0, 1, 0);
@@ -26,15 +25,13 @@ fn question(id: u16, name: &str, qtype: u16, qclass: u16) -> Vec<u8> {
     p
 }
 
-// --- ida e volta -----------------------------------------------------------------------------
-
 #[test]
 fn resposta_multicast_ida_e_volta() {
     let a = ann();
     let pkt = build_response(&a);
-    assert_eq!(&pkt[..4], &[0, 0, 0x84, 0]); // ID 0, QR=1 AA=1
-    assert_eq!(be16(&pkt, 4), Some(0)); // sem perguntas
-    assert_eq!(be16(&pkt, 6), Some(5)); // PTR, SRV, TXT, 2 A
+    assert_eq!(&pkt[..4], &[0, 0, 0x84, 0]);
+    assert_eq!(be16(&pkt, 4), Some(0));
+    assert_eq!(be16(&pkt, 6), Some(5));
     assert_eq!(parse_response(&pkt), vec![found_of(&a)]);
 }
 
@@ -50,14 +47,13 @@ fn resposta_multicast_tem_ttl_120_e_cache_flush_so_onde_deve() {
         pos = next;
     }
     assert_eq!(pos, pkt.len());
-    assert_eq!(vistos[0], (TYPE_PTR, 1, 120)); // PTR: sem cache-flush
+    assert_eq!(vistos[0], (TYPE_PTR, 1, 120));
     assert_eq!(vistos[1], (TYPE_SRV, 0x8001, 120));
     assert_eq!(vistos[2], (TYPE_TXT, 0x8001, 120));
     assert_eq!(vistos[3], (TYPE_A, 0x8001, 120));
     assert_eq!(vistos[4], (TYPE_A, 0x8001, 120));
 }
 
-/// Posição da classe do registro que começa em `pos` (depois do nome e do tipo).
 fn pos_class(p: &[u8], pos: usize) -> usize {
     read_name(p, pos).unwrap().1 + 2
 }
@@ -72,7 +68,6 @@ fn resposta_unicast_legada_repete_id_e_pergunta() {
     assert_eq!(be16(&pkt, 0), Some(0xBEEF));
     assert_eq!(be16(&pkt, 4), Some(1));
     assert_eq!(parse_response(&pkt), vec![found_of(&a)]);
-    // TTL 10 e sem cache-flush.
     let (_, mut pos) = read_name(&pkt, 12).unwrap();
     pos += 4;
     for _ in 0..5 {
@@ -104,11 +99,11 @@ fn instancia_com_ponto_espaco_e_utf8() {
 #[test]
 fn rotulo_longo_e_truncado_em_63_bytes_sem_quebrar_utf8() {
     let mut a = ann();
-    a.instance = "ç".repeat(40); // 80 bytes
+    a.instance = "ç".repeat(40);
     assert!(a.validate().is_err());
     let f = parse_response(&build_response(&a));
     assert_eq!(f.len(), 1);
-    assert_eq!(f[0].instance, "ç".repeat(31)); // 62 bytes
+    assert_eq!(f[0].instance, "ç".repeat(31));
 }
 
 #[test]
@@ -125,7 +120,6 @@ fn validate_confere_rotulos() {
 #[test]
 fn sem_txt_a_versao_fica_vazia_e_sem_endereco_nao_ha_aparelho() {
     let a = ann();
-    // Resposta sem o TXT: refaz o pacote sem esse registro.
     let inst = instance_labels(&a);
     let host = host_labels(&a);
     let mut recs = Vec::new();
@@ -159,8 +153,6 @@ fn enderecos_repetidos_sao_unidos() {
     assert_eq!(f[0].addrs, vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]);
 }
 
-// --- parse_query -----------------------------------------------------------------------------
-
 #[test]
 fn query_do_proprio_cliente_e_aceita_pelo_servidor() {
     let q = parse_query(&build_query(0x4242), &ann()).unwrap();
@@ -175,7 +167,6 @@ fn query_por_ptr_any_srv_txt_e_a() {
     assert!(parse_query(&question(1, "pi-stick._pistick._tcp.local", TYPE_SRV, CLASS_IN), &a).is_some());
     assert!(parse_query(&question(1, "pi-stick._pistick._tcp.local", TYPE_TXT, CLASS_IN), &a).is_some());
     assert!(parse_query(&question(1, "pi-stick.local", TYPE_A, CLASS_IN), &a).is_some());
-    // Bit QU e maiúsculas.
     assert!(parse_query(&question(1, "_PiStick._TCP.Local", TYPE_PTR, 0x8001), &a).is_some());
 }
 
@@ -185,23 +176,19 @@ fn query_que_nao_interessa_e_ignorada() {
     assert!(parse_query(&question(1, "_http._tcp.local", TYPE_PTR, CLASS_IN), &a).is_none());
     assert!(parse_query(&question(1, SERVICE, TYPE_A, CLASS_IN), &a).is_none());
     assert!(parse_query(&question(1, "outro.local", TYPE_A, CLASS_IN), &a).is_none());
-    assert!(parse_query(&question(1, SERVICE, TYPE_PTR, 3), &a).is_none()); // classe CH
-    // Resposta (QR=1) não é pergunta.
+    assert!(parse_query(&question(1, SERVICE, TYPE_PTR, 3), &a).is_none());
     let mut p = question(1, SERVICE, TYPE_PTR, CLASS_IN);
     p[2] = 0x80;
     assert!(parse_query(&p, &a).is_none());
-    // Opcode diferente de 0.
     let mut p = question(1, SERVICE, TYPE_PTR, CLASS_IN);
     p[2] = 0x10;
     assert!(parse_query(&p, &a).is_none());
-    // Sem perguntas.
     assert!(parse_query(&build_response(&a), &a).is_none());
 }
 
 #[test]
 fn query_com_varias_perguntas_repete_todas_sem_compressao() {
     let a = ann();
-    // Duas perguntas, a segunda com o nome comprimido (aponta para o nome da primeira).
     let mut p = Vec::new();
     put_header(&mut p, 7, 0, 2, 0);
     put_name(&mut p, &[b"x".to_vec(), b"local".to_vec()]);
@@ -210,7 +197,7 @@ fn query_com_varias_perguntas_repete_todas_sem_compressao() {
     p.extend_from_slice(&[0xC0, 12]);
     put_u16(&mut p, TYPE_ANY);
     put_u16(&mut p, CLASS_IN);
-    assert!(parse_query(&p, &a).is_none()); // x.local não é nosso
+    assert!(parse_query(&p, &a).is_none());
 
     let mut p = Vec::new();
     put_header(&mut p, 7, 0, 2, 0);
@@ -225,39 +212,32 @@ fn query_com_varias_perguntas_repete_todas_sem_compressao() {
     assert_eq!(q.questions, p[12..].to_vec());
 }
 
-// --- compressão e robustez -------------------------------------------------------------------
-
-/// Monta uma resposta com todos os nomes comprimidos e devolve também as posições úteis.
 fn resposta_comprimida() -> Vec<u8> {
     let mut p = Vec::new();
     put_header(&mut p, 0, FLAGS_RESPONSE, 0, 4);
-    let svc = p.len(); // 12
+    let svc = p.len();
     put_name(&mut p, &service_labels());
-    let local = svc + 1 + 8 + 1 + 4; // posição do rótulo "local"
-    // PTR: o nome é o do serviço, escrito logo acima; dados = "foo" + ponteiro para svc.
+    let local = svc + 1 + 8 + 1 + 4;
     put_u16(&mut p, TYPE_PTR);
     put_u16(&mut p, CLASS_IN);
     put_u32(&mut p, 120);
     put_u16(&mut p, 6);
     let inst = p.len();
     p.extend_from_slice(&[3, b'f', b'o', b'o', 0xC0, svc as u8]);
-    // SRV: nome = ponteiro para a instância; alvo = "host" + ponteiro para "local".
     p.extend_from_slice(&[0xC0, inst as u8]);
     put_u16(&mut p, TYPE_SRV);
     put_u16(&mut p, CLASS_IN | CACHE_FLUSH);
     put_u32(&mut p, 120);
     put_u16(&mut p, 6 + 7);
-    p.extend_from_slice(&[0, 0, 0, 0, 0x1E, 0x14]); // porta 7700
+    p.extend_from_slice(&[0, 0, 0, 0, 0x1E, 0x14]);
     let host = p.len();
     p.extend_from_slice(&[4, b'h', b'o', b's', b't', 0xC0, local as u8]);
-    // TXT.
     p.extend_from_slice(&[0xC0, inst as u8]);
     put_u16(&mut p, TYPE_TXT);
     put_u16(&mut p, CLASS_IN);
     put_u32(&mut p, 120);
     put_u16(&mut p, 4);
     p.extend_from_slice(&[3, b'v', b'=', b'2']);
-    // A.
     p.extend_from_slice(&[0xC0, host as u8]);
     put_u16(&mut p, TYPE_A);
     put_u16(&mut p, CLASS_IN);
@@ -279,7 +259,6 @@ fn le_nomes_comprimidos() {
 #[test]
 fn nomes_sao_comparados_sem_diferenciar_maiusculas() {
     let mut p = resposta_comprimida();
-    // Troca "_pistick" por "_PISTICK" no nome do serviço (os demais apontam para ele).
     p[13..21].copy_from_slice(b"_PISTICK");
     assert_eq!(parse_response(&p).len(), 1);
 }
@@ -287,17 +266,15 @@ fn nomes_sao_comparados_sem_diferenciar_maiusculas() {
 #[test]
 fn recusa_ponteiro_para_frente_ou_para_si_mesmo() {
     let mut p = resposta_comprimida();
-    // O primeiro ponteiro (nos dados do PTR) fica na posição 47.
     assert_eq!(&p[47..49], &[0xC0, 12]);
-    p[48] = 47; // para si mesmo
+    p[48] = 47;
     assert!(parse_response(&p).is_empty());
-    p[48] = 60; // para frente
+    p[48] = 60;
     assert!(parse_response(&p).is_empty());
 }
 
 #[test]
 fn ponteiros_em_laco_nao_travam() {
-    // Dois ponteiros que apontam um para o outro: o segundo aponta para frente e é recusado.
     let mut p = Vec::new();
     put_header(&mut p, 0, FLAGS_RESPONSE, 1, 0);
     p.extend_from_slice(&[0xC0, 14, 0xC0, 12]);
@@ -309,9 +286,8 @@ fn ponteiros_em_laco_nao_travam() {
 
 #[test]
 fn limita_a_16_saltos() {
-    // Cadeia de ponteiros, cada um apontando para o anterior; o primeiro leva ao nome real.
     let mut p = vec![0u8; 12];
-    p.extend_from_slice(&[1, b'a', 0]); // nome em 12
+    p.extend_from_slice(&[1, b'a', 0]);
     let mut anterior = 12usize;
     let mut inicio_cadeia = Vec::new();
     for _ in 0..20 {
@@ -320,7 +296,6 @@ fn limita_a_16_saltos() {
         anterior = pos;
         inicio_cadeia.push(pos);
     }
-    // 16 saltos ainda passam (o ponteiro 16 da cadeia faz 16 saltos); o 17º falha.
     assert!(read_name(&p, inicio_cadeia[15]).is_some());
     assert!(read_name(&p, inicio_cadeia[16]).is_none());
     assert!(read_name(&p, inicio_cadeia[19]).is_none());
@@ -328,7 +303,6 @@ fn limita_a_16_saltos() {
 
 #[test]
 fn limita_nome_a_255_bytes_e_rotulo_a_63() {
-    // 4 rótulos de 62 bytes = 4*63 + 1 = 253: cabe. 5 rótulos de 62 = 316: não cabe.
     let rot = vec![b'a'; 62];
     let nome = |n: usize| {
         let mut v = vec![0u8; 12];
@@ -341,7 +315,6 @@ fn limita_nome_a_255_bytes_e_rotulo_a_63() {
     };
     assert!(read_name(&nome(4), 12).is_some());
     assert!(read_name(&nome(5), 12).is_none());
-    // Rótulo de 64 bytes (0x40) é tipo reservado; 0x80 também.
     let mut v = vec![0u8; 12];
     v.push(64);
     v.extend_from_slice(&[b'a'; 64]);
@@ -361,7 +334,6 @@ fn nome_truncado_e_recusado() {
 fn ignora_tipo_desconhecido_pelo_rdlength() {
     let a = ann();
     let resp = build_response(&a);
-    // Insere um registro AAAA (tipo 28) com 16 bytes de dados antes dos demais e ajusta ANCOUNT.
     let mut extra = Vec::new();
     put_record(&mut extra, &host_labels(&a), 28, CLASS_IN, 120, &[0x20; 16]);
     put_record(&mut extra, &host_labels(&a), 4242, CLASS_IN, 120, &[1, 2, 3]);
@@ -382,11 +354,9 @@ fn recusa_pacote_com_mais_de_64_registros_ou_9000_bytes() {
     let mut p = build_response(&a);
     p[7] = 5;
     assert_eq!(parse_response(&p).len(), 1);
-    // Perguntas somam no total.
     let mut q = question(1, SERVICE, TYPE_PTR, CLASS_IN);
     q[5] = 65;
     assert!(parse_query(&q, &a).is_none());
-    // Pacote grande demais, mesmo com conteúdo válido no começo.
     let mut grande = build_response(&a);
     grande.resize(MAX_PACKET + 1, 0);
     assert!(parse_response(&grande).is_empty());
@@ -400,7 +370,7 @@ fn recusa_rdlength_alem_do_pacote() {
     let a = ann();
     let mut p = build_response(&a);
     let n = p.len();
-    p.truncate(n - 2); // corta o último A
+    p.truncate(n - 2);
     assert!(parse_response(&p).is_empty());
 }
 
@@ -415,7 +385,6 @@ fn pacote_que_nao_e_resposta_nao_acha_nada() {
 
 #[test]
 fn nao_aceita_instancia_fora_do_servico() {
-    // PTR de _pistick._tcp.local apontando para um nome de outro serviço.
     let a = ann();
     let mut p = Vec::new();
     put_header(&mut p, 0, FLAGS_RESPONSE, 0, 3);
@@ -431,12 +400,6 @@ fn nao_aceita_instancia_fora_do_servico() {
     assert!(parse_response(&p).is_empty());
 }
 
-// --- vetor real do Avahi ---------------------------------------------------------------------
-
-/// Resposta unicast do `avahi-daemon` 0.8 (Raspberry Pi OS Trixie, 2026-11-14) a uma pergunta PTR
-/// por `_pistick._tcp.local` vinda de porta efêmera, com `avahi-publish -s "Vetor Avahi"
-/// _pistick._tcp 7799 v=1` rodando. Traz compressão de nomes, PTR/TXT/SRV/AAAA/A e TTL 10; a
-/// pergunta é repetida (regra do unicast legado).
 const AVAHI: &str = "123484000001000500000000085f7069737469636b045f746370056c6f63616c00000c0001c00c000c00010000000a000e0b5665746f72204176616869c00cc031001000010000000a000403763d31c031002100010000000a0011000000001e770870692d737469636bc01ac061001c00010000000a0010280429b850f307f87f9202c0b15e0040c061000100010000000a0004c0a8000b";
 
 fn hex(s: &str) -> Vec<u8> {
@@ -459,8 +422,6 @@ fn le_resposta_real_do_avahi() {
     );
 }
 
-// --- robustez: pacotes aleatórios e mutações -------------------------------------------------
-
 struct Xorshift(u64);
 
 impl Xorshift {
@@ -480,7 +441,6 @@ impl Xorshift {
 fn exercita(pkt: &[u8], a: &Announce) {
     let _ = parse_response(pkt);
     if let Some(q) = parse_query(pkt, a) {
-        // O que sai de uma pergunta tem de voltar a ser um pacote legível.
         let r = build_legacy_response(a, &q);
         assert_eq!(parse_response(&r).len(), 1);
     }
@@ -493,7 +453,6 @@ fn dez_mil_pacotes_aleatorios_nao_derrubam_o_leitor() {
     for i in 0..10_000 {
         let len = rng.below(400);
         let mut pkt: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
-        // Metade dos pacotes começa com um cabeçalho plausível, para ir além da primeira checagem.
         if i % 2 == 0 && pkt.len() >= 12 {
             pkt[2] = if i % 4 == 0 { 0x84 } else { 0x00 };
             pkt[4] = 0;
@@ -567,7 +526,6 @@ fn txt_com_canal_cifrado_leva_sec_e_pair_e_o_cliente_le() {
         assert_eq!(achados[0].pair_open, esperado);
         assert_eq!(achados[0].proto_version, Some(1));
     }
-    // Sem `secure`, o TXT só diz a versão e o cliente não presume nada.
     let achados = parse_response(&build_response(&ann()));
     assert_eq!(achados[0].secure, None);
     assert_eq!(achados[0].pair_open, None);

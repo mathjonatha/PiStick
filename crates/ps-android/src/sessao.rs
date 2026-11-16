@@ -1,14 +1,3 @@
-//! A sessão do cliente Android com o aparelho: reaproveita a rede, o canal cifrado, a descoberta e o registro do
-//! `ps-client` e liga tudo à fila de eventos da casca, à tela e à entrada (docs/26, decisões 5 a 7, 10 a 12 e 17).
-//!
-//! Não tem nenhuma chamada do Android: a superfície é um [`Tela`] (no aparelho, `surface.rs`; nos testes, uma falsa) e
-//! o que o núcleo diz à casca sai por [`Fila`]. Por isso tudo roda nos testes do computador, inclusive contra um `psd`
-//! de verdade no laço local (`tests/sessao.rs`).
-//!
-//! Duas camadas:
-//! - [`Sessao`]: uma conexão já aberta. Recebe os eventos da rede (é o [`UiSink`] de `ps_client::net`), mantém as
-//!   janelas, a vista e a entrada, e desenha;
-//! - [`Controle`]: o que a casca controla: busca, conexão (com a chave do cliente), tela, entrada. Uma conexão por vez.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -40,31 +29,21 @@ use crate::registro;
 use crate::teclado::{Mod, Passo, Teclado};
 use crate::tela::Tela;
 
-/// Porta padrão do protocolo, quando o endereço digitado não traz uma.
 pub const PORTA_PADRAO: u16 = 7700;
-/// Limite para abrir a conexão TCP.
 const TEMPO_CONEXAO: Duration = Duration::from_secs(5);
-/// Limite para o `HELLO` depois do canal cifrado aberto.
 const TEMPO_HELLO: Duration = Duration::from_secs(10);
-/// Quanto o núcleo espera a casca gravar a chave nova (o Keystore responde em milissegundos).
 const TEMPO_CHAVE: Duration = Duration::from_secs(20);
-/// Pausa entre apertar e soltar o botão de um toque (o `psc` usa 40 ms nos roteiros).
 const PAUSA_BOTAO_MS: u32 = 30;
-/// A cada quantos quadros desenhados o tempo médio da cópia vai para o `logcat`.
 const QUADROS_POR_MEDIDA: u64 = 120;
 
 type SuperficieComum = Arc<Mutex<Option<Box<dyn Tela>>>>;
 
-/// Como abrir a saída de som do sistema para um motor de áudio (no Android, o AAudio). Sem fábrica, ou se ela falha,
-/// o cliente não anuncia `CAP_AUDIO`.
 pub type FabricaDeSaida = fn(Arc<AudioEngine>) -> Result<Box<dyn AudioSink>, String>;
 
 fn travar<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A área de transferência do celular, vista pelo `ClipboardSync`: o texto vem da casca (ao voltar ao foco) e o que o
-/// Pi manda sai como evento para a casca gravar no `ClipboardManager`.
 struct AreaDoCelular {
     texto: Mutex<Option<String>>,
     fila: Arc<Fila>,
@@ -82,7 +61,6 @@ impl HostClipboard for AreaDoCelular {
     }
 }
 
-/// Estado mutável de uma sessão, atrás de uma só trava.
 struct Cena {
     janelas: Janelas,
     shared: HashMap<u32, Arc<SharedWindow>>,
@@ -92,19 +70,15 @@ struct Cena {
     mapeador: Mapeador,
     gestos: Gestos,
     teclado: Teclado,
-    /// Último `RESIZE_REQ` enviado por janela (para não repetir pedidos iguais).
     pedidos: HashMap<u32, (u32, u32)>,
-    /// Composto do último desenho: tamanho e origem (para acertar os toques).
     composto: (u32, u32),
     origem: (i32, i32),
     rgba: Vec<u8>,
     app_em_foco: bool,
-    /// Medida do tempo de desenho (compor, converter, publicar): soma em microssegundos e quadros.
     tempo_us: u64,
     quadros: u64,
 }
 
-/// Uma conexão aberta.
 pub struct Sessao {
     fila: Arc<Fila>,
     out: Sender<Message>,
@@ -119,13 +93,10 @@ pub struct Sessao {
 }
 
 impl Sessao {
-    /// Monta a sessão sobre o canal de saída `out` (as mensagens que o núcleo manda ao aparelho). Devolve também a
-    /// ponta que a thread de entrada consome ([`Sessao::executar_entrada`]); os testes a esvaziam à mão.
     pub fn nova(fila: Arc<Fila>, out: Sender<Message>, superficie: SuperficieComum, tela: TelaInfo, closer: Option<Closer>, audio: Option<Arc<AudioEngine>>) -> (Arc<Sessao>, Receiver<Vec<Passo>>) {
         Self::nova_com_fator(fila, out, superficie, tela, FATOR_PADRAO, closer, audio)
     }
 
-    /// Como [`Sessao::nova`], com o fator de escala já escolhido (limitado ao passo e aos limites).
     pub fn nova_com_fator(fila: Arc<Fila>, out: Sender<Message>, superficie: SuperficieComum, tela: TelaInfo, fator: f32, closer: Option<Closer>, audio: Option<Arc<AudioEngine>>) -> (Arc<Sessao>, Receiver<Vec<Passo>>) {
         let fator = limitar_fator(fator);
         let (entrada_tx, entrada_rx) = mpsc::channel();
@@ -160,13 +131,11 @@ impl Sessao {
         let _ = self.out.send(m);
     }
 
-    /// Fecha a conexão e para de aceitar eventos.
     pub fn parar(&self) {
         self.parado.store(true, Ordering::SeqCst);
         if let Some(c) = &self.closer {
             c.close();
         }
-        // Para a saída de som e solta o dispositivo.
         if let Some(a) = &self.audio {
             a.shutdown();
         }
@@ -176,13 +145,10 @@ impl Sessao {
         self.parado.load(Ordering::SeqCst)
     }
 
-    // ---- janelas, foco, tamanho -------------------------------------------------------------------------------
-
     fn publicar_janelas(&self, c: &Cena) {
         self.fila.empurrar(Evento::Janelas { foco: c.janelas.foco().unwrap_or(0), abas: c.janelas.abas() });
     }
 
-    /// Pede ao servidor o tamanho que cabe na tela para `win`, se ainda não pediu esse.
     fn pedir_tamanho(&self, c: &mut Cena, win: u32) {
         if c.tela.largura == 0 || c.tela.altura == 0 {
             return;
@@ -195,7 +161,6 @@ impl Sessao {
         }
     }
 
-    /// Aplica o que uma mudança de janelas fez: lista de abas, foco (avisa o servidor), tamanho e desenho.
     fn aplicar_mudanca(&self, c: &mut Cena, m: Mudanca) {
         if m.abas || m.foco_mudou() {
             self.publicar_janelas(c);
@@ -218,7 +183,6 @@ impl Sessao {
         }
     }
 
-    /// A janela está na tela agora (a em foco ou um popup dela)?
     fn visivel(c: &Cena, win: u32) -> bool {
         match c.janelas.foco() {
             Some(f) => f == win || c.janelas.popups_de(f).iter().any(|p| p.id == win),
@@ -236,7 +200,6 @@ impl Sessao {
         std::mem::take(&mut shared.inner.lock().unwrap_or_else(|e| e.into_inner()).acks)
     }
 
-    /// Compõe a janela em foco com os popups, aplica a vista, copia para a tela e confirma os quadros.
     fn desenhar(&self, c: &mut Cena) {
         let Some(raiz) = c.janelas.foco() else { return };
         let t0 = Instant::now();
@@ -254,7 +217,6 @@ impl Sessao {
             }
         };
         ler(raiz, 0, 0, 0, &mut camadas);
-        // Posição absoluta, com a raiz como mãe (a composição soma a posição da mãe, que é (0, 0)).
         for p in &popups {
             ler(p.id, raiz, p.x, p.y, &mut camadas);
         }
@@ -272,7 +234,6 @@ impl Sessao {
         if let Err(e) = publicou {
             registro::erro(&format!("não foi possível desenhar na superfície: {e}"));
         }
-        // Os quadros apresentados são confirmados mesmo se a tela falhou (senão o fluxo do servidor trava).
         for (id, a) in acks {
             self.confirmar(id, a);
         }
@@ -282,8 +243,6 @@ impl Sessao {
             registro::info(&format!("desenho (compor, converter e copiar para a Surface): média de {} µs em {} quadros", c.tempo_us / c.quadros, c.quadros));
         }
     }
-
-    // ---- eventos da rede --------------------------------------------------------------------------------------
 
     fn tratar(&self, ev: UserEvent) {
         let mut c = travar(&self.cena);
@@ -297,7 +256,6 @@ impl Sessao {
                 if c.janelas.criar_popup(win, parent, x, y, width, height) {
                     c.shared.insert(win, shared);
                 } else {
-                    // Mãe desconhecida: confirma o que vier e segue.
                     let a = Self::tirar_acks(&shared);
                     self.confirmar(win, a);
                 }
@@ -328,7 +286,6 @@ impl Sessao {
             }
             UserEvent::WinDestroy { win } => {
                 let m = c.janelas.destruir(win);
-                // Esquece os quadros das janelas que já não existem (a destruída e os popups dela).
                 let vivas: Vec<u32> = c.janelas.abas().iter().map(|a| a.0).collect();
                 let mantidos: Vec<u32> = vivas.iter().flat_map(|&r| c.janelas.popups_de(r).into_iter().map(|p| p.id).chain(std::iter::once(r))).collect();
                 c.shared.retain(|id, _| mantidos.contains(id));
@@ -350,8 +307,6 @@ impl Sessao {
                 self.fila.empurrar(Evento::Estado { fase: fase::DESCONECTADO, texto: motivo });
                 self.parar();
             }
-            // O aparelho se despediu (outro cliente assumiu, serviço parando): o texto vai à casca e a sessão acaba. O núcleo
-            // nunca reconecta sozinho; com o motivo 1 a casca também não deve (dois aparelhos roubariam a sessão um do outro).
             UserEvent::Goodbye { reason, text } => {
                 let texto = net::goodbye_text(reason, &text);
                 self.fila.empurrar(Evento::Encerrada { motivo: reason, texto: texto.clone() });
@@ -362,9 +317,6 @@ impl Sessao {
         }
     }
 
-    // ---- tela -------------------------------------------------------------------------------------------------
-
-    /// A superfície mudou de tamanho (rotação, teclado virtual, abas): refaz a vista e pede o tamanho novo.
     pub fn definir_tela(&self, tela: TelaInfo) {
         let mut c = travar(&self.cena);
         if c.tela == tela {
@@ -379,8 +331,6 @@ impl Sessao {
         self.desenhar(&mut c);
     }
 
-    /// O fator de escala mudou (botões A- e A+): refaz o pedido de tamanho de todas as janelas conhecidas e recria a vista
-    /// (volta ao ajuste), sem derrubar a conexão.
     pub fn definir_fator(&self, fator: f32) {
         let fator = limitar_fator(fator);
         let mut c = travar(&self.cena);
@@ -397,7 +347,6 @@ impl Sessao {
         self.desenhar(&mut c);
     }
 
-    /// Redesenha com o que há (a superfície foi criada ou trocada).
     pub fn redesenhar(&self) {
         let mut c = travar(&self.cena);
         self.desenhar(&mut c);
@@ -407,16 +356,12 @@ impl Sessao {
         travar(&self.cena).tela
     }
 
-    // ---- entrada ----------------------------------------------------------------------------------------------
-
-    /// Entrega passos à thread de entrada.
     fn enviar_passos(&self, p: Vec<Passo>) {
         if !p.is_empty() {
             let _ = self.entrada_tx.send(p);
         }
     }
 
-    /// Roda a fila de entrada até a sessão acabar: manda as mensagens e faz as pausas. É a thread `psa-entrada`.
     pub fn executar_entrada(self: &Arc<Self>, rx: Receiver<Vec<Passo>>) {
         for lote in rx {
             for p in lote {
@@ -428,7 +373,6 @@ impl Sessao {
         }
     }
 
-    /// Os gestos do `MotionEvent`: traduz em mensagens (com uma pausa entre apertar e soltar o botão).
     fn aplicar_saidas(&self, c: &mut Cena, saidas: Vec<Saida>) {
         let mut passos = Vec::new();
         let mut redesenhar = false;
@@ -462,7 +406,6 @@ impl Sessao {
         self.aplicar_saidas(&mut c, saidas);
     }
 
-    /// O relógio (toque longo): a casca o chama a cada quadro, pelo `poll`.
     pub fn tick(&self, agora_ms: u64) {
         let mut c = travar(&self.cena);
         let saidas = c.gestos.tick(agora_ms);
@@ -475,7 +418,6 @@ impl Sessao {
         c.janelas.foco()
     }
 
-    /// Texto do teclado virtual (`commitText`).
     pub fn texto(&self, texto: &str) {
         let mut c = travar(&self.cena);
         let Some(win) = Self::janela_do_teclado(&c) else { return };
@@ -492,7 +434,6 @@ impl Sessao {
         }
     }
 
-    /// `deleteSurroundingText`.
     pub fn apagar(&self, antes: u32, depois: u32) {
         let mut c = travar(&self.cena);
         let Some(win) = Self::janela_do_teclado(&c) else { return };
@@ -500,7 +441,6 @@ impl Sessao {
         self.enviar_passos(passos);
     }
 
-    /// Tecla da faixa (código evdev).
     pub fn tecla_extra(&self, code: u32) {
         let mut c = travar(&self.cena);
         let Some(win) = Self::janela_do_teclado(&c) else { return };
@@ -508,17 +448,14 @@ impl Sessao {
         self.enviar_passos(passos);
     }
 
-    /// Liga ou desliga Ctrl ou Alt grudentos; devolve o estado novo.
     pub fn alternar_modificador(&self, m: Mod) -> bool {
         travar(&self.cena).teclado.alternar(m)
     }
 
-    /// (Ctrl, Alt) grudados agora.
     pub fn modificadores(&self) -> (bool, bool) {
         travar(&self.cena).teclado.grudados()
     }
 
-    /// Tecla do teclado físico pelo `scanCode`.
     pub fn tecla_fisica(&self, scan_code: i32, apertada: bool) {
         let mut c = travar(&self.cena);
         let Some(win) = Self::janela_do_teclado(&c) else { return };
@@ -526,15 +463,12 @@ impl Sessao {
         self.enviar_passos(passos);
     }
 
-    /// Toque numa aba: passa o foco a essa janela.
     pub fn focar_aba(&self, id: u32) {
         let mut c = travar(&self.cena);
         let m = c.janelas.focar(id);
         self.aplicar_mudanca(&mut c, m);
     }
 
-    /// O aplicativo ganhou ou perdeu o foco do sistema. Ao ganhar, `texto_da_area` é o que há na área de
-    /// transferência do celular (a leitura só é permitida com o aplicativo em foco) e vai ao Pi se mudou.
     pub fn foco_do_app(&self, em_foco: bool, texto_da_area: Option<&str>) {
         let mut c = travar(&self.cena);
         c.app_em_foco = em_foco;
@@ -561,14 +495,8 @@ impl UiSink for Sessao {
     }
 }
 
-// =============================================================================================================
-// Controle
-// =============================================================================================================
-
-/// Onde ficam as chaves e como o cliente se chama.
 #[derive(Clone)]
 pub struct Config {
-    /// `getFilesDir()`: guarda `aparelhos-conhecidos` (a chave do cliente é entregue pela casca).
     pub pasta: PathBuf,
     pub nome_cliente: String,
 }
@@ -577,29 +505,21 @@ struct Interno {
     fila: Arc<Fila>,
     config: Config,
     tela: Mutex<TelaInfo>,
-    /// Fator de escala escolhido na casca; vale para a próxima conexão e para a atual.
     fator: Mutex<f32>,
     superficie: SuperficieComum,
     sessao: Mutex<Option<Arc<Sessao>>>,
-    /// Resposta da casca sobre a gravação da chave nova.
     gravada: (Mutex<Option<bool>>, Condvar),
-    /// Cada conexão e cada busca recebem um número; um número velho cancela o que ficou para trás.
     geracao: AtomicU64,
-    /// `estatisticas=1` (APK depurável): linhas VIDEOSTATS e AUDIOSTATS no `logcat`.
     estatisticas: AtomicBool,
-    /// `semvideo=1` (APK depurável): não anuncia `CAP_H264` (a mesma tela segue pelo codec de blocos).
     sem_video: AtomicBool,
     fabrica_saida: Mutex<Option<FabricaDeSaida>>,
 }
 
-/// O que a casca controla. Barato de clonar.
 #[derive(Clone)]
 pub struct Controle {
     i: Arc<Interno>,
 }
 
-/// As linhas de estatística de um segundo: `VIDEOSTATS` (a janela de medição que se fecha aqui) e `AUDIOSTATS`, com os
-/// mesmos campos do `psc`. Abre a janela seguinte.
 pub fn linhas_de_estatisticas(stats: &Stats, audio: Option<&AudioEngine>) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(r) = stats.window_report() {
@@ -612,7 +532,6 @@ pub fn linhas_de_estatisticas(stats: &Stats, audio: Option<&AudioEngine>) -> Vec
     v
 }
 
-/// Escreve no `logcat` as linhas de estatística uma vez por segundo até a sessão acabar.
 fn registrar_estatisticas(s: &Sessao, stats: &Stats, audio: Option<&AudioEngine>) {
     stats.window_start();
     while !s.parada() {
@@ -623,7 +542,6 @@ fn registrar_estatisticas(s: &Sessao, stats: &Stats, audio: Option<&AudioEngine>
     }
 }
 
-/// Procura aparelhos na rede (mDNS) e os entrega como eventos. Bloqueia por ~1,5 s.
 pub fn buscar_agora(fila: &Fila) -> usize {
     let achados = discovery::search();
     let n = achados.len();
@@ -638,7 +556,6 @@ pub fn buscar_agora(fila: &Fila) -> usize {
     n
 }
 
-/// `"192.168.0.13"`, `"192.168.0.13:7700"` ou um nome: o primeiro endereço IPv4 resolvido (porta padrão se faltar).
 pub fn resolver(endereco: &str) -> Result<SocketAddr, String> {
     let e = endereco.trim();
     if e.is_empty() || e.len() > 255 || e.chars().any(char::is_control) {
@@ -684,7 +601,6 @@ impl Controle {
         self.i.geracao.load(Ordering::SeqCst) == g
     }
 
-    /// Procura aparelhos numa thread; avisa o fim com `BuscaFim`.
     pub fn buscar(&self) {
         let i = self.i.clone();
         let g = self.nova_geracao();
@@ -702,8 +618,6 @@ impl Controle {
             .expect("criar thread de busca");
     }
 
-    /// Conecta. `chave` são os 32 bytes da chave do cliente que a casca abriu do Keystore; `None` = ainda não há
-    /// chave: o núcleo cria uma, entrega à casca no evento `ChaveNova` e espera `chave_gravada`.
     pub fn conectar(&self, endereco: &str, chave: Option<Box<Segredo>>) {
         self.desconectar();
         let g = self.nova_geracao();
@@ -723,7 +637,6 @@ impl Controle {
             .expect("criar thread de conexão");
     }
 
-    /// A casca avisa se gravou a chave nova (`true`) ou não conseguiu.
     pub fn chave_gravada(&self, ok: bool) {
         let (m, cv) = &self.i.gravada;
         *travar(m) = Some(ok);
@@ -753,11 +666,8 @@ impl Controle {
         fila.empurrar(Evento::Estado { fase: fase::CONECTANDO, texto: format!("Conectando a {endereco}…") });
         let sa = resolver(endereco)?;
 
-        // A chave primeiro: a conexão só abre depois de a chave existir (e, se é nova, estar gravada).
         let key = match chave {
             Some(b) => {
-                // `Keypair` apaga o segredo ao ser solto; o `Segredo` da caixa se apaga aqui (e em qualquer retorno
-                // antecipado abaixo, pelo `Drop`).
                 let k = Keypair::from_secret(b.0);
                 drop(b);
                 k
@@ -779,7 +689,6 @@ impl Controle {
         let tcp = TcpStream::connect_timeout(&sa, TEMPO_CONEXAO).and_then(TcpTransport::from_stream).map_err(|e| format!("não foi possível conectar a {sa}: {e}"))?;
         let fila2 = fila.clone();
         let so = SecurityOptions {
-            // Nada em texto claro no celular: o canal cifrado vale até no laço local (docs/26, aceite 3).
             insecure: false,
             force_noise: true,
             client_name: self.i.config.nome_cliente.clone(),
@@ -803,8 +712,6 @@ impl Controle {
     fn iniciar_sessao<T: Transport>(&self, g: u64, transport: T, sa: SocketAddr) -> Result<(), String> {
         let peer = transport.peer();
         let Split { mut reader, mut writer, closer } = transport.split().map_err(|e| format!("transporte: {e}"))?;
-        // Vídeo e som só se anunciam se o aparelho os abre agora (como o `psc`): sem decodificador H.264 tudo segue pelo
-        // codec de blocos; sem saída de som não há `CAP_AUDIO`.
         let h264 = match ps_client::video::probe().and_then(|()| if self.i.sem_video.load(Ordering::SeqCst) { Err(std::io::Error::other("desligado pelo extra de teste semvideo")) } else { Ok(()) }) {
             Ok(()) => true,
             Err(e) => {
@@ -860,22 +767,18 @@ impl Controle {
         Ok(())
     }
 
-    /// Liga o registro de estatísticas no `logcat` (extra de depuração `estatisticas=1`).
     pub fn estatisticas(&self, ligado: bool) {
         self.i.estatisticas.store(ligado, Ordering::SeqCst);
     }
 
-    /// Extra de teste: não anunciar o H.264 (o vídeo segue pelo codec de blocos).
     pub fn sem_video(&self, ligado: bool) {
         self.i.sem_video.store(ligado, Ordering::SeqCst);
     }
 
-    /// Como o cliente abre a saída de som do sistema (no Android, o AAudio).
     pub fn definir_fabrica_de_saida(&self, f: FabricaDeSaida) {
         *travar(&self.i.fabrica_saida) = Some(f);
     }
 
-    /// Abre o motor de áudio e a saída do sistema; `None` se não há fábrica ou ela falhou.
     fn abrir_audio(&self) -> Option<Arc<AudioEngine>> {
         let f = (*travar(&self.i.fabrica_saida))?;
         let engine = AudioEngine::new(None);
@@ -892,7 +795,6 @@ impl Controle {
         }
     }
 
-    /// Fecha a conexão (e cancela uma que ainda esteja abrindo).
     pub fn desconectar(&self) {
         self.nova_geracao();
         if let Some(s) = travar(&self.i.sessao).take() {
@@ -900,9 +802,6 @@ impl Controle {
         }
     }
 
-    // ---- tela ------------------------------------------------------------------------------------------------
-
-    /// A casca entrega a superfície (ou tira, com `None`). O desenho recomeça na hora.
     pub fn definir_superficie(&self, s: Option<Box<dyn Tela>>) {
         *travar(&self.i.superficie) = s;
         if let Some(se) = self.sessao() {
@@ -917,8 +816,6 @@ impl Controle {
         }
     }
 
-    /// A casca escolheu o fator de escala em centésimos (250 = 2,5): valida, limita ao passo e aos limites, guarda para as
-    /// próximas conexões e aplica na atual. Registra no `logcat` o fator e o pedido de tamanho que ele dá.
     pub fn escala(&self, centesimos: i32) {
         let fator = fator_de_centesimos(centesimos);
         *travar(&self.i.fator) = fator;
@@ -929,8 +826,6 @@ impl Controle {
             se.definir_fator(fator);
         }
     }
-
-    // ---- entrada (sem sessão, ignorada) -----------------------------------------------------------------------
 
     pub fn toque(&self, t: &Toque) {
         if let Some(s) = self.sessao() {
@@ -956,7 +851,6 @@ impl Controle {
         }
     }
 
-    /// Alterna Ctrl ou Alt grudento; devolve o estado novo (`false` sem conexão).
     pub fn alternar_modificador(&self, m: Mod) -> bool {
         self.sessao().is_some_and(|s| s.alternar_modificador(m))
     }
@@ -967,7 +861,6 @@ impl Controle {
         }
     }
 
-    /// (Ctrl, Alt) grudados agora (`(false, false)` sem conexão).
     pub fn modificadores(&self) -> (bool, bool) {
         self.sessao().map_or((false, false), |s| s.modificadores())
     }
@@ -984,7 +877,6 @@ impl Controle {
         }
     }
 
-    /// O `nativePoll`: anda o relógio dos gestos e devolve os eventos pendentes no formato de `eventos.rs`.
     pub fn poll(&self, agora_ms: u64) -> Vec<u8> {
         if let Some(s) = self.sessao() {
             if s.parada() {

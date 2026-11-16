@@ -1,22 +1,5 @@
 #!/bin/sh
-# Instalador do PiStick (psd) para um Raspberry Pi OS / Debian 12 ou 13 de 64 bits que já roda.
-# Roda como root. Veja docs/17-imagem-e-instalador.md e docs/18-guia-de-instalacao.md.
-#
-#   sudo sh instalar.sh --pacote pistick-<versão>-aarch64.tar.xz   a partir de um arquivo local
-#   curl -fsSL <endereço>/instalar.sh | sudo sh                    baixa o pacote da última versão
-#   sudo sh instalar.sh --desinstalar                              remove serviço e arquivos; mantém
-#                                                                  /etc/pistick, os pacotes apt e o usuário
-#
-# Opções: --usuario NOME   usuário que roda o serviço (padrão: quem chamou o sudo; "pistick" cria um
-#                          usuário próprio, sem senha e sem sudo)
-#         --sem-iniciar    instala e habilita, mas não inicia (usado dentro do chroot da imagem)
-#         --verificar      não muda nada; lista ok/FALTA por item; código 1 se algo falta
-#
-# Idempotente: rodar de novo com o mesmo pacote não muda nada nem reinicia o serviço.
 
-# Endereço de onde baixar o pacote (pistick-latest-aarch64.tar.xz e o .sha256). Vazio até o projeto
-# ser publicado: com ele vazio, o instalador exige --pacote. Pode ser dado pelo ambiente.
-# shellcheck disable=SC1091
 PISTICK_BASE_URL="${PISTICK_BASE_URL:-}"
 
 set -eu
@@ -90,7 +73,6 @@ estado() {
     printf '\n'
 }
 
-# falta NOME [DETALHE]: só em --verificar.
 falta() {
     estado "$1" FALTA "${2:-}"
     falhas=1
@@ -101,7 +83,6 @@ falhou() {
     exit 1
 }
 
-# systemd rodando (em chroot e em construção de imagem não há).
 sd=0
 if [ -d /run/systemd/system ]; then sd=1; fi
 
@@ -112,7 +93,6 @@ exigir_root() {
     fi
 }
 
-# Debian 12 ou 13 (ou Raspberry Pi OS equivalente), aarch64.
 checar_sistema() {
     if [ "$(uname -m)" != "aarch64" ]; then
         echo "FALHOU: o PiStick só roda em sistemas de 64 bits ARM (aarch64); este é $(uname -m)." >&2
@@ -141,7 +121,6 @@ checar_sistema() {
     esac
 }
 
-# conferir_sha ARQUIVO ARQUIVO_SHA256: sucesso se o SHA-256 do arquivo é o do .sha256.
 conferir_sha() {
     esperado=$(awk '{ print tolower($1); exit }' "$2")
     case "$esperado" in
@@ -152,9 +131,6 @@ conferir_sha() {
     [ "$esperado" = "$real" ]
 }
 
-# obter_pacote: deixa o conteúdo do pacote extraído em $raiz (confere o SHA-256, recusa caminhos
-# perigosos). Com --pacote usa o arquivo local (e confere um .sha256 ao lado, se houver); sem ele
-# baixa de PISTICK_BASE_URL e confere sempre.
 obter_pacote() {
     tmp=$(mktemp -d)
     arq=$pacote
@@ -192,7 +168,6 @@ obter_pacote() {
         exit 1
     fi
 
-    # Recusa entradas com caminho absoluto, '..' e qualquer coisa que não seja arquivo ou pasta.
     tar -tf "$arq" > "$tmp/lista" 2> "$tmp/erro" ||
         { echo "FALHOU: '$arq' não é um pacote .tar.xz legível." >&2; exit 1; }
     if [ ! -s "$tmp/lista" ]; then
@@ -242,7 +217,6 @@ obter_pacote() {
     versao=$(head -n 1 "$raiz/VERSAO" | tr -d '[:space:]')
 }
 
-# ---- desinstalar ---------------------------------------------------------------------------------
 if [ "$modo" = "desinstalar" ]; then
     exigir_root
     if [ "$sd" -eq 1 ] && systemctl is-active --quiet pistick 2>/dev/null; then
@@ -278,13 +252,11 @@ if [ "$modo" = "desinstalar" ]; then
     exit 0
 fi
 
-# ---- verificar -----------------------------------------------------------------------------------
 if [ "$modo" = "verificar" ]; then
     raiz=""
     if [ -n "$pacote" ]; then
         obter_pacote
     fi
-    # Sistema.
     if [ "$(uname -m)" = "aarch64" ]; then estado "arquitetura" ok "aarch64"; else falta "arquitetura" "$(uname -m), esperado aarch64"; fi
     so_ok=0
     if [ -r /etc/os-release ]; then
@@ -299,7 +271,6 @@ if [ "$modo" = "verificar" ]; then
     fi
     if [ "$so_ok" -eq 1 ]; then estado "sistema" ok "$so_id $so_versao"; else falta "sistema" "esperado Debian 12 ou 13"; fi
 
-    # Pacotes apt.
     lista_pacotes=""
     if [ -n "$raiz" ]; then
         lista_pacotes=$raiz/PACOTES
@@ -319,7 +290,6 @@ if [ "$modo" = "verificar" ]; then
         falta "pacotes apt" "sem a lista (PACOTES não instalado)"
     fi
 
-    # Usuário do serviço: o da unidade instalada, ou o pedido.
     u=$usuario
     if [ -z "$u" ] && [ -f "$unidade" ]; then
         u=$(sed -n 's/^User=//p' "$unidade" | head -n 1)
@@ -337,7 +307,6 @@ if [ "$modo" = "verificar" ]; then
         falta "usuário do serviço" "$u não existe"
     fi
 
-    # Arquivos (com o pacote: também confere o conteúdo).
     conferir_arquivo() {
         if [ ! -f "$2" ]; then
             falta "$1" "falta $2"
@@ -358,7 +327,6 @@ if [ "$modo" = "verificar" ]; then
     conferir_arquivo "versão" "$destino_share/VERSAO" "${raiz:+$raiz/VERSAO}"
     if [ -f "$destino_share/VERSAO" ]; then echo "        instalada: $(head -n 1 "$destino_share/VERSAO")"; fi
 
-    # Serviço.
     if systemctl is-enabled --quiet pistick 2>/dev/null; then estado "serviço habilitado" ok; else falta "serviço habilitado"; fi
     if [ "$sd" -eq 1 ]; then
         if systemctl is-active --quiet pistick 2>/dev/null; then estado "serviço ativo" ok; else falta "serviço ativo"; fi
@@ -372,13 +340,11 @@ if [ "$modo" = "verificar" ]; then
     exit 0
 fi
 
-# ---- instalar ------------------------------------------------------------------------------------
 exigir_root
 checar_sistema
 obter_pacote
 estado "pacote" ok "versão $versao"
 
-# 3. Pacotes apt que faltam.
 faltam=""
 while IFS= read -r p; do
     case "$p" in '' | '#'*) continue ;; esac
@@ -391,12 +357,10 @@ if [ -z "$faltam" ]; then
 else
     export DEBIAN_FRONTEND=noninteractive
     apt-get update || falhou "pacotes apt" "apt-get update"
-    # shellcheck disable=SC2086
     apt-get install -y --no-install-recommends $faltam || falhou "pacotes apt" "apt-get install"
     estado "pacotes apt" feito "instalados:$faltam"
 fi
 
-# 4. Usuário do serviço.
 if [ -z "$usuario" ]; then
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         usuario=$SUDO_USER
@@ -441,7 +405,6 @@ for g in video render audio; do
     fi
 done
 
-# 5. Arquivos. instalar_arquivo ROTULO ORIGEM DESTINO MODO: copia só se o conteúdo mudou.
 mudou=0
 instalar_arquivo() {
     mudou=0
@@ -461,7 +424,6 @@ for f in "$raiz"/libexec/*; do
     instalar_arquivo "$(basename "$f")" "$f" "$destino_libexec/$(basename "$f")" 755
     if [ "$(basename "$f")" = "iniciar-servico.sh" ]; then script_mudou=$mudou; fi
 done
-# Shell dos apps do serviço (marco 9B): o do usuário, ou /bin/bash se for nologin (o foot e outros terminais usam $SHELL).
 shell_servico=$(getent passwd "$usuario" | cut -d: -f7)
 case "${shell_servico:-}" in
     "" | */nologin | */false) shell_servico=/bin/bash ;;
@@ -476,8 +438,6 @@ else
     install -D -m 644 "$raiz/etc/psd.conf" "$conf" || falhou "configuração" "$conf"
     estado "configuração" feito "$conf"
 fi
-# Wi-Fi sem economia de energia (marco 9B): só se o NetworkManager existe e o pacote traz o arquivo. Não reinicia o
-# NetworkManager: vale na próxima ativação da conexão.
 if [ -f "$raiz/etc/NetworkManager/pistick-wifi-sem-economia.conf" ]; then
     if [ -d /etc/NetworkManager ] || command -v NetworkManager >/dev/null 2>&1; then
         instalar_arquivo "Wi-Fi sem economia de energia" "$raiz/etc/NetworkManager/pistick-wifi-sem-economia.conf" /etc/NetworkManager/conf.d/pistick-wifi-sem-economia.conf 644
@@ -488,7 +448,6 @@ fi
 instalar_arquivo "lista de pacotes" "$raiz/PACOTES" "$destino_share/PACOTES" 644
 instalar_arquivo "versão" "$raiz/VERSAO" "$destino_share/VERSAO" 644
 
-# 6. systemd.
 if [ "$sd" -eq 1 ] && [ "$unidade_mudou" -eq 1 ]; then
     systemctl daemon-reload || falhou "systemd" "daemon-reload"
 fi
@@ -514,7 +473,6 @@ else
     estado "serviço" feito "iniciado"
 fi
 
-# 7. Próximos passos.
 echo
 echo "PiStick $versao instalado (usuário do serviço: $usuario)."
 echo "No computador: baixe o psc (cliente) e rode-o sem argumentos; ele procura o aparelho na rede."

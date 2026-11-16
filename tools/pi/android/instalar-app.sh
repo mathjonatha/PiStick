@@ -1,13 +1,4 @@
 #!/bin/sh
-# Roda NO PI: instala um APK no Android do Waydroid que o psd está rodando.
-#
-#   sh tools/pi/android/instalar-app.sh ARQUIVO.apk
-#   sh tools/pi/android/instalar-app.sh tools/pi/android/tom.apk     # o app de teste de som (roteiro 102)
-#
-# O Android tem de estar no ar (psd com abrir-android.sh: `sh tools/pi/iniciar-psd.sh android`, ou o serviço com
-# um APP_n do Android). O script acha o barramento D-Bus de sessão onde a sessão do Waydroid está registrada.
-# O app fica nos dados do Android (~/.local/share/waydroid) e sobrevive aos reinícios; `instalar-android.sh
-# --remover` o apaga junto com o resto.
 set -eu
 
 if [ $# -ne 1 ] || [ ! -f "$1" ]; then

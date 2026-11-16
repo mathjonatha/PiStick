@@ -1,15 +1,3 @@
-//! Soquete de controle do `psd` (Unix, modo 0600) e os subcomandos `psd pair`.
-//!
-//! Protocolo de linhas de texto, uma conexão por comando:
-//!
-//! ```text
-//! cliente -> servidor            servidor -> cliente
-//! LIST                           C<TAB>impressão<TAB>nome<TAB>data<TAB>conectado(0|1)  ...  END
-//! REMOVE <nome|impressão>        OK <n>  |  ERR <motivo>
-//! RESET                          OK <n>
-//! PAIR                           WAIT <s>, depois REQ <id><TAB>nome<TAB>impressão<TAB>código | TIMEOUT | BUSY
-//!   (resposta ao REQ)  YES|NO    OK <nome> | DENIED | EXPIRED | ERR <motivo>
-//! ```
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -23,10 +11,8 @@ use ps_secure::chaves::{fingerprint, format_code};
 
 use crate::secure::{PairWait, Security};
 
-/// Nome do soquete dentro de `XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "pistick-ctl";
 
-/// Caminho padrão do soquete: `$XDG_RUNTIME_DIR/pistick-ctl` ou, sem a variável, `/run/user/<uid>/pistick-ctl`.
 pub fn default_socket_path() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(d).join(SOCKET_NAME));
@@ -37,8 +23,6 @@ pub fn default_socket_path() -> Option<PathBuf> {
     dir.is_dir().then(|| dir.join(SOCKET_NAME))
 }
 
-/// Cria o soquete e inicia a thread que o atende. Um soquete velho (sem ninguém escutando) é apagado; um
-/// soquete vivo é erro (já há um `psd` em execução com este soquete).
 pub fn serve(sec: Arc<Security>, path: &Path) -> io::Result<()> {
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
@@ -98,7 +82,6 @@ fn handle(conn: UnixStream, sec: &Security) -> io::Result<()> {
 fn pair(conn: &UnixStream, r: &mut BufReader<UnixStream>, w: &mut UnixStream, sec: &Security) -> io::Result<()> {
     let timeout = sec.timing().pair_timeout;
     say(w, &format!("WAIT {}", timeout.as_secs()))?;
-    // Enquanto espera, ninguém lê desta conexão: ler sem bloquear e ver `Ok(0)` é o comando ter ido embora.
     conn.set_nonblocking(true)?;
     let probe = conn.try_clone()?;
     let alive = move || {
@@ -131,10 +114,6 @@ fn pair(conn: &UnixStream, r: &mut BufReader<UnixStream>, w: &mut UnixStream, se
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Lado do comando: `psd pair ...`
-// ---------------------------------------------------------------------------------------------
-
 const AJUDA_PAIR: &str = "\
 psd pair — pareamento de clientes com o psd em execução
 
@@ -161,7 +140,6 @@ fn connect(socket: Option<PathBuf>) -> Result<UnixStream, ExitCode> {
     })
 }
 
-/// `psd pair [...]`. `args` são os argumentos depois de `pair`.
 pub fn run_cli(args: &[String]) -> ExitCode {
     let mut socket = None;
     let mut cmd: Option<(&str, String)> = None;

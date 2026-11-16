@@ -61,7 +61,6 @@ fn pacotes_chegam_em_ordem_com_o_codec_escolhido() {
                 }
             }
             assert_eq!(&out, b, "{codec:?} bloco {i}");
-            // Só o primeiro pacote do fluxo leva a marca (não havia envio antes).
             assert_eq!(p.flags, if i == 0 { AUDIO_FLAG_DISCONTINUITY } else { 0 });
         }
     }
@@ -74,20 +73,17 @@ fn silencio_para_depois_de_200_ms_e_volta_com_marca() {
     let sub = hub.subscribe(w);
     hub.push_block(&tone(500), 0);
     let mut v = Vec::new();
-    // 20 blocos de silêncio ainda são enviados (200 ms); do 21º em diante, nada.
     for i in 0..40 {
         hub.push_block(&silence(), 10_000 * (1 + i));
         sub.drain(&mut v);
     }
     assert_eq!(v.len(), 1 + SILENCE_HANG_BLOCKS as usize);
-    // Volta o som.
     hub.push_block(&tone(500), 500_000);
     let mut v = Vec::new();
     sub.drain(&mut v);
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].flags, AUDIO_FLAG_DISCONTINUITY, "retomada depois do silêncio");
     assert_eq!(v[0].pts_us, 500_000);
-    // Silêncio curto (abaixo de 200 ms) entre sons não gera marca.
     for i in 0..5 {
         hub.push_block(&silence(), 510_000 + 10_000 * i);
     }
@@ -110,7 +106,6 @@ fn mais_de_200_ms_na_fila_descarta_os_mais_velhos_com_marca() {
     sub.drain(&mut v);
     assert_eq!(v.len(), MAX_QUEUED_PACKETS);
     assert_eq!(sub.dropped(), 15);
-    // Sobraram os 20 mais novos, e o primeiro leva as marcas de descontinuidade e descarte.
     assert_eq!(v[0].pts_us, 15 * 10_000);
     assert_eq!(v[0].flags, AUDIO_FLAG_DISCONTINUITY | AUDIO_FLAG_DROPPED);
     assert!(v[1..].iter().all(|p| p.flags == 0));
@@ -127,7 +122,6 @@ fn nova_inscricao_zera_a_fila_e_a_antiga_nao_atrapalha() {
     let mut v = Vec::new();
     sub2.drain(&mut v);
     assert!(v.is_empty());
-    // Largar a inscrição antiga não derruba a nova.
     drop(sub1);
     assert!(hub.has_subscriber());
     hub.push_block(&tone(100), 10_000);
@@ -153,7 +147,6 @@ fn sintetico_gera_som_e_silencio_em_tempo_real() {
     drop(sub);
     hub.stop();
     h.join().unwrap();
-    // Em 1,5 s de relógio: 1 s de som (100 pacotes) mais 200 ms de silêncio enviado (20) e depois nada.
     assert!((115..=125).contains(&pkts.len()), "pacotes: {}", pkts.len());
     let mut out = Vec::new();
     for p in &pkts[..100] {
@@ -164,7 +157,6 @@ fn sintetico_gera_som_e_silencio_em_tempo_real() {
     assert!((ps_audio::synth::goertzel(&r, 880.0) - ps_audio::synth::AMPLITUDE).abs() < 0.01);
 }
 
-/// Servidor local de PCM que escreve em pedaços de tamanho ímpar, para provar o fechamento dos blocos.
 fn pcm_server(chunks: Vec<Vec<u8>>, keep_open: Duration) -> (String, std::thread::JoinHandle<()>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap().to_string();
@@ -185,7 +177,6 @@ fn leitor_de_pcm_fecha_blocos_de_10_ms_mesmo_com_pedacos_ímpares() {
     let hub = AudioHub::new(AudioCodec::Pcm);
     let (w, _) = waker();
     let sub = hub.subscribe(w);
-    // 6 blocos distintos, entregues em pedaços de 999 bytes.
     let mut bytes = Vec::new();
     let mut esperado = Vec::new();
     for k in 1..=6i16 {
@@ -221,7 +212,6 @@ fn leitor_de_pcm_reconecta_quando_o_servidor_demora_ou_cai() {
     let hub = AudioHub::new(AudioCodec::Pcm);
     let (w, _) = waker();
     let sub = hub.subscribe(w);
-    // Escolhe uma porta, a libera e só abre o servidor depois: as primeiras tentativas falham.
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap().to_string();
     drop(l);
@@ -231,7 +221,6 @@ fn leitor_de_pcm_reconecta_quando_o_servidor_demora_ou_cai() {
     std::thread::sleep(Duration::from_millis(700));
     let l = TcpListener::bind(&addr).unwrap();
     let server = std::thread::spawn(move || {
-        // Primeira conexão: um bloco e queda; segunda: um bloco.
         for k in [1i16, 2] {
             let (mut s, _) = l.accept().unwrap();
             let mut b = Vec::new();
@@ -251,7 +240,6 @@ fn leitor_de_pcm_reconecta_quando_o_servidor_demora_ou_cai() {
     reader.join().unwrap();
     server.join().unwrap();
     assert_eq!(v.len(), 2, "logs: {:?}", logs.lock().unwrap());
-    // Depois da reconexão o pacote leva a marca de descontinuidade.
     assert_eq!(v[1].flags & AUDIO_FLAG_DISCONTINUITY, AUDIO_FLAG_DISCONTINUITY);
     let logs = logs.lock().unwrap();
     assert!(logs.iter().any(|m| m.contains("sem conexão")), "{logs:?}");

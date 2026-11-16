@@ -1,13 +1,3 @@
-//! Canal cifrado e pareamento do lado do cliente (marco 9, parte A; projeto em `docs/21`).
-//!
-//! - `chave-do-cliente`: a identidade deste computador (chave estática X25519), criada no primeiro uso. No Windows
-//!   o arquivo guarda a chave cifrada com a DPAPI (veja `keystore`); nos outros sistemas, 32 bytes com modo 0600.
-//! - `aparelhos-conhecidos`: uma linha por aparelho, `chave-em-hex<TAB>nome<TAB>endereço da última conexão`
-//!   (como o `known_hosts` do SSH). Aparelho conhecido que apresenta chave diferente da guardada: não conecta.
-//!
-//! Pasta das chaves: `%APPDATA%\PiStick\` (fora do Windows, `$XDG_CONFIG_HOME/pistick` ou
-//! `~/.config/pistick`). A variável `PISTICK_KEYS_DIR` troca a pasta e existe **só para testes**: com ela
-//! um mesmo computador faz o papel de vários clientes.
 
 use std::io;
 use std::net::TcpStream;
@@ -20,34 +10,21 @@ use ps_secure::chaves::{self, fingerprint, format_code, load_list, sanitize_name
 use ps_secure::{ct_eq, SecureConn};
 use ps_transport::{with_deadline, Split, TcpReader, TcpTransport, Transport};
 
-/// Código de saída do `psc` quando o aparelho recusa o cliente (ele não está pareado).
 pub const EXIT_REFUSED: u8 = 4;
-/// Código de saída do `psc` quando o aparelho apresenta uma chave diferente da guardada.
 pub const EXIT_KEY_MISMATCH: u8 = 5;
 
-/// Limite de tempo do aperto de mão.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// O servidor responde o estado de pareamento logo depois do aperto de mão.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
-/// O servidor espera até 120 s pela aprovação no aparelho.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(135);
 
-/// Função chamada com o código de pareamento mostrado ao usuário.
 pub type CodeHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Como o cliente trata a segurança de uma conexão.
 #[derive(Clone)]
 pub struct SecurityOptions {
-    /// `--insecure`: texto claro mesmo fora do laço local.
     pub insecure: bool,
-    /// `--secure` (testes): Noise mesmo em laço local.
     pub force_noise: bool,
-    /// Nome anunciado ao aparelho (até 63 bytes).
     pub client_name: String,
-    /// Pasta de `chave-do-cliente` e `aparelhos-conhecidos`.
     pub keys_dir: PathBuf,
-    /// Chamado com o código de pareamento (`"123 456"`) quando o aparelho pede aprovação; os testes o usam
-    /// para ler o código que o usuário veria.
     pub on_code: Option<CodeHook>,
 }
 
@@ -57,12 +34,10 @@ impl SecurityOptions {
     }
 }
 
-/// Nome do computador, para anunciar ao aparelho (até 63 bytes).
 pub fn computer_name() -> String {
     ["COMPUTERNAME", "HOSTNAME"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.trim().is_empty())).unwrap_or_else(|| "psc".to_string())
 }
 
-/// Pasta das chaves do cliente (veja o texto do módulo).
 pub fn keys_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("PISTICK_KEYS_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
@@ -87,14 +62,10 @@ fn known_file(dir: &Path) -> PathBuf {
     dir.join("aparelhos-conhecidos")
 }
 
-/// Por que a conexão não abriu.
 #[derive(Debug)]
 pub enum ConnectError {
-    /// O aparelho recusou este cliente (estado 3): falta parear. Código de saída 4.
     Refused(String),
-    /// O aparelho apresentou chave diferente da guardada. Código de saída 5.
     KeyMismatch(String),
-    /// Qualquer outra falha (rede, formato, tempo).
     Other(String),
 }
 
@@ -120,7 +91,6 @@ impl std::fmt::Display for ConnectError {
     }
 }
 
-/// Conexão pronta para a sessão: texto claro (laço local ou `--insecure`) ou canal cifrado.
 pub enum Connected {
     Plain(TcpTransport),
     Secure(Box<SecureConn<TcpReader, TcpStream>>),
@@ -136,8 +106,6 @@ Se você trocou o aparelho de propósito (ou regravou o cartão), rode `psc --fo
     )
 }
 
-/// Decide texto claro ou Noise, faz o aperto de mão, confere o aparelho, mostra o estado de pareamento e
-/// devolve a conexão pronta para o `HELLO`. `address` é o endereço usado, só para guardar na lista.
 pub fn open(tcp: TcpTransport, address: &str, so: &SecurityOptions) -> Result<Connected, ConnectError> {
     let loopback = tcp.peer_ip().is_some_and(|i| i.is_loopback());
     if so.insecure || (loopback && !so.force_noise) {
@@ -154,9 +122,6 @@ pub fn open(tcp: TcpTransport, address: &str, so: &SecurityOptions) -> Result<Co
     open_with_key(tcp, address, so, &key)
 }
 
-/// Como [`open`] para o canal cifrado, com a chave do cliente já em mãos (o cliente Android a recebe da casca, que a
-/// abriu com o Keystore). Não decide texto claro e não lê `chave-do-cliente`; só usa `keys_dir` para a lista de
-/// `aparelhos-conhecidos`.
 pub fn open_with_key(tcp: TcpTransport, address: &str, so: &SecurityOptions, key: &ps_secure::Keypair) -> Result<Connected, ConnectError> {
     let io_err = |e: io::Error| ConnectError::Other(format!("pasta de chaves {}: {e}", so.keys_dir.display()));
     let known_path = known_file(&so.keys_dir);
@@ -183,12 +148,8 @@ pub fn open_with_key(tcp: TcpTransport, address: &str, so: &SecurityOptions, key
     let nome = sanitize_name(&info.name);
     let mut conn = SecureConn::new(reader, writer, closer.clone(), est.send, est.recv, peer.clone());
 
-    // Primeira mensagem do servidor dentro do canal: o estado de pareamento.
     let mut status = status_message(&mut conn, &closer, STATUS_TIMEOUT)?;
     if let Message::AuthStatus { state: AUTH_PENDING, code } = status {
-        // O código mostrado é calculado AQUI, do hash do aperto de mão desta conexão, e não o que veio na
-        // mensagem: um intermediário que repassasse o código do aparelho faria os dois lados mostrarem o mesmo
-        // número e a conferência não serviria de nada.
         let local = chaves::pairing_code(&info.handshake_hash);
         if local != code {
             return Err(ConnectError::KeyMismatch(format!(
@@ -241,7 +202,6 @@ fn status_message(conn: &mut SecureConn<TcpReader, TcpStream>, closer: &ps_trans
     }
 }
 
-/// `psc --forget NOME|IMPRESSÃO`: apaga o aparelho da lista de conhecidos. Devolve quantos foram apagados.
 pub fn forget(dir: &Path, selector: &str) -> io::Result<usize> {
     let path = known_file(dir);
     let (mut list, _) = load_list(&path)?;
@@ -252,7 +212,6 @@ pub fn forget(dir: &Path, selector: &str) -> io::Result<usize> {
     Ok(n)
 }
 
-/// Nomes, impressões e endereços dos aparelhos conhecidos (para mensagens e testes).
 pub fn known_devices(dir: &Path) -> io::Result<Vec<(String, String, String)>> {
     let (list, _) = load_list(&known_file(dir))?;
     Ok(list.peers.iter().map(|p| (p.name.clone(), fingerprint(&p.key), p.extra.clone())).collect())

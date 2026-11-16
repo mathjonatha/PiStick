@@ -1,5 +1,3 @@
-//! Teste de ponta a ponta do compositor (só Linux): cliente Wayland (`ps-testclient`) -> `psd`
-//! em modo Wayland -> protocolo -> decodificador, comparando pixels com o padrão conhecido.
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
@@ -18,7 +16,6 @@ use ps_server::{serve_loop_with, ServerOptions};
 use ps_testclient::{pattern, CursorMode, Options, IMAGE_HOTSPOT, IMAGE_PIXEL, IMAGE_SIDE};
 use ps_transport::{Closer, Split, TcpAcceptor, TcpTransport, Transport};
 
-/// Quadros de faixa que o cliente de teste desenha depois de cada pintura-base.
 const BAND_FRAMES: u32 = 40;
 
 struct Rig {
@@ -37,12 +34,10 @@ fn rig(max_sessions: usize) -> Rig {
     let opts = ServerOptions {
         hello_timeout: Duration::from_millis(800),
         quiet: std::env::var("PS_LOG").is_err(),
-        // Sem fatiamento nem limite de vazão: o teste confere pixels, não o controle de fluxo.
         flow_initial_throughput: 1e10,
         flow_adaptive: false,
         ..ServerOptions::default()
     };
-    // `make_source` é chamada uma vez por sessão.
     let fontes: Vec<_> = (0..max_sessions).map(|_| comp.source()).collect();
     let server = std::thread::spawn(move || {
         let mut it = fontes.into_iter();
@@ -65,7 +60,6 @@ impl Rig {
         Proto::connect(self.addr, auto_ack, CAP_BLOCK_CODEC)
     }
 
-    /// Cliente que anuncia as extensões do marco 3 (popups, cursor, área de transferência).
     fn client_marco3(&self) -> Proto {
         Proto::connect(self.addr, true, CAP_BLOCK_CODEC | CAPS_MARCO3)
     }
@@ -85,7 +79,6 @@ fn spawn_testclient(socket: &Path, log: &Path, counter: Option<Arc<AtomicU32>>) 
     spawn_testclient_with(socket, log, |o| o.counter = counter)
 }
 
-/// Como [`spawn_testclient`], com ajuste das opções do cliente de teste.
 fn spawn_testclient_with(socket: &Path, log: &Path, ajusta: impl FnOnce(&mut Options)) -> JoinHandle<Result<(), String>> {
     let mut opts = Options {
         socket: Some(socket.to_path_buf()),
@@ -98,7 +91,6 @@ fn spawn_testclient_with(socket: &Path, log: &Path, ajusta: impl FnOnce(&mut Opt
     std::thread::spawn(move || ps_testclient::run(opts))
 }
 
-/// Cliente do protocolo sem janela: decodifica e confirma tudo.
 struct Proto {
     rx: Receiver<Result<Message, ProtoError>>,
     writer: std::net::TcpStream,
@@ -108,11 +100,8 @@ struct Proto {
     titles: HashMap<u32, String>,
     frames: usize,
     log: Vec<String>,
-    /// Quadros recebidos e ainda não confirmados (quando `auto_ack` está desligado).
     unacked: Vec<(u32, u32)>,
-    /// Todas as mensagens que não são quadro, na ordem em que chegaram.
     seen: Vec<Message>,
-    /// Retângulos que cada quadro decodificou (janela, regiões), na ordem de chegada.
     rects: Vec<(u32, Vec<ps_codec::Rect>)>,
 }
 
@@ -187,7 +176,6 @@ impl Proto {
         }
     }
 
-    /// Passa a confirmar tudo, inclusive o que ficou pendente.
     fn start_acking(&mut self) {
         self.auto_ack = true;
         for (win, seq) in std::mem::take(&mut self.unacked) {
@@ -203,7 +191,6 @@ impl Proto {
         }
     }
 
-    /// Espera a janela `win` assentar no quadro final de `BAND_FRAMES` faixas e confere cada pixel.
     fn expect_settled(&mut self, win: u32, size: (u32, u32)) {
         let (w, h) = size;
         let mut ultimo = String::new();
@@ -253,7 +240,6 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
     let cliente;
     if cliente_wayland_primeiro {
         cliente = spawn_testclient(&rig.socket(), &log, None);
-        // Espera o toplevel existir (arquivo de registro com o configure) antes de conectar.
         let limite = Instant::now() + Duration::from_secs(10);
         while !read_log(&log).contains("configure 960x600") {
             assert!(Instant::now() < limite, "sem configure: {}", read_log(&log));
@@ -266,16 +252,13 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
         cliente = spawn_testclient(&rig.socket(), &log, None);
     }
 
-    // 1. WIN_CREATE com título e tamanho do configure inicial (960x600).
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
     assert_eq!(proto.titles[&win], "e2e-teste ação");
     assert_eq!((proto.decoders[&win].width(), proto.decoders[&win].height()), (960, 600));
 
-    // 2. Pixels idênticos ao padrão, depois que o desenho assenta.
     proto.expect_settled(win, (960, 600));
 
-    // 3. RESIZE_REQ -> WIN_RESIZE e pixels corretos no tamanho novo.
     proto.send(Message::ResizeReq { win, width: 500, height: 300 });
     let mut visto = false;
     let limite = Instant::now() + Duration::from_secs(10);
@@ -289,22 +272,21 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
     proto.expect_settled(win, (500, 300));
     assert!(read_log(&log).contains("configure 500x300"));
 
-    // 4. Entrada: tecla simples, uma que depende do layout br (ç), modificador, ponteiro.
     proto.send(Message::Focus { win, focused: true });
     let teclas: [(u32, bool); 8] = [
-        (30, true),  // a
+        (30, true),
         (30, false),
-        (39, true), // ; no US, ç no layout br
+        (39, true),
         (39, false),
-        (42, true), // shift esquerdo
-        (39, true), // Ç
+        (42, true),
+        (39, true),
         (39, false),
         (42, false),
     ];
     for (k, p) in teclas {
         proto.send(Message::Key { win, keycode: k, pressed: p });
     }
-    proto.send(Message::Key { win, keycode: 53, pressed: true }); // '/' no US, ';' no layout br
+    proto.send(Message::Key { win, keycode: 53, pressed: true });
     proto.send(Message::Key { win, keycode: 53, pressed: false });
     proto.send(Message::PointerMove { win, x: 10.5, y: 20.25 });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: true });
@@ -313,7 +295,6 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
     wait_log(&log, &mut proto, "axis vertical 15.00");
     let l = read_log(&log);
     assert!(l.contains("keymap ok"), "{l}");
-    // O Android do Waydroid escolhe o layout do teclado pela primeira palavra deste nome (docs/23).
     assert!(l.contains("keymap layout \"Brazilian (ABNT2)\""), "nome do layout do keymap: {l}");
     assert!(l.contains("kbd-enter"), "{l}");
     assert!(l.contains("key 30 pressed sym=a utf8=\"a\""), "{l}");
@@ -323,7 +304,6 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
     assert!(l.contains("ptr-enter 10.5 20.2"), "{l}");
     assert!(l.contains("button 272 pressed") && l.contains("button 272 released"), "{l}");
 
-    // 5. CLOSE_REQ -> WIN_DESTROY e o cliente de teste termina.
     proto.send(Message::CloseReq { win });
     proto.until(10, "WIN_DESTROY", |p| !p.decoders.contains_key(&win));
     let r = cliente.join().expect("thread do cliente");
@@ -334,7 +314,6 @@ fn fluxo_completo(cliente_wayland_primeiro: bool) {
     rig.finish();
 }
 
-/// Linhas `toplevel-states ...` do registro do cliente de teste, como listas de nomes.
 fn estados(log: &Path) -> Vec<Vec<String>> {
     read_log(log)
         .lines()
@@ -358,22 +337,17 @@ fn espera_estados(log: &Path, proto: &mut Proto, cond: impl Fn(&[String]) -> boo
 fn geometria_da_janela_recorta_a_margem_e_desloca_o_ponteiro() {
     let rig = rig(1);
     let log = rig.dir.join("geometria.log");
-    // Buffer de 1000x640 com 20 px de margem magenta; a geometria declarada é 960x600.
     let cliente = spawn_testclient_with(&rig.socket(), &log, |o| o.margin = 20);
     let mut proto = rig.client(true);
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
-    // O tamanho transmitido é o da geometria, não o do buffer.
     assert_eq!((proto.decoders[&win].width(), proto.decoders[&win].height()), (960, 600));
-    // Os pixels são só os da área útil: o padrão exato, sem nenhum pixel da margem.
     proto.expect_settled(win, (960, 600));
 
-    // Ponteiro: (10.5, 20.25) na área transmitida é (30.5, 40.25) na superfície do app.
     proto.send(Message::Focus { win, focused: true });
     proto.send(Message::PointerMove { win, x: 10.5, y: 20.25 });
     wait_log(&log, &mut proto, "ptr-enter 30.5 40.2");
 
-    // Redimensionar: nova geometria, novo buffer com margem.
     proto.send(Message::ResizeReq { win, width: 500, height: 300 });
     proto.until(10, "WIN_RESIZE", |p| p.log.iter().any(|l| l == &format!("resize {win} 500x300")));
     proto.expect_settled(win, (500, 300));
@@ -397,10 +371,8 @@ fn estados_ativado_e_ladrilhado_nas_quatro_bordas() {
     let ladrilhada = |e: &[String]| ["TiledLeft", "TiledRight", "TiledTop", "TiledBottom"].iter().all(|n| e.iter().any(|x| x == n));
     espera_estados(&log, &mut proto, |e| ladrilhada(e) && e.iter().any(|x| x == "Activated"), "ativada e ladrilhada");
 
-    // Perdeu o foco: sai "ativado", continua ladrilhada.
     proto.send(Message::Focus { win, focused: false });
     espera_estados(&log, &mut proto, |e| ladrilhada(e) && !e.iter().any(|x| x == "Activated"), "sem ativação");
-    // Ganhou o foco de novo.
     proto.send(Message::Focus { win, focused: true });
     espera_estados(&log, &mut proto, |e| ladrilhada(e) && e.iter().any(|x| x == "Activated"), "ativada de novo");
 
@@ -442,7 +414,6 @@ fn redimensionamento_pedido_pelo_app_chega_como_win_resize() {
     let win = *proto.titles.keys().next().unwrap();
     proto.expect_settled(win, (960, 600));
 
-    // A tecla "r" faz o app trocar de tamanho sozinho, sem nenhum RESIZE_REQ.
     proto.send(Message::Focus { win, focused: true });
     wait_log(&log, &mut proto, "kbd-enter");
     proto.send(Message::Key { win, keycode: 19, pressed: true });
@@ -458,9 +429,6 @@ fn redimensionamento_pedido_pelo_app_chega_como_win_resize() {
     rig.finish();
 }
 
-// ---------------------------------------------------------------- popups
-
-/// Manda uma tecla (pressiona e solta) pelo protocolo.
 fn tecla(proto: &mut Proto, win: u32, code: u32) {
     proto.send(Message::Key { win, keycode: code, pressed: true });
     proto.send(Message::Key { win, keycode: code, pressed: false });
@@ -470,7 +438,6 @@ fn ocorrencias(log: &Path, needle: &str) -> usize {
     read_log(log).matches(needle).count()
 }
 
-/// Espera o registro do cliente de teste ter `needle` pelo menos `n` vezes.
 fn wait_log_n(log: &Path, proto: &mut Proto, needle: &str, n: usize) {
     let limite = Instant::now() + Duration::from_secs(10);
     while ocorrencias(log, needle) < n {
@@ -490,7 +457,6 @@ struct PopupMsg {
     grab: bool,
 }
 
-/// O `n`-ésimo (a partir de 0) `POPUP_CREATE` recebido.
 fn popup_create(p: &Proto, n: usize) -> Option<PopupMsg> {
     p.seen
         .iter()
@@ -506,7 +472,6 @@ fn espera_popup(proto: &mut Proto, n: usize) -> PopupMsg {
     popup_create(proto, n).unwrap()
 }
 
-/// Espera o quadro do popup ser decodificado com a cor sólida `rgb` no centro.
 fn espera_cor(proto: &mut Proto, win: u32, rgb: u32) {
     proto.until(10, "quadro do popup com a cor esperada", |p| {
         p.decoders.get(&win).is_some_and(|d| {
@@ -550,50 +515,40 @@ fn menu_com_captura_submenu_e_dispensa_em_cadeia() {
     let rig = rig(1);
     let (mut proto, win, log, cliente) = abre_janela_com_popups(&rig, "menu");
 
-    // `p` abre o menu: POPUP_CREATE na posição calculada do positioner (anchor BottomLeft de (100,50,40,20)).
     tecla(&mut proto, win, 25);
     let menu = espera_popup(&mut proto, 0);
     assert_eq!((menu.parent, menu.x, menu.y, menu.w, menu.h, menu.grab), (win, 100, 70, 200, 150, true));
-    // O conteúdo chega por FRAME com o id do popup.
     espera_cor(&mut proto, menu.win, 0x2040C0);
-    // O teclado passa ao popup com captura.
     wait_log_n(&log, &mut proto, "kbd-enter popup1", 1);
 
-    // Submenu: filho do menu, em (190, 10) relativo a ele.
     tecla(&mut proto, win, 46);
     let sub = espera_popup(&mut proto, 1);
     assert_eq!((sub.parent, sub.x, sub.y, sub.w, sub.h, sub.grab), (menu.win, 190, 10, 120, 80, true));
     espera_cor(&mut proto, sub.win, 0xC04020);
     wait_log_n(&log, &mut proto, "kbd-enter popup2", 1);
 
-    // As teclas vão para o submenu (o mais fundo da cadeia).
     tecla(&mut proto, win, 30);
     wait_log_n(&log, &mut proto, "key 30 pressed sym=a utf8=\"a\" focus=popup2", 1);
 
-    // O cliente dispensa a cadeia (clique fora): o filho sai antes do pai, `popup_done` nos dois.
     proto.send(Message::CloseReq { win: menu.win });
     proto.until(10, "WIN_DESTROY dos dois popups", |p| destruido(p, menu.win) && destruido(p, sub.win));
     assert!(posicao_do_destroy(&proto, sub.win) < posicao_do_destroy(&proto, menu.win), "o filho deve sair antes do pai: {:?}", proto.log);
     wait_log_n(&log, &mut proto, "popup-done popup2", 1);
     wait_log_n(&log, &mut proto, "popup-done popup1", 1);
-    // O teclado volta para a janela.
     wait_log_n(&log, &mut proto, "kbd-enter main", 2);
 
-    // Clique na janela com o menu aberto: dispensa o menu e o clique é consumido.
     tecla(&mut proto, win, 25);
     let m2 = espera_popup(&mut proto, 2);
     proto.send(Message::PointerMove { win, x: 400.0, y: 400.0 });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: true });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: false });
     proto.until(10, "menu dispensado pelo clique", |p| destruido(p, m2.win));
-    // Outro clique, agora sem menu, chega ao app (prova que o laço de consumo terminou).
     proto.send(Message::PointerButton { win, button: 0x110, pressed: true });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: false });
     wait_log(&log, &mut proto, "button 272 released");
     assert_eq!(ocorrencias(&log, "button 272 pressed"), 1, "só o segundo clique chega ao app:\n{}", read_log(&log));
     assert_eq!(ocorrencias(&log, "button 272 released"), 1, "{}", read_log(&log));
 
-    // FOCUS 0 da raiz dispensa o menu.
     wait_log_n(&log, &mut proto, "kbd-enter main", 3);
     tecla(&mut proto, win, 25);
     let m3 = espera_popup(&mut proto, 3);
@@ -608,23 +563,21 @@ fn dica_sem_captura_nao_recebe_teclado_e_some_quando_o_app_a_destroi() {
     let rig = rig(1);
     let (mut proto, win, log, cliente) = abre_janela_com_popups(&rig, "dica");
 
-    tecla(&mut proto, win, 20); // t
+    tecla(&mut proto, win, 20);
     let dica = espera_popup(&mut proto, 0);
     assert_eq!((dica.parent, dica.x, dica.y, dica.w, dica.h, dica.grab), (win, 300, 300, 120, 40, false));
     espera_cor(&mut proto, dica.win, 0x20A040);
 
-    // O teclado continua na janela principal.
     tecla(&mut proto, win, 30);
     wait_log_n(&log, &mut proto, "key 30 pressed sym=a utf8=\"a\" focus=main", 1);
     assert_eq!(ocorrencias(&log, "kbd-enter tip"), 0, "{}", read_log(&log));
 
-    // Um clique na janela não dispensa a dica (não há captura): ela só some quando o app a destrói.
     proto.send(Message::PointerMove { win, x: 50.0, y: 50.0 });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: true });
     proto.send(Message::PointerButton { win, button: 0x110, pressed: false });
     wait_log(&log, &mut proto, "button 272 released");
     assert!(!destruido(&proto, dica.win));
-    tecla(&mut proto, win, 22); // u
+    tecla(&mut proto, win, 22);
     proto.until(10, "WIN_DESTROY da dica", |p| destruido(p, dica.win));
 
     fecha_janela(proto, win, cliente, rig);
@@ -637,7 +590,7 @@ fn reposicionar_o_popup_vira_popup_move() {
 
     tecla(&mut proto, win, 25);
     let menu = espera_popup(&mut proto, 0);
-    tecla(&mut proto, win, 47); // v
+    tecla(&mut proto, win, 47);
     proto.until(10, "POPUP_MOVE", |p| p.seen.iter().any(|m| matches!(m, Message::PopupMove { .. })));
     let mv = proto.seen.iter().find_map(|m| if let Message::PopupMove { win, x, y, width, height } = m { Some((*win, *x, *y, *width, *height)) } else { None });
     assert_eq!(mv, Some((menu.win, 300, 210, 200, 150)));
@@ -651,11 +604,9 @@ fn popup_e_restrito_ao_monitor_virtual() {
     let rig = rig(1);
     let (mut proto, win, _log, cliente) = abre_janela_com_popups(&rig, "monitor");
 
-    // Janela grande (1900x1000): o popup 300x200 pedido no canto passaria do monitor de 1920x1080 e
-    // é deslizado para dentro dele.
     proto.send(Message::ResizeReq { win, width: 1900, height: 1000 });
     proto.until(10, "WIN_RESIZE", |p| p.log.iter().any(|l| l == &format!("resize {win} 1900x1000")));
-    tecla(&mut proto, win, 48); // b
+    tecla(&mut proto, win, 48);
     let grande = espera_popup(&mut proto, 0);
     assert_eq!((grande.x, grande.y, grande.w, grande.h), (1620, 880, 300, 200));
 
@@ -667,7 +618,7 @@ fn cliente_sem_a_extensao_de_popups_tem_o_menu_dispensado_na_hora() {
     let rig = rig(1);
     let log = rig.dir.join("sem-extensao.log");
     let cliente = spawn_testclient_with(&rig.socket(), &log, |o| o.popups = true);
-    let mut proto = rig.client(true); // só o codec de blocos
+    let mut proto = rig.client(true);
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
     proto.send(Message::Focus { win, focused: true });
@@ -678,9 +629,6 @@ fn cliente_sem_a_extensao_de_popups_tem_o_menu_dispensado_na_hora() {
     fecha_janela(proto, win, cliente, rig);
 }
 
-// ---------------------------------------------------------------- cursor
-
-/// Abre a janela com o cursor pedido, leva o ponteiro para dentro dela e devolve o primeiro `CURSOR`.
 fn cursor_recebido(modo: CursorMode, nome: &str) -> CursorShape {
     let rig = rig(1);
     let log = rig.dir.join(format!("{nome}.log"));
@@ -690,7 +638,6 @@ fn cursor_recebido(modo: CursorMode, nome: &str) -> CursorShape {
     let win = *proto.titles.keys().next().unwrap();
     proto.send(Message::Focus { win, focused: true });
     wait_log_n(&log, &mut proto, "kbd-enter main", 1);
-    // O ponteiro entra na janela; o app responde com o cursor dele.
     proto.send(Message::PointerMove { win, x: 30.0, y: 40.0 });
     proto.until(10, "CURSOR do app", |p| p.seen.iter().any(|m| matches!(m, Message::Cursor { shape, .. } if *shape != CursorShape::Named("default".into()))));
     let achado = proto.seen.iter().find_map(|m| match m {
@@ -740,7 +687,7 @@ fn sem_a_extensao_de_cursor_nada_e_enviado() {
     let rig = rig(1);
     let log = rig.dir.join("cursor-sem-ext.log");
     let cliente = spawn_testclient_with(&rig.socket(), &log, |o| o.cursor = Some(CursorMode::Named("text".into())));
-    let mut proto = rig.client(true); // só o codec de blocos
+    let mut proto = rig.client(true);
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
     proto.send(Message::Focus { win, focused: true });
@@ -755,9 +702,6 @@ fn sem_a_extensao_de_cursor_nada_e_enviado() {
     fecha_janela(proto, win, cliente, rig);
 }
 
-// ---------------------------------------------------------------- área de transferência
-
-/// Textos de todas as mensagens `CLIPBOARD` recebidas do servidor.
 fn textos_da_area(p: &Proto) -> Vec<String> {
     p.seen
         .iter()
@@ -771,7 +715,6 @@ fn textos_da_area(p: &Proto) -> Vec<String> {
         .collect()
 }
 
-/// Abre o cliente de teste (com `ajusta`), conecta um cliente de protocolo com `caps` e dá o foco à janela.
 fn abre_com_area(rig: &Rig, nome: &str, caps: u32, ajusta: impl FnOnce(&mut Options)) -> (Proto, u32, PathBuf, JoinHandle<Result<(), String>>) {
     let log = rig.dir.join(format!("{nome}.log"));
     let cliente = spawn_testclient_with(&rig.socket(), &log, ajusta);
@@ -783,7 +726,6 @@ fn abre_com_area(rig: &Rig, nome: &str, caps: u32, ajusta: impl FnOnce(&mut Opti
     (proto, win, log, cliente)
 }
 
-/// Deixa passar um tempo lendo mensagens do servidor.
 fn espera(proto: &mut Proto, ms: u64) {
     let fim = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < fim {
@@ -797,12 +739,10 @@ fn selecao_do_pi_chega_ao_hospedeiro_e_nao_se_repete() {
     let texto = "pistick-teste-123 ação ç";
     let (mut proto, win, _log, cliente) = abre_com_area(&rig, "area-pi", CAP_BLOCK_CODEC | CAPS_MARCO3, |o| o.clipboard = Some(texto.into()));
 
-    // O app do Pi define a seleção (tecla y): o servidor lê o texto na hora e envia.
     tecla(&mut proto, win, 21);
     proto.until(10, "CLIPBOARD", |p| !textos_da_area(p).is_empty());
     assert_eq!(textos_da_area(&proto), vec![texto.to_string()]);
 
-    // Mesma seleção de novo: conteúdo idêntico ao último, não é reenviado.
     tecla(&mut proto, win, 21);
     espera(&mut proto, 600);
     assert_eq!(textos_da_area(&proto).len(), 1, "{:?}", proto.seen.len());
@@ -815,18 +755,14 @@ fn texto_do_hospedeiro_vira_a_selecao_dos_apps_sem_eco() {
     let rig = rig(1);
     let (mut proto, win, log, cliente) = abre_com_area(&rig, "area-host", CAP_BLOCK_CODEC | CAPS_MARCO3, |o| o.clipboard = Some("vindo-do-hospedeiro ação".into()));
 
-    // O hospedeiro define o texto: o app (com foco) recebe uma seleção nova que ele consegue ler.
     proto.send(Message::ClipboardUp { mime: MIME_TEXT.into(), data: "do Windows ç 123".as_bytes().to_vec() });
     wait_log_n(&log, &mut proto, "selection-received \"do Windows ç 123\"", 1);
-    // Outro texto: outra seleção.
     proto.send(Message::ClipboardUp { mime: MIME_TEXT.into(), data: "segundo".as_bytes().to_vec() });
     wait_log_n(&log, &mut proto, "selection-received \"segundo\"", 1);
 
-    // O app define a própria seleção (tecla y): como o texto é novo, vai ao hospedeiro...
     tecla(&mut proto, win, 21);
     proto.until(10, "CLIPBOARD", |p| !textos_da_area(p).is_empty());
     assert_eq!(textos_da_area(&proto), vec!["vindo-do-hospedeiro ação".to_string()]);
-    // ...e o hospedeiro mandar de volta o mesmo texto não vira seleção de novo (sem eco).
     let antes = ocorrencias(&log, "selection-received");
     proto.send(Message::ClipboardUp { mime: MIME_TEXT.into(), data: "vindo-do-hospedeiro ação".as_bytes().to_vec() });
     espera(&mut proto, 600);
@@ -854,7 +790,6 @@ fn sem_a_extensao_de_area_de_transferencia_nada_e_enviado() {
     tecla(&mut proto, win, 21);
     wait_log_n(&log, &mut proto, "selection-set", 1);
     espera(&mut proto, 500);
-    // Ninguém pediu o texto ao app: sem a extensão, o servidor nem tenta lê-lo.
     assert_eq!(ocorrencias(&log, "selection-sent"), 0);
     assert!(textos_da_area(&proto).is_empty());
     fecha_janela(proto, win, cliente, rig);
@@ -862,7 +797,6 @@ fn sem_a_extensao_de_area_de_transferencia_nada_e_enviado() {
 
 #[test]
 fn decoracao_do_kde_responde_servidor_para_o_gtk3() {
-    // O GTK 3 só abandona a barra de título própria se o compositor anuncia o protocolo do KDE com modo servidor.
     let rig = rig(1);
     let log = rig.dir.join("kde.log");
     let cliente = spawn_testclient_with(&rig.socket(), &log, |o| o.kde_decoration = true);
@@ -887,7 +821,6 @@ fn ponta_a_ponta_com_janela_criada_depois_da_conexao() {
 
 #[test]
 fn retorno_de_quadro_segue_o_ritmo_da_sessao() {
-    // Sem sessão: o app desenha a no máximo 30 quadros por segundo.
     let rig = rig(1);
     let log = rig.dir.join("ritmo.log");
     let contador = Arc::new(AtomicU32::new(0));
@@ -895,7 +828,7 @@ fn retorno_de_quadro_segue_o_ritmo_da_sessao() {
         socket: Some(rig.socket()),
         log: Some(log.clone()),
         counter: Some(contador.clone()),
-        ..Options::default() // sem limite de quadros
+        ..Options::default()
     };
     let cliente = std::thread::spawn(move || ps_testclient::run(opts));
     std::thread::sleep(Duration::from_millis(500));
@@ -904,7 +837,6 @@ fn retorno_de_quadro_segue_o_ritmo_da_sessao() {
     let sem_sessao = contador.load(Ordering::Relaxed) - a;
     assert!((15..=36).contains(&sem_sessao), "sem sessão esperava ~30 quadros/s, vi {sem_sessao}");
 
-    // Com sessão que não confirma nada: o app para depois de poucos quadros (2 em voo).
     let mut proto = rig.client(false);
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
@@ -917,7 +849,6 @@ fn retorno_de_quadro_segue_o_ritmo_da_sessao() {
     let sem_ack = contador.load(Ordering::Relaxed) - a;
     assert!(sem_ack <= 5, "sem confirmações o app deveria parar, vi {sem_ack} quadros em 600 ms");
 
-    // Confirmando tudo, o app anda de novo no ritmo do enlace.
     proto.start_acking();
     let a = contador.load(Ordering::Relaxed);
     let t_fim = Instant::now() + Duration::from_millis(1000);
@@ -934,10 +865,6 @@ fn retorno_de_quadro_segue_o_ritmo_da_sessao() {
     rig.finish();
 }
 
-// ---------------------------------------------------------------- DMABUF (marco 4.5)
-
-/// O teste precisa do heap do sistema (alocar um DMABUF sem GPU) e do nó de renderização (sem ele o `psd`
-/// não anuncia o global).
 fn dmabuf_disponivel() -> bool {
     let heap = std::fs::OpenOptions::new().read(true).write(true).open("/dev/dma_heap/system").is_ok();
     let render = Path::new("/dev/dri/renderD128").exists();
@@ -957,7 +884,6 @@ fn spawn_dmabuf_formato(socket: &Path, formato: ps_testclient::FormatoDmabuf) ->
     std::thread::spawn(move || ps_testclient::run_dmabuf(opts))
 }
 
-/// Espera a janela `win` ficar com o padrão-base `n` (320x200), bit a bit.
 fn espera_padrao_dmabuf(proto: &mut Proto, win: u32, n: u32) {
     let (w, h) = (320u32, 200u32);
     let limite = Instant::now() + Duration::from_secs(10);
@@ -999,7 +925,6 @@ fn dmabuf_rajada_de_commits_termina_no_ultimo_quadro() {
     }
     let rig = rig(1);
     let mut proto = rig.client(true);
-    // 40 commits a cada ~3 ms: a maioria cai dentro do intervalo mínimo e não é lida; o último tem de chegar.
     let cliente = spawn_dmabuf(&rig.socket(), ps_testclient::Defeito::Nenhum, 40, Duration::from_secs(2));
     proto.until(10, "WIN_CREATE", |p| !p.titles.is_empty());
     let win = *proto.titles.keys().next().unwrap();
@@ -1022,7 +947,6 @@ fn dmabuf_parametros_invalidos_recebem_erro_e_o_psd_segue() {
         let e = r.expect_err(&format!("{d:?} deveria ser recusado"));
         assert!(e.contains("erro do compositor"), "{d:?}: {e}");
     }
-    // O compositor segue atendendo: um cliente correto aparece com o padrão certo.
     let bom = spawn_dmabuf(&rig.socket(), Nenhum, 1, Duration::from_secs(2));
     proto.until(10, "WIN_CREATE do cliente correto", |p| p.titles.values().any(|t| t == "dmabuf-teste"));
     let win = *proto.titles.iter().find(|(_, t)| *t == "dmabuf-teste").unwrap().0;
@@ -1038,8 +962,6 @@ fn dmabuf_abgr_e_xbgr_chegam_com_r_e_b_nos_lugares_certos() {
         return;
     }
     use ps_testclient::FormatoDmabuf::*;
-    // O cliente escreve R, G, B, A (ou X) na memória; o `psd` troca R e B na cópia e o quadro que sai
-    // é igual, bit a bit, ao do formato XRGB (que o Mesa do Pi usa).
     for formato in [Abgr8888, Xbgr8888, Xrgb8888] {
         let rig = rig(1);
         let mut proto = rig.client(true);
@@ -1053,14 +975,11 @@ fn dmabuf_abgr_e_xbgr_chegam_com_r_e_b_nos_lugares_certos() {
     }
 }
 
-// ---------------------------------------------------------------- subsuperfícies e viewport (marco 5)
-
 fn spawn_sub(socket: &Path, cenario: ps_testclient::Cenario, log: &Path) -> JoinHandle<Result<(), String>> {
     let opts = ps_testclient::SubOptions { socket: socket.to_path_buf(), cenario, log: Some(log.to_path_buf()), ..Default::default() };
     std::thread::spawn(move || ps_testclient::run_sub(opts))
 }
 
-/// Cor 0x00RRGGBB do pixel `(x, y)` da janela, se ela existe e o pixel cabe.
 fn rgb_em(proto: &Proto, win: u32, (x, y): (u32, u32)) -> Option<u32> {
     let d = proto.decoders.get(&win)?;
     if x >= d.width() || y >= d.height() {
@@ -1079,7 +998,6 @@ fn espera_pixel(proto: &mut Proto, win: u32, pos: (u32, u32), rgb: u32) {
     }
 }
 
-/// Confere já que o pixel tem a cor.
 fn confere_pixel(proto: &Proto, win: u32, pos: (u32, u32), rgb: u32) {
     assert_eq!(rgb_em(proto, win, pos).map(|c| format!("{c:06X}")), Some(format!("{rgb:06X}")), "pixel {pos:?} da janela {win}; registro: {:?}", proto.log);
 }
@@ -1094,7 +1012,6 @@ fn tamanho(proto: &Proto, win: u32) -> (u32, u32) {
     (d.width(), d.height())
 }
 
-/// Espera o cliente do cenário terminar sem erro e encerra a sessão.
 fn fim_do_cenario(proto: Proto, cliente: JoinHandle<Result<(), String>>, rig: Rig) {
     assert_eq!(cliente.join().unwrap(), Ok(()));
     proto.drop_connection();
@@ -1112,11 +1029,9 @@ fn subsuperficie_shm_sobre_raiz_shm_e_dano_so_da_regiao() {
     let win = janela_sub(&mut proto);
     espera_pixel(&mut proto, win, (60, 40), COR_SUB_A);
     assert_eq!(tamanho(&proto, win), RAIZ);
-    // A subsuperfície cobre (50, 30) a (110, 70) e só ela; a raiz aparece em volta.
     for (pos, cor) in [((5, 5), COR_RAIZ), ((150, 100), COR_RAIZ), ((49, 30), COR_RAIZ), ((50, 29), COR_RAIZ), ((50, 30), COR_SUB_A), ((109, 69), COR_SUB_A), ((110, 70), COR_RAIZ), ((110, 50), COR_RAIZ)] {
         confere_pixel(&proto, win, pos, cor);
     }
-    // Troca de cor com dano só em (10, 10, 20, 20) da subsuperfície = (60, 40, 20, 20) da janela.
     espera(&mut proto, 300);
     let antes = proto.rects.len();
     wait_log(&log, &mut proto, "dano");
@@ -1127,7 +1042,6 @@ fn subsuperficie_shm_sobre_raiz_shm_e_dano_so_da_regiao() {
     confere_pixel(&proto, win, (52, 32), COR_SUB_A);
     confere_pixel(&proto, win, (105, 65), COR_SUB_A);
     confere_pixel(&proto, win, (5, 5), COR_RAIZ);
-    // O quadro cobre só os blocos de 64x64 que o dano toca: (0, 0) a (128, 64), não a janela de 200x120.
     let novos: Vec<_> = proto.rects[antes..].iter().filter(|(w, _)| *w == win).collect();
     assert!(!novos.is_empty(), "nenhum quadro depois do dano");
     for (_, rs) in novos {
@@ -1149,7 +1063,6 @@ fn subsuperficie_sincronizada_so_aparece_no_commit_do_pai() {
     let win = janela_sub(&mut proto);
     espera_pixel(&mut proto, win, (60, 40), COR_RAIZ);
     wait_log(&log, &mut proto, "sub-commit");
-    // O commit da subsuperfície sincronizada fica em cache até o pai commitar.
     espera(&mut proto, 400);
     confere_pixel(&proto, win, (60, 40), COR_RAIZ);
     wait_log(&log, &mut proto, "pai-commit");
@@ -1168,7 +1081,6 @@ fn place_above_e_place_below_mudam_quem_fica_por_cima() {
     let cliente = spawn_sub(&rig.socket(), Cenario::Ordem, &log);
     wait_log(&log, &mut proto, "ordem0");
     let win = janela_sub(&mut proto);
-    // A em (20, 20) 100x60; B em (60, 40) 100x60; o ponto (80, 50) é dos dois, (30, 30) só de A, (140, 90) só de B.
     espera_pixel(&mut proto, win, (80, 50), COR_SUB_B);
     confere_pixel(&proto, win, (30, 30), COR_SUB_A);
     confere_pixel(&proto, win, (140, 90), COR_SUB_B);
@@ -1201,8 +1113,6 @@ fn remover_a_subsuperficie_redesenha_a_raiz() {
 
 #[test]
 fn raiz_de_1x1_esticada_pelo_viewport_com_subsuperficie_dmabuf_abgr() {
-    // O caso do Waydroid: a raiz é um buffer shm de 1x1 com `set_destination`, o conteúdo vai numa
-    // subsuperfície DMABUF ABGR8888.
     if !dmabuf_disponivel() {
         return;
     }
@@ -1215,10 +1125,8 @@ fn raiz_de_1x1_esticada_pelo_viewport_com_subsuperficie_dmabuf_abgr() {
     let win = janela_sub(&mut proto);
     espera_padrao_dmabuf(&mut proto, win, 0);
     assert_eq!(tamanho(&proto, win), DMABUF_TAM);
-    // A janela nasceu com o tamanho do destino do viewport, nunca com 1x1.
     assert!(proto.log.iter().any(|l| *l == format!("create {win} {}x{}", DMABUF_TAM.0, DMABUF_TAM.1)), "{:?}", proto.log);
     assert!(!proto.log.iter().any(|l| l.contains(" 1x1")), "{:?}", proto.log);
-    // A rajada de commits (leituras adiadas pelo intervalo mínimo) termina no último quadro.
     wait_log(&log, &mut proto, "rajada");
     espera_padrao_dmabuf(&mut proto, win, DMABUF_RAJADA);
     fim_do_cenario(proto, cliente, rig);
@@ -1238,7 +1146,6 @@ fn raiz_esticada_pelo_viewport_e_refeita_quando_so_o_destino_muda() {
     confere_pixel(&proto, win, (49, 25), COR_ESQUERDA);
     confere_pixel(&proto, win, (50, 25), COR_DIREITA);
     confere_pixel(&proto, win, (99, 49), COR_DIREITA);
-    // O app só muda o destino para 50x25, sem buffer novo.
     wait_log(&log, &mut proto, "menor");
     proto.until(10, "WIN_RESIZE para 50x25", |p| p.log.iter().any(|l| l.starts_with("resize") && l.ends_with("50x25")));
     espera_pixel(&mut proto, win, (10, 10), COR_ESQUERDA);
@@ -1254,34 +1161,27 @@ fn janela_de_1x1_so_aparece_quando_ganha_tamanho_de_verdade() {
     let log = rig.dir.join("sub.log");
     let mut proto = rig.client(true);
     let cliente = spawn_sub(&rig.socket(), Cenario::Fantasma, &log);
-    // Com 1x1 a janela não é anunciada.
     wait_log(&log, &mut proto, "1x1");
     espera(&mut proto, 400);
     assert!(proto.titles.is_empty() && proto.log.is_empty(), "janela de 1x1 anunciada: {:?}", proto.log);
-    // Com tamanho de verdade, aparece.
     wait_log(&log, &mut proto, "real");
     let win = janela_sub(&mut proto);
     espera_pixel(&mut proto, win, (10, 10), COR_RAIZ);
     assert_eq!(tamanho(&proto, win), RAIZ);
-    // Depois de anunciada, encolher para 1x1 não faz nada: nem WIN_RESIZE, nem a imagem muda.
     wait_log(&log, &mut proto, "1x1-de-novo");
     espera(&mut proto, 400);
     assert_eq!(tamanho(&proto, win), RAIZ);
     confere_pixel(&proto, win, (10, 10), COR_RAIZ);
-    // Voltando ao tamanho de verdade, o conteúdo novo chega.
     wait_log(&log, &mut proto, "real-2");
     espera_pixel(&mut proto, win, (10, 10), COR_RAIZ_2);
     assert!(!proto.log.iter().any(|l| l.contains(" 1x1")), "{:?}", proto.log);
     fim_do_cenario(proto, cliente, rig);
 }
 
-// ---------------------------------------------------------------- ponteiro e cursor (marco 5)
-
 #[test]
 fn set_cursor_repetido_do_app_chega_ao_hospedeiro_uma_vez_so() {
     let rig = rig(1);
     let log = rig.dir.join("cursor-repete.log");
-    // O app repete o `set_cursor` nulo 30 vezes ao entrar (o Android faz isso umas 60 vezes por segundo).
     let cliente = spawn_testclient_with(&rig.socket(), &log, |o| {
         o.cursor = Some(CursorMode::Hidden);
         o.cursor_repeat = 30;
@@ -1299,7 +1199,6 @@ fn set_cursor_repetido_do_app_chega_ao_hospedeiro_uma_vez_so() {
     fecha_janela(proto, win, cliente, rig);
 }
 
-/// Posição `(x, y)` do `ptr-enter` de número `n` (a partir de 1) no registro do cliente de teste.
 fn posicao_do_enter(log: &Path, n: usize) -> Option<(String, String)> {
     let texto = read_log(log);
     let l = texto.lines().filter(|l| l.starts_with("ptr-enter ")).nth(n - 1)?;
@@ -1319,13 +1218,9 @@ fn clique_em_janela_sem_movimento_previo_nao_usa_a_posicao_de_outra_janela() {
     let id = |p: &Proto, t: &str| *p.titles.iter().find(|(_, x)| x.as_str() == t).unwrap().0;
     let (a, b) = (id(&proto, "janela-a"), id(&proto, "janela-b"));
 
-    // O ponteiro anda só na janela A.
     proto.send(Message::PointerMove { win: a, x: 120.0, y: 60.0 });
     wait_log_n(&log_a, &mut proto, "ptr-enter 120.0 60.0", 1);
-    // O `enter` vem seguido de um `motion` na mesma posição (o Android só atualiza o ponteiro em `motion`).
     wait_log_n(&log_a, &mut proto, "motion 120.0 60.0", 1);
-    // Clique na B, nova, sem nenhum movimento nela: entra no canto (0, 0), nunca em (120, 60) da A, e o app
-    // recebe `enter`, o movimento na mesma posição e só então o botão.
     proto.send(Message::PointerButton { win: b, button: 0x110, pressed: true });
     wait_log_n(&log_b, &mut proto, "button 272 pressed", 1);
     assert_eq!(posicao_do_enter(&log_b, 1), Some(("0.0".into(), "0.0".into())), "{}", read_log(&log_b));
@@ -1335,8 +1230,6 @@ fn clique_em_janela_sem_movimento_previo_nao_usa_a_posicao_de_outra_janela() {
     proto.send(Message::PointerButton { win: b, button: 0x110, pressed: false });
     wait_log_n(&log_b, &mut proto, "button 272 released", 1);
 
-    // Agora a B tem uma posição conhecida; o ponteiro vai para a A e volta por um botão, sem movimento:
-    // a B entra na posição dela (30, 40), não na (120, 60) do último movimento da A.
     proto.send(Message::PointerMove { win: b, x: 30.0, y: 40.0 });
     wait_log_n(&log_b, &mut proto, "motion 30.0 40.0", 1);
     proto.send(Message::PointerMove { win: a, x: 120.0, y: 60.0 });

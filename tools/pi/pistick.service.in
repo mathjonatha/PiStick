@@ -10,13 +10,7 @@ SupplementaryGroups=video render
 EnvironmentFile=/etc/pistick/psd.conf
 RuntimeDirectory=pistick
 Environment=XDG_RUNTIME_DIR=/run/pistick
-# Shell dos apps de terminal (o foot usa $SHELL). O usuário de sistema do produto tem nologin como shell de login (não
-# entra por SSH nem por console); os apps do serviço precisam de um shell de verdade. O provisionar.sh põe aqui o shell
-# do usuário, ou /bin/bash se ele for nologin.
 Environment=SHELL=@SHELL@
-# Marco 9A: chave do aparelho e lista de pareados em /var/lib/pistick (o systemd cria a pasta, do usuário
-# do serviço, modo 0700, e a expõe ao psd em $STATE_DIRECTORY). O soquete do `psd pair` fica em
-# $XDG_RUNTIME_DIR (/run/pistick); o atalho pistick-pair sabe disso.
 StateDirectory=pistick
 StateDirectoryMode=0700
 WorkingDirectory=@CASA@
@@ -24,19 +18,10 @@ ExecStart=/usr/local/libexec/pistick/iniciar-servico.sh
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
-# Tempo real para o PipeWire do projeto (sem D-Bus não há RTKit): o módulo rt usa estes limites direto
-# (RLIMIT_RTPRIO e RLIMIT_NICE valem sem capacidade nenhuma).
 LimitRTPRIO=20
 LimitNICE=-11
-# Marco 5: o Android (Waydroid) é um app do psd. A sessão dele para o contêiner quando o psd recebe SIGTERM; este
-# script (root, `+` = fora das restrições abaixo; `-` = ignora a falta do arquivo sem o Waydroid) espera essa parada
-# terminar e então para o waydroid-container.service ocioso. Veja tools/pi/android/parar-android.sh.
 ExecStopPost=-+/usr/local/libexec/pistick/parar-android.sh
 
-# Marco 9B (docs/25): o psd e os apps dele nunca precisam de root. Cada diretiva abaixo foi conferida com os roteiros 10,
-# 20, 61, 71, 73 e 80 pelo serviço; a medição está em docs/medicoes.md (`systemd-analyze security pistick`).
-# Sistema de arquivos: tudo somente leitura, menos a casa do usuário (os apps gravam cache e configuração nela),
-# /run/pistick e /var/lib/pistick (o systemd os libera pelo RuntimeDirectory e pelo StateDirectory).
 ProtectSystem=strict
 ReadWritePaths=@CASA@
 PrivateTmp=yes
@@ -51,17 +36,11 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-# Sem nenhuma capacidade: o `sudo` e qualquer binário setuid já não elevam nada (NoNewPrivileges), e o tempo real do
-# PipeWire vem dos limites acima.
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallFilter=@system-service
-# mincore: fora do @system-service, e o Mesa (EGL e GPU: weston-simple-egl, mpv --vo=gpu) a usa; sem ela o app morre com
-# "Bad system call" (conferido com strace -f e a lista do `systemd-analyze syscall-filter`).
 SystemCallFilter=mincore
-# Dispositivos: só o que o serviço usa. O codificador H.264 (/dev/video11), a GPU (renderD128, DMABUF e EGL) e os
-# dispositivos de sempre. Qualquer outro dispositivo é negado.
 DevicePolicy=closed
 DeviceAllow=/dev/null rw
 DeviceAllow=/dev/zero rw
@@ -70,18 +49,8 @@ DeviceAllow=/dev/random r
 DeviceAllow=/dev/urandom r
 DeviceAllow=/dev/video11 rw
 DeviceAllow=/dev/dri/renderD128 rw
-# Android (Waydroid, marco 5): a sessão do usuário (waydroid session, no abrir-android.sh) fala com o Android pelos nós do
-# binderfs (/dev/binder, /dev/hwbinder, /dev/vndbinder, modo 0666, major "binder" em /proc/devices). Sem isto o
-# DevicePolicy=closed os bloquearia. Conferido só por análise do código do waydroid (docs/25); sem o Waydroid instalado a
-# linha não faz nada.
 DeviceAllow=char-binder rw
 UMask=0077
-# Diretivas que NÃO entram, e por quê:
-#   RestrictRealtime: o PipeWire do projeto precisa de SCHED_FIFO (LimitRTPRIO acima).
-#   MemoryDenyWriteExecute: apps com compilação em tempo de execução (JIT) mapeiam memória gravável e executável.
-#   ProtectHome: os apps do usuário gravam na casa dele (ReadWritePaths).
-#   PrivateDevices, PrivateNetwork, PrivateUsers: o serviço usa /dev/video11 e a GPU, escuta na rede e abre o
-#   soquete Wayland para os apps.
 
 [Install]
 WantedBy=multi-user.target

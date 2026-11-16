@@ -1,5 +1,3 @@
-//! Marco 7: o áudio do servidor sintético chega pelo protocolo, com PSA1 e com PCM, só para quem anunciou
-//! `CAP_AUDIO`, e a conexão aguenta pacotes de áudio e quadros de imagem juntos.
 
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -13,12 +11,10 @@ use ps_transport::TcpAcceptor;
 struct Coleta {
     caps_do_servidor: u32,
     start: Option<(u8, u8, u32, u16)>,
-    /// (seq, flags, pts_us, amostras decodificadas)
     pacotes: Vec<(u32, u8, u64, Vec<i16>)>,
     outras: usize,
 }
 
-/// Conecta, anuncia `caps` e coleta mensagens por `dur`.
 fn coletar(codec: AudioCodec, caps: u32, dur: Duration) -> Coleta {
     let acceptor = TcpAcceptor::bind("127.0.0.1:0").unwrap();
     let addr = acceptor.local_addr().unwrap();
@@ -69,22 +65,18 @@ fn coletar(codec: AudioCodec, caps: u32, dur: Duration) -> Coleta {
 fn analisa_som_e_silencio(c: &Coleta) {
     let (codec, canais, taxa, quadros) = c.start.expect("faltou AUDIO_START");
     assert!(codec <= 1 && canais == 2 && taxa == 48000 && quadros == 480);
-    // A senoide dura 1 s (100 pacotes), depois 200 ms de silêncio enviado e então nada.
     let primeiros: Vec<i16> = c.pacotes.iter().take(100).flat_map(|p| p.3.iter().copied()).collect();
     assert_eq!(primeiros.len(), 100 * 480 * 2);
     let (l, r) = synth::split_stereo(&primeiros);
     assert!((synth::goertzel(&l, 440.0) - synth::AMPLITUDE).abs() < 0.01);
     assert!((synth::goertzel(&r, 880.0) - synth::AMPLITUDE).abs() < 0.01);
     assert!(synth::goertzel(&l, 880.0) < 0.01 && synth::goertzel(&r, 440.0) < 0.01);
-    // O primeiro pacote leva a marca (início do fluxo); os 99 seguintes não.
     assert_eq!(c.pacotes[0].1, AUDIO_FLAG_DISCONTINUITY);
     assert!(c.pacotes[1..100].iter().all(|p| p.1 == 0));
-    // pts crescendo de 10 ms em 10 ms (tolerância do arredondamento).
     for w in c.pacotes[..100].windows(2) {
         let d = w[1].2 as i64 - w[0].2 as i64;
         assert!((9_990..=10_010).contains(&d), "intervalo de pts {d}");
     }
-    // Depois do som, 20 pacotes de silêncio (200 ms) e nenhum mais até o próximo som.
     for p in &c.pacotes[100..120] {
         assert!(p.3.iter().all(|&x| x == 0), "esperava silêncio no pacote {}", p.0);
     }
@@ -95,7 +87,6 @@ fn sintetico_com_psa1_chega_decodificavel_e_para_no_silencio() {
     let c = coletar(AudioCodec::Psa1, CAP_BLOCK_CODEC | CAP_AUDIO, Duration::from_millis(1700));
     assert_ne!(c.caps_do_servidor & CAP_AUDIO, 0);
     analisa_som_e_silencio(&c);
-    // Em 1,7 s: 1 s de som + 200 ms de silêncio = 120 pacotes; nenhum a mais (o silêncio parou o fluxo).
     assert!((118..=122).contains(&c.pacotes.len()), "pacotes: {}", c.pacotes.len());
     assert!(c.outras > 0, "as janelas continuam chegando junto com o áudio");
 }

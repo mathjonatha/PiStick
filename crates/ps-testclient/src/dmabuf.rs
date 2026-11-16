@@ -1,8 +1,3 @@
-//! Cliente de teste de DMABUF (marco 4.5): abre uma janela com buffers `zwp_linux_dmabuf_v1` alocados no
-//! heap `/dev/dma_heap/system` (memória do sistema, sem GPU), pinta o padrão [`crate::pattern`] e, com
-//! um [`Defeito`], manda parâmetros inválidos para conferir os erros de protocolo do compositor.
-//!
-//! Todo o `unsafe` deste arquivo existe só para alocar e mapear o DMABUF de teste.
 
 use std::fs::OpenOptions;
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
@@ -24,41 +19,28 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
 
 use crate::pattern;
 
-/// `DRM_FORMAT_XRGB8888`, `DRM_FORMAT_ABGR8888`, `DRM_FORMAT_XBGR8888` e `DRM_FORMAT_RGB565`.
 const XRGB8888: u32 = 0x3432_5258;
 const ABGR8888: u32 = 0x3432_4241;
 const XBGR8888: u32 = 0x3432_4258;
 const RGB565: u32 = 0x3631_4752;
-/// `DRM_FORMAT_MOD_BROADCOM_UIF`: tiling do V3D, que o `psd` não anuncia.
 const MOD_UIF: u64 = 0x0700_0000_0000_0006;
 
-/// O que o cliente faz de errado (o compositor tem de responder com o erro de protocolo certo).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Defeito {
     Nenhum,
-    /// Formato que o `psd` não anuncia (`invalid_format`).
     FormatoNaoAnunciado,
-    /// Modificador de tiling que o `psd` não anuncia (`invalid_format`).
     ModificadorTiling,
-    /// Dois planos (`incomplete`).
     DoisPlanos,
-    /// Largura zero (`invalid_dimensions`).
     LarguraZero,
-    /// Largura 4097, acima do limite (`invalid_dimensions`).
     LarguraAcimaDoLimite,
-    /// Descritor menor que `stride * altura` (`out_of_bounds` ou `invalid_dimensions`).
     DescritorCurto,
 }
 
-/// Formato dos pixels do buffer (o padrão de teste é o mesmo; só a ordem dos bytes na memória muda).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FormatoDmabuf {
-    /// Bytes B, G, R, X (o que o Mesa do Pi entrega).
     #[default]
     Xrgb8888,
-    /// Bytes R, G, B, A (o que o compositor do Android/Waydroid entrega).
     Abgr8888,
-    /// Bytes R, G, B, X.
     Xbgr8888,
 }
 
@@ -71,7 +53,6 @@ impl FormatoDmabuf {
         }
     }
 
-    /// Bytes de um pixel 0x00RRGGBB neste formato.
     pub fn bytes(self, rgb: u32) -> [u8; 4] {
         let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
         match self {
@@ -88,9 +69,7 @@ pub struct DmabufOptions {
     pub width: u32,
     pub height: u32,
     pub defeito: Defeito,
-    /// Quantos commits em rajada (cada um com um quadro-base diferente do padrão); o último é o que fica.
     pub burst: u32,
-    /// Quanto tempo o cliente fica vivo depois do último commit.
     pub hold: Duration,
 }
 
@@ -107,7 +86,6 @@ pub(crate) struct Dmabuf {
 }
 
 impl Dmabuf {
-    /// Aloca `len` bytes no heap do sistema e mapeia para escrita.
     pub(crate) fn aloca(len: usize) -> Result<Dmabuf, String> {
         #[repr(C)]
         struct Alloc {
@@ -116,19 +94,14 @@ impl Dmabuf {
             fd_flags: u32,
             heap_flags: u64,
         }
-        // _IOWR('H', 0, struct dma_heap_allocation_data)
         const DMA_HEAP_IOCTL_ALLOC: u64 = 0xC018_4800;
         let heap = OpenOptions::new().read(true).write(true).open("/dev/dma_heap/system").map_err(|e| format!("abrir /dev/dma_heap/system: {e}"))?;
         let mut a = Alloc { len: len as u64, fd: 0, fd_flags: (libc::O_RDWR | libc::O_CLOEXEC) as u32, heap_flags: 0 };
-        // SAFETY: `heap` é um descritor aberto; `a` é um `dma_heap_allocation_data` válido na pilha, que o
-        // kernel lê e preenche (`fd`).
         let r = unsafe { libc::ioctl(std::os::fd::AsRawFd::as_raw_fd(&heap), DMA_HEAP_IOCTL_ALLOC as _, &mut a as *mut Alloc) };
         if r != 0 {
             return Err(format!("DMA_HEAP_IOCTL_ALLOC: {}", std::io::Error::last_os_error()));
         }
-        // SAFETY: o ioctl bem-sucedido devolve um descritor novo, que só nós possuímos.
         let fd = unsafe { OwnedFd::from_raw_fd(a.fd as i32) };
-        // SAFETY: mapeia o descritor inteiro, leitura e escrita; o resultado é conferido contra MAP_FAILED.
         let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&fd), 0) };
         if map == libc::MAP_FAILED {
             return Err(format!("mmap do dmabuf: {}", std::io::Error::last_os_error()));
@@ -138,15 +111,12 @@ impl Dmabuf {
 
     pub(crate) fn escreve(&mut self, src: &[u8]) {
         assert!(src.len() <= self.len);
-        // SAFETY: `map` aponta para `len` bytes mapeados com escrita e `src.len() <= len`; os trechos não
-        // se sobrepõem (`src` é memória comum nossa).
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.map, src.len()) };
     }
 }
 
 impl Drop for Dmabuf {
     fn drop(&mut self) {
-        // SAFETY: `map` e `len` são os de um `mmap` bem-sucedido feito em `aloca`.
         unsafe { libc::munmap(self.map as *mut _, self.len) };
     }
 }
@@ -208,10 +178,8 @@ pub fn run_dmabuf(o: DmabufOptions) -> Result<(), String> {
         params.destroy();
         bufs.push((b, buffer));
     }
-    // O erro de protocolo chega no `roundtrip` seguinte.
     queue.roundtrip(&mut st).map_err(|e| format!("erro do compositor: {e}"))?;
     if o.defeito != Defeito::Nenhum {
-        // Sem erro até aqui: ainda tenta o commit (o compositor pode recusar na leitura).
         surface.attach(Some(&bufs[0].1), 0, 0);
         surface.commit();
         queue.roundtrip(&mut st).map_err(|e| format!("erro do compositor: {e}"))?;

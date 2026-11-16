@@ -1,12 +1,3 @@
-# Marco 4, etapa 8, aceites 3 e 5: mpv 720p30 numa janela de 1280x720.
-# Mede 20 s: média de quadros de vídeo por segundo no cliente (>= 27) e RTT mediano por PING/PONG (< 120 ms).
-# `psc --no-video` e `psd --video off` rodam o mesmo roteiro sem os limites (aceite 5): use 61b-mpv-sem-limites.txt.
-#
-# No Pi (o clipe padrão é ~/clips/mandelbrot-720p30.mp4; MPV_CLIP escolhe outro, mas só o mandelbrot entra em vídeo):
-#   sh ~/pistick/tools/pi/iniciar-psd.sh mpv
-# No Windows (cabo: 192.168.0.11; a medição oficial do aceite 3 é pelo Wi-Fi):
-#   target\release\psc.exe 192.168.0.11:7700 --script tools\roteiros\61-mpv.txt
-# Capturas em .cache\shot\mpv-*.png.
 waitwin 1 15000
 wait 1000
 resize 1280 720

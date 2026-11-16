@@ -18,12 +18,6 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/**
- * A chave do cliente (docs/26, decisão 13): o arquivo "chave-do-cliente" na pasta privada do app guarda a chave
- * cifrada pelo Android Keystore (AES-256-GCM, chave do sistema não exportável, sem exigir biometria). O formato do
- * arquivo (PSAKS001 + nonce + bloco) é do núcleo: a casca só cifra e decifra e usa chaveDecompor/chaveComporArquivo.
- * Arquivo que não abre é erro claro; nunca se cria chave nova por cima.
- */
 final class ChaveDoCliente {
     private static final String APELIDO = "pistick-chave-do-cliente";
     private static final String ARQUIVO = "chave-do-cliente";
@@ -55,10 +49,6 @@ final class ChaveDoCliente {
         return g.generateKey();
     }
 
-    /**
-     * Os 32 bytes da chave, ou null se ainda não há arquivo (o núcleo cria uma). O chamador apaga o resultado com
-     * Arrays.fill depois de entregá-lo ao núcleo.
-     */
     static byte[] carregar(Context ctx) throws Ilegivel {
         File f = new File(ctx.getFilesDir(), ARQUIVO);
         if (!f.exists()) {
@@ -94,7 +84,6 @@ final class ChaveDoCliente {
         }
     }
 
-    /** Cifra a chave nova e grava o arquivo (por arquivo temporário e troca). Apaga {@code chave} no fim. */
     static boolean gravar(Context ctx, byte[] chave) {
         byte[] arquivo = null;
         try {

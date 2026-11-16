@@ -1,7 +1,3 @@
-# Marco 7B, aceite 5: atraso do microfone. O psc toca em laço um arquivo com um pulso de som por segundo
-# (cargo run -q -p ps-audio --example gerar_tom_wav -- .cache\mic-pulsos.wav 2 1000 1000 0.5 60), com PSC_MIC_TRACE=1
-# (o psc registra a hora UTC em que cada pulso sai); o Pi mede quando o pulso chega a um app que grava da fonte
-# (tools/pi/atraso-microfone.py). tools\testar-microfone.ps1 -Teste latencia junta as duas pontas e acerta os relógios.
 waitwin 1 15000
 waitmic on 90000
 waitmic off 90000

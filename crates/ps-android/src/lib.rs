@@ -1,9 +1,3 @@
-//! Núcleo nativo do cliente Android do PiStick (marco 6, `docs/26`).
-//!
-//! A casca Java (`android/`) carrega esta biblioteca e a chama pelo JNI; o núcleo **não chama Java** (decisão 17).
-//! Todo o `unsafe` do crate fica nos módulos da decisão 3: `jni` (fronteira com a casca) e `ndk` (funções do NDK).
-//! A lógica pura (sem `cfg(target_os = "android")`) é testada no computador pelo `cargo test --workspace`; fora do
-//! Android a biblioteca só tem essa parte.
 
 pub mod decodificador;
 pub mod entrada;

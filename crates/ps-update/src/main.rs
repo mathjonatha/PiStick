@@ -1,16 +1,3 @@
-//! `ps-update`: ferramentas de publicação e verificação de atualizações assinadas (marco 9B, `docs/25`).
-//!
-//! ```text
-//! ps-update keygen SAÍDA                         gera SAÍDA (privada, modo 0600) e SAÍDA.pub; recusa dentro de um repositório git
-//! ps-update manifest PASTA --serial N --versao V [--out ARQ]
-//!                                                manifesto da pasta (stdout, ou --out); o manifesto fica FORA da pasta
-//! ps-update sign MANIFESTO --key ARQ [--out SIG] assina o manifesto (padrão: MANIFESTO.sig)
-//! ps-update verify MANIFESTO --pub ARQ [--sig SIG] [--dir PASTA] [--min-serial N]
-//!                                                confere assinatura, serial mínimo e, com --dir, cada arquivo da pasta
-//! ```
-//!
-//! Códigos de saída: 0 tudo certo; 1 recusado ou falha; 2 uso errado. A chave privada de publicação nunca entra no
-//! repositório nem no Pi; o verificador exige `--pub` (não há chave pública embutida).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -23,7 +10,6 @@ const USO: &str = "uso:
   ps-update sign MANIFESTO --key ARQ [--out SIG]
   ps-update verify MANIFESTO --pub ARQ [--sig SIG] [--dir PASTA] [--min-serial N]";
 
-/// Opções `--nome valor` e argumentos soltos, na ordem.
 struct Args {
     soltos: Vec<String>,
     opcoes: Vec<(String, String)>,
@@ -74,7 +60,6 @@ fn numero(s: &str, nome: &str) -> Result<u64, String> {
 }
 
 fn ler_arquivo(c: &Path) -> Result<Vec<u8>, Erro> {
-    // Limite antes de ler tudo: o manifesto aceita até MAX_BYTES; a assinatura é pequena.
     let meta = std::fs::metadata(c).map_err(|e| Erro::Io(format!("{}: {e}", c.display())))?;
     if meta.len() > ps_update::manifesto::MAX_BYTES as u64 {
         return Err(Erro::Io(format!("{}: arquivo grande demais", c.display())));
@@ -82,7 +67,6 @@ fn ler_arquivo(c: &Path) -> Result<Vec<u8>, Erro> {
     std::fs::read(c).map_err(|e| Erro::Io(format!("{}: {e}", c.display())))
 }
 
-/// `ARQUIVO.sig` ao lado do manifesto.
 fn sig_ao_lado(man: &Path) -> PathBuf {
     let mut n = man.as_os_str().to_os_string();
     n.push(".sig");

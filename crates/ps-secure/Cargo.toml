@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 ps-transport = { path = "../ps-transport" }
-# Primitivas criptográficas: só estas (docs/21). A máquina de estados do Noise é nossa.
 x25519-dalek = { version = "2.0.1", default-features = false, features = ["zeroize"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }

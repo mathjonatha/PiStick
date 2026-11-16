@@ -1,16 +1,9 @@
-# Abre o psc, espera, salva um PNG de cada janela dele e encerra.
-# Serve para conferir visualmente o que o cliente mostra, sem depender de alguem olhando a tela.
-# Uso: tools\capture-psc.ps1 -Address 127.0.0.1:7700 [-Seconds 4] [-OutDir .cache\shot] [-ExtraArgs '--focus','1']
-# Com `--script`, use um roteiro sem `quit` que termine com o que deve estar na tela (um menu aberto,
-# por exemplo): a captura é das janelas do sistema, com os popups em suas posições reais.
 param(
     [Parameter(Mandatory = $true)][string]$Address,
     [int]$Seconds = 4,
     [string]$OutDir = "$PSScriptRoot\..\.cache\shot",
     [string]$Psc = "$PSScriptRoot\..\target\release\psc.exe",
     [string[]]$ExtraArgs = @(),
-    # Depois da espera, move a janela com título (a que não é popup) por este deslocamento (dx, dy), espera 1 s
-    # e só então captura: confere que os popups acompanham a mãe.
     [int[]]$MoveBy = @()
 )
 $ErrorActionPreference = 'Stop'
@@ -38,10 +31,9 @@ if ($MoveBy.Count -eq 2) {
     foreach ($h in [PsWin]::Of([uint32]$c.Id)) {
         $sb = New-Object System.Text.StringBuilder 300
         [PsWin]::GetWindowText($h, $sb, 300) | Out-Null
-        if ($sb.Length -eq 0) { continue }   # popups não têm título
+        if ($sb.Length -eq 0) { continue }
         $rc = New-Object PsWin+RECT
         [PsWin]::GetWindowRect($h, [ref]$rc) | Out-Null
-        # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
         [PsWin]::SetWindowPos($h, [IntPtr]::Zero, $rc.L + $MoveBy[0], $rc.T + $MoveBy[1], 0, 0, 0x0001 -bor 0x0004 -bor 0x0010) | Out-Null
         "janela '$($sb.ToString())' movida de ($($rc.L), $($rc.T)) por ($($MoveBy[0]), $($MoveBy[1]))"
     }
@@ -62,7 +54,6 @@ foreach ($h in [PsWin]::Of([uint32]$c.Id)) {
     $i++
     $file = Join-Path $OutDir "janela$i.png"
     $bmp.Save($file); $bmp.Dispose()
-    # Origem da área de cliente na tela: é onde o servidor posiciona os popups (x, y relativos a ela).
     $pt = New-Object PsWin+POINT
     [PsWin]::ClientToScreen($h, [ref]$pt) | Out-Null
     "janela$i : '$($sb.ToString())' ${w}x$hh em ($($rc.L), $($rc.T)), área de cliente em ($($pt.X), $($pt.Y)) -> $file"

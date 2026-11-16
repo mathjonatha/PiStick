@@ -1,7 +1,3 @@
-# Marco 7B, aceite 4: sem --mic o psc não anuncia CAP_MIC e o psd não pede nada, mesmo com gravador no Pi.
-# Rode SEM --mic e SEM --mic-file: target\release\psc.exe pi-stick --audio-null --script tools\roteiros\73b-microfone-desligado.txt
-# (tools\testar-microfone.ps1 -Teste aceite4 faz isso e põe um pw-record de 6 s no Pi no meio da janela).
-# Esperado: MICSTATS pacotes=0 pedidos=0 anunciou=0 captura=fechada, e o gravador do Pi só recebe silêncio.
 waitwin 1 15000
 micstats start
 wait 14000

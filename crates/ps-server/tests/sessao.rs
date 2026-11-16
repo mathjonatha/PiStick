@@ -1,6 +1,3 @@
-//! Troca de hospedeiro, despedida e teclas presas (marco 8A, `docs/28`, decisões 1 a 5): um `psd` de verdade
-//! (`serve_secure`) numa porta livre do laço local e clientes mínimos desta suíte. As chaves são geradas a cada teste e
-//! ficam numa pasta temporária; nenhuma chave de uso aparece aqui.
 
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
@@ -19,7 +16,6 @@ use ps_transport::{Split, TcpAcceptor, TcpReader, TcpTransport, Transport};
 type Conn = SecureConn<TcpReader, TcpStream>;
 type Log = Arc<Mutex<Vec<(Instant, String)>>>;
 
-/// Fonte de janelas mínima: uma janela fixa e um registro de tudo que a sessão lhe entrega, na ordem.
 struct Rec {
     log: Log,
     pixels: Vec<u8>,
@@ -137,7 +133,6 @@ fn estado(c: &mut Conn) -> u8 {
     }
 }
 
-/// HELLO nos dois sentidos, com `caps` anunciadas; devolve as do servidor.
 fn hello<R: std::io::Read, W: Write>(r: &mut R, w: &mut W, caps: u32) -> u32 {
     write_message(w, &Message::hello_with_caps("cliente de teste", caps)).unwrap();
     read_hello(r).unwrap().0
@@ -151,7 +146,6 @@ fn espera_janela<R: std::io::Read>(r: &mut R) {
     }
 }
 
-/// Lê até chegar o `GOODBYE` (ignora quadros e o resto); `Err` se a conexão acabou sem ele.
 fn espera_goodbye<R: std::io::Read>(r: &mut R, ate: Duration) -> Result<(u8, String), ProtoError> {
     let fim = Instant::now() + ate;
     loop {
@@ -174,8 +168,6 @@ fn ping_pong<R: std::io::Read, W: Write>(r: &mut R, w: &mut W, v: u64) {
 
 const CAPS: u32 = CAP_BLOCK_CODEC | CAPS_MARCO3 | CAP_SESSION;
 
-/// Critério 2 (servidor): um segundo cliente pareado assume a sessão. O antigo recebe `GOODBYE` motivo 1 com o nome do
-/// novo e a conexão dele fecha; o novo recebe a janela.
 #[test]
 fn cliente_pareado_assume_a_sessao_e_o_antigo_recebe_goodbye_com_o_nome_do_novo() {
     let (ka, kb) = (Keypair::generate().unwrap(), Keypair::generate().unwrap());
@@ -189,23 +181,19 @@ fn cliente_pareado_assume_a_sessao_e_o_antigo_recebe_goodbye_com_o_nome_do_novo(
     let t0 = Instant::now();
     let mut b = noise(env.addr, &kb, "notebook-b");
     assert_eq!(estado(&mut b), AUTH_PAIRED);
-    // O antigo recebe a despedida, com o nome de quem assumiu, e a conexão acaba.
     let (motivo, texto) = espera_goodbye(&mut a.reader, Duration::from_secs(3)).expect("GOODBYE");
     assert_eq!((motivo, texto.as_str()), (GOODBYE_REPLACED, "notebook-b"));
     assert!(read_message(&mut a.reader).is_err(), "depois do GOODBYE a conexão do antigo fecha");
-    // O novo recebe o HELLO e a janela.
     hello(&mut b.reader, &mut b.writer, CAPS);
     espera_janela(&mut b.reader);
     ping_pong(&mut b.reader, &mut b.writer, 2);
     assert!(t0.elapsed() < Duration::from_secs(2), "a troca demorou {:?}", t0.elapsed());
     espera(|| env.slog_has("assumiu a sessão"), Duration::from_secs(2), "o registro do servidor não anotou a troca");
-    // Uma sessão por vez: duas sessões começaram, a segunda depois de a primeira parar.
     let ev = env.eventos();
     assert_eq!(ev.iter().filter(|e| *e == "start").count(), 2, "{ev:?}");
     assert!(env.instante("stop").is_some());
 }
 
-/// Critério 3 (servidor): quem não autentica, quem não está pareado e quem só pede pareamento não derrubam ninguém.
 #[test]
 fn desconhecido_lixo_e_pedido_pendente_nao_derrubam_a_sessao_em_curso() {
     let dono = Keypair::generate().unwrap();
@@ -216,11 +204,9 @@ fn desconhecido_lixo_e_pedido_pendente_nao_derrubam_a_sessao_em_curso() {
     espera_janela(&mut a.reader);
     ping_pong(&mut a.reader, &mut a.writer, 1);
 
-    // 1. Chave desconhecida: recusada.
     let mut intruso = noise(env.addr, &Keypair::generate().unwrap(), "intruso");
     assert_eq!(estado(&mut intruso), AUTH_REFUSED);
     ping_pong(&mut a.reader, &mut a.writer, 2);
-    // 2. Pedido de pareamento pendente (a janela do `psd pair` aberta): espera a aprovação e não assume.
     let sec = env.sec.clone();
     let esperando = std::thread::spawn(move || sec.open_pair_window(Duration::from_secs(10), &|| true));
     espera(|| env.sec.pair_window_open(), Duration::from_secs(2), "a janela de pareamento não abriu");
@@ -228,7 +214,6 @@ fn desconhecido_lixo_e_pedido_pendente_nao_derrubam_a_sessao_em_curso() {
     assert_eq!(estado(&mut novo), ps_proto::AUTH_PENDING);
     let ps_server::secure::PairWait::Request(req) = esperando.join().unwrap() else { panic!("esperava um pedido") };
     ping_pong(&mut a.reader, &mut a.writer, 3);
-    // 3. Lixo: quatro bytes que não são PSN1 (laço local em texto claro, mas sem HELLO), e PSN1 seguido de lixo.
     let mut s = TcpStream::connect(env.addr).unwrap();
     s.write_all(&[0xFF, 0xFF, 0xFF, 0xFF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).unwrap();
     let mut s2 = TcpStream::connect(env.addr).unwrap();
@@ -237,21 +222,17 @@ fn desconhecido_lixo_e_pedido_pendente_nao_derrubam_a_sessao_em_curso() {
     s2.write_all(&[0xAB; 32]).unwrap();
     std::thread::sleep(Duration::from_millis(700));
     ping_pong(&mut a.reader, &mut a.writer, 4);
-    // 5. Aprovado, o pedido pendente continua sem assumir: espera na fila.
     env.sec.decide(req.id, true).unwrap();
     assert_eq!(estado(&mut novo), ps_proto::AUTH_PAIRED_NOW);
     std::thread::sleep(Duration::from_millis(500));
     ping_pong(&mut a.reader, &mut a.writer, 5);
     assert!(!env.slog_has("assumiu a sessão"), "{:?}", env.slog.lock().unwrap());
     assert_eq!(env.eventos().iter().filter(|e| *e == "start").count(), 1, "nenhuma sessão nova começou: {:?}", env.eventos());
-    // Quando o dono sai, o que esperava na fila vira a sessão.
     drop(a);
     hello(&mut novo.reader, &mut novo.writer, CAPS);
     espera_janela(&mut novo.reader);
 }
 
-/// Critério 4: o mesmo cliente reconecta com a conexão velha ainda aberta (o soquete dela nem é lido): a nova assume em
-/// menos de 1 s.
 #[test]
 fn o_mesmo_cliente_reconectando_assume_em_menos_de_um_segundo() {
     let k = Keypair::generate().unwrap();
@@ -260,7 +241,6 @@ fn o_mesmo_cliente_reconectando_assume_em_menos_de_um_segundo() {
     assert_eq!(estado(&mut velha), AUTH_PAIRED);
     hello(&mut velha.reader, &mut velha.writer, CAPS);
     espera_janela(&mut velha.reader);
-    // A velha fica aberta e parada: ninguém a lê nem a fecha (o notebook voltou da suspensão com outra conexão).
     let t0 = Instant::now();
     let mut nova = noise(env.addr, &k, "notebook");
     assert_eq!(estado(&mut nova), AUTH_PAIRED);
@@ -270,13 +250,10 @@ fn o_mesmo_cliente_reconectando_assume_em_menos_de_um_segundo() {
     let dt = t0.elapsed();
     assert!(dt < Duration::from_secs(1), "a nova conexão levou {dt:?} para assumir");
     println!("TROCA do mesmo cliente: {dt:?}");
-    // A velha continua com o soquete aberto de seu lado; ainda assim o servidor já a despediu.
     let (motivo, texto) = espera_goodbye(&mut velha.reader, Duration::from_secs(2)).expect("GOODBYE");
     assert_eq!((motivo, texto.as_str()), (GOODBYE_REPLACED, "notebook"));
 }
 
-/// Critério 5 (servidor): Shift e um botão do mouse apertados pelo cliente antigo são soltos ao fim da sessão, antes de a
-/// fonte saber que ela acabou; vale para a troca e para a queda comum.
 #[test]
 fn teclas_e_botoes_apertados_sao_soltos_no_fim_de_toda_sessao() {
     let (ka, kb) = (Keypair::generate().unwrap(), Keypair::generate().unwrap());
@@ -285,12 +262,11 @@ fn teclas_e_botoes_apertados_sao_soltos_no_fim_de_toda_sessao() {
     assert_eq!(estado(&mut a), AUTH_PAIRED);
     hello(&mut a.reader, &mut a.writer, CAPS);
     espera_janela(&mut a.reader);
-    write_message(&mut a.writer, &Message::Key { win: 1, keycode: 42, pressed: true }).unwrap(); // Shift esquerdo
-    write_message(&mut a.writer, &Message::Key { win: 1, keycode: 30, pressed: true }).unwrap(); // A
+    write_message(&mut a.writer, &Message::Key { win: 1, keycode: 42, pressed: true }).unwrap();
+    write_message(&mut a.writer, &Message::Key { win: 1, keycode: 30, pressed: true }).unwrap();
     write_message(&mut a.writer, &Message::Key { win: 1, keycode: 30, pressed: false }).unwrap();
     write_message(&mut a.writer, &Message::PointerButton { win: 1, button: 0x110, pressed: true }).unwrap();
-    ping_pong(&mut a.reader, &mut a.writer, 1); // garante que o servidor leu tudo
-    // B assume.
+    ping_pong(&mut a.reader, &mut a.writer, 1);
     let mut b = noise(env.addr, &kb, "b");
     assert_eq!(estado(&mut b), AUTH_PAIRED);
     espera_goodbye(&mut a.reader, Duration::from_secs(3)).expect("GOODBYE");
@@ -301,15 +277,12 @@ fn teclas_e_botoes_apertados_sao_soltos_no_fim_de_toda_sessao() {
     assert!(ate_o_stop.iter().any(|e| *e == "tecla 42 cima"), "Shift não foi solto antes do fim: {ev:?}");
     assert!(ate_o_stop.iter().any(|e| *e == "botao 0x110 cima"), "o botão não foi solto antes do fim: {ev:?}");
     assert_eq!(ev.iter().filter(|e| *e == "tecla 30 cima").count(), 1, "{ev:?}");
-    // Queda comum: B aperta Ctrl e some sem soltar.
     write_message(&mut b.writer, &Message::Key { win: 1, keycode: 29, pressed: true }).unwrap();
     ping_pong(&mut b.reader, &mut b.writer, 2);
     drop(b);
     espera(|| env.eventos().iter().any(|e| e == "tecla 29 cima"), Duration::from_secs(3), "a tecla Ctrl não foi solta quando a conexão caiu");
 }
 
-/// Critério 6 (servidor): o cliente que se despede (`GOODBYE` motivo 0) encerra a sessão em menos de 200 ms, sem esperar
-/// a conexão cair (o soquete continua aberto de seu lado).
 #[test]
 fn goodbye_do_cliente_encerra_a_sessao_em_menos_de_200_ms() {
     let env = start("adeus", &[]);
@@ -325,13 +298,11 @@ fn goodbye_do_cliente_encerra_a_sessao_em_menos_de_200_ms() {
     println!("GOODBYE do cliente até o fim da sessão: {dt:?}");
     assert!(dt < Duration::from_millis(200), "a sessão levou {dt:?} para terminar depois do GOODBYE");
     assert!(env.eventos().iter().any(|e| e == "tecla 42 cima"), "o Shift apertado também é solto");
-    // A conexão continua aberta do lado do cliente, e o servidor já voltou a atender.
     let Split { reader: mut r2, writer: mut w2, .. } = TcpTransport::connect(env.addr).unwrap().split().unwrap();
     hello(&mut r2, &mut w2, CAPS);
     espera_janela(&mut r2);
 }
 
-/// Cliente que não anunciou `CAP_SESSION` (um `psc` antigo): é só desconectado, sem `GOODBYE` e sem nada novo no fio.
 #[test]
 fn cliente_sem_cap_session_e_apenas_desconectado() {
     let (ka, kb) = (Keypair::generate().unwrap(), Keypair::generate().unwrap());
@@ -343,7 +314,6 @@ fn cliente_sem_cap_session_e_apenas_desconectado() {
     espera_janela(&mut a.reader);
     let mut b = noise(env.addr, &kb, "novo");
     assert_eq!(estado(&mut b), AUTH_PAIRED);
-    // Nenhum GOODBYE (kind 46) chega ao cliente antigo: só a conexão cai.
     let r = espera_goodbye(&mut a.reader, Duration::from_secs(3));
     assert!(r.is_err(), "um cliente sem CAP_SESSION não pode receber GOODBYE: {r:?}");
     hello(&mut b.reader, &mut b.writer, CAPS);

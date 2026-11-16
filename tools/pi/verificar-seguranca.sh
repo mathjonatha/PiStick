@@ -1,11 +1,4 @@
 #!/bin/sh
-# Roda NO PI: auditoria de segurança do aparelho (marco 9B, docs/25). Só LÊ e relata; não muda nada.
-# Uma linha por item: "ok", "aviso" ou "ABERTO". Sai com código 1 se houver ABERTO.
-# Nunca imprime segredo (senha de Wi-Fi, chave, impressão digital, código de pareamento): só a existência.
-#
-#   sh tools/pi/verificar-seguranca.sh          auditoria do produto
-#   sh tools/pi/verificar-seguranca.sh --dev    rebaixa a "aviso" o que é esperado no Pi de desenvolvimento
-#                                               (sudo sem senha, senha do Wi-Fi no cartão)
 set -eu
 
 dev=0
@@ -23,7 +16,6 @@ abertos=0
 avisos=0
 estado_dir=/var/lib/pistick
 
-# ok|aviso|ABERTO ITEM [DETALHE]
 linha() {
     if [ -n "${3:-}" ]; then
         printf '%-7s %s  (%s)\n' "$1" "$2" "$3"
@@ -37,7 +29,6 @@ linha() {
     esac
 }
 
-# esperado_dev ITEM DETALHE: ABERTO no produto, aviso com --dev.
 esperado_dev() {
     if [ "$dev" -eq 1 ]; then
         linha aviso "$1" "$2; esperado no Pi de desenvolvimento"
@@ -46,12 +37,10 @@ esperado_dev() {
     fi
 }
 
-# modo_dono CAMINHO: imprime "MODO DONO" (stat do GNU coreutils).
 modo_dono() {
     stat -c '%a %U' "$1" 2>/dev/null || echo "? ?"
 }
 
-# Confere modo e dono exatos de um caminho. exato ITEM CAMINHO MODO DONO
 exato() {
     if [ ! -e "$2" ]; then
         linha aviso "$1" "não existe: $2"
@@ -83,7 +72,6 @@ else
     else
         linha ABERTO "NoNewPrivileges" "a unidade não o liga"
     fi
-    # Nota do systemd-analyze security (quanto menor, melhor; o projeto exige menos de 5,0).
     nota=$(systemd-analyze security pistick --no-pager 2>/dev/null | sed -n 's/.*Overall exposure level for pistick.service: \([0-9][0-9]*\.[0-9]\).*/\1/p' | tail -n 1)
     if [ -z "$nota" ]; then
         linha aviso "nota do systemd-analyze security" "não foi possível obter"
@@ -94,7 +82,6 @@ else
     else
         linha ABERTO "nota do systemd-analyze security" "$nota (limite: menos de 5,0)"
     fi
-    # sudo de dentro do serviço: com NoNewPrivs ligado no processo, o bit setuid do sudo não eleva nada.
     if [ "$pid" -gt 1 ] 2>/dev/null && [ -r "/proc/$pid/status" ]; then
         if [ "$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' "/proc/$pid/status")" = "1" ]; then
             linha ok "sudo dentro do serviço" "bloqueado (NoNewPrivs=1 no processo $pid)"
@@ -120,7 +107,6 @@ if [ -d "$estado_dir" ]; then
 else
     linha aviso "pasta de estado $estado_dir" "não existe (o serviço a cria ao subir)"
 fi
-# somente_root CAMINHO: dono root e sem escrita para grupo e outros.
 somente_root() {
     m=$(stat -c '%a' "$1")
     d=$(stat -c '%U' "$1")
@@ -148,7 +134,6 @@ else
 fi
 
 echo "== Rede =="
-# Escuta TCP: 7700 (qualquer interface), 22, e 4711/4712 só em laço local.
 esperado_tcp=$(ss -tlnH 2>/dev/null | awk '{ print $4 }')
 tcp_ok=1
 for end in $esperado_tcp; do
@@ -174,7 +159,6 @@ done
 if [ "$tcp_ok" -eq 1 ]; then
     linha ok "portas TCP em escuta" "só as esperadas (7700, 22; 4711 e 4712 só em laço local)"
 fi
-# UDP: 5353 (mDNS); portas altas (efêmeras) do próprio mDNS não contam.
 udp_ok=1
 for end in $(ss -ulnH 2>/dev/null | awk '{ print $4 }'); do
     porta=${end##*:}
@@ -187,7 +171,6 @@ done
 if [ "$udp_ok" -eq 1 ]; then
     linha ok "portas UDP em escuta" "só a 5353 (mDNS) e portas efêmeras"
 fi
-# psd sem --insecure (processo em execução e configuração do serviço)
 inseguro=0
 for p in $(pgrep -x psd 2>/dev/null || true); do
     if [ -r "/proc/$p/cmdline" ] && tr '\0' ' ' < "/proc/$p/cmdline" | grep -q -- '--insecure'; then
@@ -244,7 +227,6 @@ elif sudo -n true >/dev/null 2>&1; then
 else
     linha ok "sudo sem senha" "$(id -un) não tem"
 fi
-# SSH com senha: lê as configurações (sshd -T exige root; tenta só se o sudo for sem senha).
 senha_ssh=""
 if sudo -n true >/dev/null 2>&1; then
     senha_ssh=$(sudo -n sshd -T 2>/dev/null | awk '$1 == "passwordauthentication" { print $2 }' || true)
@@ -258,7 +240,6 @@ if [ "$senha_ssh" = "no" ]; then
 else
     linha ABERTO "SSH com senha" "habilitado"
 fi
-# Senha do Wi-Fi em texto no cartão: só a existência, nunca o valor.
 rede=/boot/firmware/network-config
 if [ ! -e "$rede" ]; then
     linha ok "senha de Wi-Fi em $rede" "o arquivo não existe"

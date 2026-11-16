@@ -1,4 +1,3 @@
-//! Estatísticas do cliente, impressas a cada segundo (critério 4 do Marco 0).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Mutex;
@@ -23,11 +22,8 @@ pub struct Stats {
     pub video_bytes: AtomicU64,
     pub video_decode_total_us: AtomicU64,
     pub video_decode_max_us: AtomicU64,
-    /// Janela de medição do roteiro (`videostats`): acumula sem zerar a cada segundo.
     window: Mutex<Window>,
-    /// Medição da apresentação atômica (`atomic start` / `atomic report`).
     atomic_probe: Mutex<AtomicProbe>,
-    /// Há medição atômica aberta (consulta barata, sem trava, antes de ler marcadores na apresentação).
     atomic_on: AtomicBool,
 }
 
@@ -42,7 +38,6 @@ struct Window {
     rtts_us: Vec<u64>,
 }
 
-/// Resultado de uma janela de medição.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowReport {
     pub secs: f64,
@@ -56,7 +51,6 @@ pub struct WindowReport {
 }
 
 impl WindowReport {
-    /// A linha `VIDEOSTATS ...` do roteiro do `psc` (sem o `FALHOU` dos limites).
     pub fn videostats_line(&self) -> String {
         let rtt = self.rtt_median_ms.map_or("sem-amostras".to_string(), |m| format!("{m:.2}ms"));
         format!(
@@ -66,7 +60,6 @@ impl WindowReport {
     }
 }
 
-/// Mediana de amostras em µs (média dos dois do meio se o número for par).
 pub fn median_us(v: &mut [u64]) -> Option<u64> {
     if v.is_empty() {
         return None;
@@ -88,43 +81,36 @@ impl Stats {
         }
     }
 
-    /// A medição da apresentação atômica está aberta.
     pub fn atomic_is_on(&self) -> bool {
         self.atomic_on.load(Relaxed)
     }
 
-    /// `atomic start`.
     pub fn atomic_start(&self) {
         self.atomic_probe.lock().unwrap_or_else(|e| e.into_inner()).start(Instant::now());
         self.atomic_on.store(true, Relaxed);
     }
 
-    /// Uma apresentação causada por `FRAME`, com os marcadores da imagem apresentada.
     pub fn atomic_observe(&self, markers: &[u32]) {
         if self.atomic_is_on() {
             self.atomic_probe.lock().unwrap_or_else(|e| e.into_inner()).observe(markers);
         }
     }
 
-    /// Uma fatia no modo de progresso (quadro fatiado em curso há mais de 250 ms) pediu apresentação.
     pub fn atomic_progressive(&self) {
         if self.atomic_is_on() {
             self.atomic_probe.lock().unwrap_or_else(|e| e.into_inner()).progressive();
         }
     }
 
-    /// `atomic report`: fecha a medição.
     pub fn atomic_report(&self) -> Option<AtomicReport> {
         self.atomic_on.store(false, Relaxed);
         self.atomic_probe.lock().unwrap_or_else(|e| e.into_inner()).finish(Instant::now())
     }
 
-    /// Começa (ou recomeça) a janela de medição do roteiro.
     pub fn window_start(&self) {
         *self.window.lock().unwrap_or_else(|e| e.into_inner()) = Window { start: Some(Instant::now()), ..Window::default() };
     }
 
-    /// Fecha a janela e devolve as médias; `None` se nenhuma foi aberta.
     pub fn window_report(&self) -> Option<WindowReport> {
         let mut w = std::mem::take(&mut *self.window.lock().unwrap_or_else(|e| e.into_inner()));
         let secs = w.start?.elapsed().as_secs_f64().max(1e-9);
@@ -151,7 +137,6 @@ impl Stats {
         max_to(&self.decode_max_us, us);
     }
 
-    /// Um quadro de vídeo H.264 decodificado.
     pub fn record_video(&self, bytes: usize, us: u64) {
         self.with_window(|w| {
             w.video_frames += 1;
@@ -174,9 +159,6 @@ impl Stats {
         self.rtt_count.fetch_add(1, Relaxed);
         self.rtt_total_us.fetch_add(us, Relaxed);
         max_to(&self.rtt_max_us, us);
-        // O mínimo guarda `valor + 1` para que 0 signifique "sem amostra".
-        // Laço de compare_exchange à mão: `fetch_update` foi renomeado (`try_update`) em Rust
-        // mais novo, e assim o código compila nas duas versões sem aviso.
         let mut cur = self.rtt_min_us.load(Relaxed);
         while cur == 0 || us + 1 < cur {
             match self.rtt_min_us.compare_exchange_weak(cur, us + 1, Relaxed, Relaxed) {
@@ -186,7 +168,6 @@ impl Stats {
         }
     }
 
-    /// Texto da linha de estatísticas do último intervalo; zera os contadores.
     pub fn take_line(&self) -> String {
         let frames = self.frames.swap(0, Relaxed);
         let bytes = self.bytes.swap(0, Relaxed);
@@ -234,9 +215,9 @@ mod tests {
     fn mediana_e_janela_de_medicao() {
         assert_eq!(median_us(&mut []), None);
         assert_eq!(median_us(&mut [5, 1, 3]), Some(3));
-        assert_eq!(median_us(&mut [4, 1, 3, 10]), Some(3)); // (3 + 4) / 2 em inteiros
+        assert_eq!(median_us(&mut [4, 1, 3, 10]), Some(3));
         let s = Stats::default();
-        s.record_video(1000, 2000); // fora da janela: não conta
+        s.record_video(1000, 2000);
         assert!(s.window_report().is_none());
         s.window_start();
         s.record_video(1000, 2000);
@@ -266,7 +247,6 @@ mod tests {
         assert!(l.contains("2 quadros recebidos (4.0 KiB)"), "{l}");
         assert!(l.contains("decodificação média 200 µs, máx 300 µs"), "{l}");
         assert!(l.contains("média 2.00 ms, mín 1.00 ms, máx 3.00 ms"), "{l}");
-        // zerou
         assert!(s.take_line().contains("0 quadros"));
         assert!(!s.take_line().contains("vídeo"));
         s.record_video(1250, 4000);

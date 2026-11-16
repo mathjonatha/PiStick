@@ -1,3 +1,2 @@
-# Medição (critério 8): CPU do psd e tráfego com o mousepad parado. Veja tools/medir-marco3.ps1.
 wait 16000
 quit

@@ -1,7 +1,4 @@
-//! Análise mínima de H.264 Annex B: separação em NAL e leitura do SPS (tamanho com recorte, perfil,
-//! nível e cor). Serve aos testes e às medições do codificador; o servidor não depende dela.
 
-/// Tipos de NAL que interessam.
 pub const NAL_SLICE: u8 = 1;
 pub const NAL_IDR: u8 = 5;
 pub const NAL_SEI: u8 = 6;
@@ -9,10 +6,8 @@ pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 pub const NAL_AUD: u8 = 9;
 
-/// Separa um fluxo Annex B (códigos de início `00 00 01` ou `00 00 00 01`) em NAL, sem o código de
-/// início. Devolve `(nal_unit_type, bytes da NAL com o cabeçalho de 1 byte)`.
 pub fn nal_units(data: &[u8]) -> Vec<(u8, &[u8])> {
-    let mut starts = Vec::new(); // (posição do código de início, posição do primeiro byte da NAL)
+    let mut starts = Vec::new();
     let mut i = 0;
     while i + 3 <= data.len() {
         if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
@@ -25,7 +20,6 @@ pub fn nal_units(data: &[u8]) -> Vec<(u8, &[u8])> {
     let mut out = Vec::new();
     for (k, &(_, begin)) in starts.iter().enumerate() {
         let mut end = starts.get(k + 1).map_or(data.len(), |&(s, _)| s);
-        // Zeros finais (parte de um código de início de 4 bytes) não pertencem à NAL.
         while end > begin && data[end - 1] == 0 {
             end -= 1;
         }
@@ -36,21 +30,16 @@ pub fn nal_units(data: &[u8]) -> Vec<(u8, &[u8])> {
     out
 }
 
-/// O que interessa do SPS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sps {
     pub profile_idc: u8,
     pub level_idc: u8,
-    /// Tamanho codificado, múltiplo de 16.
     pub coded_width: u32,
     pub coded_height: u32,
-    /// Tamanho de exibição, depois do recorte.
     pub width: u32,
     pub height: u32,
     pub max_num_ref_frames: u32,
-    /// `Some(matrix_coefficients)` se o VUI descreve a cor (1 = BT.709, 6 = BT.601).
     pub matrix_coefficients: Option<u8>,
-    /// `Some(full_range)` se o VUI tem `video_signal_type`.
     pub full_range: Option<bool>,
 }
 
@@ -89,12 +78,10 @@ impl Bits<'_> {
     }
 }
 
-/// Lê um SPS (a NAL inteira, com o cabeçalho de 1 byte).
 pub fn parse_sps(nal: &[u8]) -> Result<Sps, String> {
     if nal.first().map(|b| b & 0x1F) != Some(NAL_SPS) {
         return Err("não é um SPS".into());
     }
-    // Tira os bytes de prevenção de emulação (00 00 03).
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
     for &b in &nal[1..] {
@@ -160,7 +147,6 @@ pub fn parse_sps(nal: &[u8]) -> Result<Sps, String> {
     let height = coded_height.saturating_sub(unit_y * (ct + cb));
     let (mut matrix_coefficients, mut full_range) = (None, None);
     if r.bit()? == 1 {
-        // VUI
         if r.bit()? == 1 && r.bits(8)? == 255 {
             r.bits(32)?;
         }
@@ -209,26 +195,25 @@ mod tests {
         }
     }
 
-    /// SPS High, 4:2:0, 1 quadro de referência, com recorte e VUI de cor.
     fn sps(mbs_w: u32, mbs_h: u32, crop_r: u32, crop_b: u32, matrix: u8, full: bool) -> Vec<u8> {
         let mut w = W(Vec::new(), 0);
         w.bits(100, 8);
         w.bits(0, 8);
         w.bits(40, 8);
-        w.ue(0); // sps id
-        w.ue(1); // chroma_format_idc
+        w.ue(0);
+        w.ue(1);
         w.ue(0);
         w.ue(0);
         w.bit(0);
-        w.bit(0); // sem matrizes
-        w.ue(0); // log2_max_frame_num - 4
-        w.ue(2); // poc type 2
-        w.ue(1); // max_num_ref_frames
+        w.bit(0);
+        w.ue(0);
+        w.ue(2);
+        w.ue(1);
         w.bit(0);
         w.ue(mbs_w - 1);
         w.ue(mbs_h - 1);
-        w.bit(1); // frame_mbs_only
-        w.bit(1); // direct_8x8
+        w.bit(1);
+        w.bit(1);
         let crop = crop_r + crop_b > 0;
         w.bit(u32::from(crop));
         if crop {
@@ -237,17 +222,17 @@ mod tests {
             w.ue(0);
             w.ue(crop_b);
         }
-        w.bit(1); // vui
-        w.bit(0); // aspect
-        w.bit(0); // overscan
-        w.bit(1); // video_signal_type
+        w.bit(1);
+        w.bit(0);
+        w.bit(0);
+        w.bit(1);
         w.bits(5, 3);
         w.bit(u32::from(full));
         w.bit(1);
         w.bits(u32::from(matrix), 8);
         w.bits(u32::from(matrix), 8);
         w.bits(u32::from(matrix), 8);
-        w.bit(1); // stop bit
+        w.bit(1);
         let mut nal = vec![0x67];
         nal.extend(w.0);
         nal
@@ -255,7 +240,6 @@ mod tests {
 
     #[test]
     fn le_o_sps_com_recorte_e_cor() {
-        // 320x200: 20x13 macroblocos (320x208) e recorte de 8 linhas (4 unidades de 2).
         let s = parse_sps(&sps(20, 13, 0, 4, 1, false)).unwrap();
         assert_eq!((s.coded_width, s.coded_height, s.width, s.height), (320, 208, 320, 200));
         assert_eq!((s.profile_idc, s.level_idc, s.max_num_ref_frames), (100, 40, 1));

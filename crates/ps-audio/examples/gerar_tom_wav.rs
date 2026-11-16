@@ -1,11 +1,3 @@
-//! Gera o WAV do tom do roteiro do microfone (marco 7B): estéreo, 48 kHz, 16 bits, `FREQ_ESQ` Hz no canal esquerdo e
-//! `FREQ_DIR` Hz no direito, amplitude `AMPLITUDE` (fração da escala cheia), `SEGUNDOS` de tom contínuo. Com números
-//! inteiros de ciclos por segundo (440 e 880) o arquivo emenda sem estalo quando `psc --mic-file` o toca em laço.
-//!
-//! Uso: `cargo run -p ps-audio --example gerar_tom_wav -- SAIDA.wav [SEGUNDOS [FREQ_ESQ [FREQ_DIR [AMPLITUDE [PULSO_MS]]]]]`
-//! (padrão: 2 s, 440, 880, 0,25, sem pulso). Com `PULSO_MS` acima de zero o arquivo não é tom contínuo: cada segundo tem
-//! silêncio e, a partir de 0,5 s, um pulso do tom com essa duração (serve à medição de atraso do microfone: o início do
-//! pulso é o instante a ser achado na gravação).
 
 use ps_audio::synth::tone_frame;
 

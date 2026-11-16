@@ -1,6 +1,3 @@
-//! Vetores de teste do RFC 8032, seção 7.1 (Ed25519), passando pelo verificador e pelo assinador do `ps-update`.
-//! Fonte: https://www.rfc-editor.org/rfc/rfc8032#section-7.1 (TEST 1, TEST 2, TEST 3 e TEST SHA(abc)). A chave pública
-//! do TEST 3 foi conferida por outro programa (a assinatura do RFC confere com ela).
 
 use ps_update::assinatura::{assinar_bruta, verificar_assinatura_bruta};
 use ps_update::chaves::{ChavePrivada, ChavePublica};
@@ -93,7 +90,6 @@ fn um_bit_trocado_no_vetor_e_recusado() {
             m[i / 8] ^= 1 << (i % 8);
             assert!(!verificar_assinatura_bruta(&m, &sig, &pubk), "{}: bit {i} da mensagem", v.nome);
         }
-        // A mensagem com um byte a mais também.
         let mut m = msg.clone();
         m.push(0);
         assert!(!verificar_assinatura_bruta(&m, &sig, &pubk), "{}: byte a mais", v.nome);

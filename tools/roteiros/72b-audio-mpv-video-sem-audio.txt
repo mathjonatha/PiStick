@@ -1,8 +1,3 @@
-# Marco 7, aceite 4, referência: o mesmo que o 72, sem áudio (psc --no-audio e o mesmo clipe). A taxa de
-# quadros de vídeo daqui é a base de comparação (a queda com áudio não pode passar de 1 quadro por segundo).
-#   no Pi:  PSD_AUDIO=1 PSD_AUDIO_RT=1 MPV_CLIP=$HOME/clips/som-720p30.mp4 sh ~/pistick/tools/pi/iniciar-psd.sh mpv
-#   (Com o psd de desenvolvimento do iniciar-psd.sh, PSD_AUDIO_RT=1 é obrigatório: sem tempo real o PipeWire perde ciclos e o tom reprova.)
-#   target\release\psc.exe pi-stick --no-audio --script tools\roteiros\72b-audio-mpv-video-sem-audio.txt
 waitwin 1 15000
 wait 1000
 resize 1280 720

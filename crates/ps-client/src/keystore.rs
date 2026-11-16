@@ -1,25 +1,3 @@
-//! Guarda da chave do cliente (marco 9B, `docs/25`, decisão 4).
-//!
-//! No Windows o arquivo `chave-do-cliente` guarda a chave estática cifrada com a DPAPI (escopo do usuário, sem
-//! interface; o `unsafe` fica em `dpapi.rs`). Formato do arquivo protegido: [`MAGIC`] (8 bytes) seguido do bloco da
-//! DPAPI. O formato antigo, 32 bytes em claro, é lido uma vez e regravado protegido (migração automática, com uma
-//! linha de registro): os dois formatos se distinguem pelo cabeçalho e pelo tamanho (o protegido tem bem mais de 32
-//! bytes). Fora do Windows continua o arquivo de 32 bytes com modo 0600, como antes.
-//!
-//! **Android (marco 6, decisão 13):** o arquivo guarda a chave cifrada pelo Android Keystore (AES-256-GCM, chave do
-//! sistema não exportável). Formato: [`MAGIC_AKS`] (8 bytes), o nonce de [`AKS_NONCE_LEN`] bytes e o bloco cifrado (a
-//! chave de 32 bytes mais a etiqueta do GCM). Quem cifra e decifra é um [`KeyProtector`]; a política (erro claro,
-//! nunca chave nova por cima, nunca chave em claro) é a mesma do Windows e está em [`load_or_create_with`], testada com
-//! um protetor falso. No aplicativo Android o núcleo não chama Java (decisão 17): a casca lê o arquivo, usa
-//! [`aks_parse`] (pelo JNI) para separar nonce e bloco, abre com o Keystore e entrega os 32 bytes ao núcleo; ao criar,
-//! o núcleo devolve os bytes, a casca cifra, monta o arquivo com [`aks_compose`] e o grava.
-//!
-//! Regras de segurança desta guarda:
-//! - arquivo protegido que não abre (copiado de outro usuário, adulterado, truncado) é **erro claro**, nunca pânico, e
-//!   a chave **nunca** é substituída por uma nova em silêncio: o arquivo fica onde está e uma cópia é preservada ao lado
-//!   (`chave-do-cliente.ilegivel`), para o usuário decidir (apagar e parear de novo, ou recuperar o arquivo);
-//! - na migração, o arquivo antigo só é trocado depois de conferir que o protegido decifra para a mesma chave;
-//! - se a proteção falhar ao criar uma chave nova, o erro sobe: a chave nunca é gravada em claro no Windows.
 
 use std::fs;
 use std::io::{self, Read};
@@ -28,14 +6,10 @@ use std::path::Path;
 use ps_secure::chaves::write_atomic;
 use ps_secure::{wipe, Keypair};
 
-/// Cabeçalho do arquivo protegido pela DPAPI.
 pub const MAGIC: &[u8] = b"PSDPAPI1";
 
-/// Tamanho máximo que se lê do arquivo (o protegido tem poucas centenas de bytes).
 const MAX_FILE: u64 = 16 * 1024;
 
-/// Lê a chave do cliente de `path`; se o arquivo não existe, cria uma (protegida no Windows). O booleano diz se a
-/// chave foi criada agora. Veja o texto do módulo.
 pub fn load_or_create_client_key(path: &Path) -> io::Result<(Keypair, bool)> {
     let mut dados = match read_limited(path) {
         Ok(d) => d,
@@ -73,10 +47,6 @@ fn keypair_from(bytes: &[u8]) -> io::Result<Keypair> {
     Ok(kp)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Windows: DPAPI
-// ---------------------------------------------------------------------------------------------
-
 #[cfg(windows)]
 fn create(path: &Path) -> io::Result<(Keypair, bool)> {
     let kp = Keypair::generate().map_err(|e| io::Error::other(e.to_string()))?;
@@ -85,7 +55,6 @@ fn create(path: &Path) -> io::Result<(Keypair, bool)> {
     Ok((kp, true))
 }
 
-/// `MAGIC` + bloco da DPAPI para os 32 bytes da chave.
 #[cfg(windows)]
 fn protected_file(secret: &[u8; 32]) -> io::Result<Vec<u8>> {
     let bloco = crate::dpapi::protect(secret).map_err(|e| io::Error::other(format!("não foi possível proteger a chave do cliente com a DPAPI do Windows: {e}")))?;
@@ -107,12 +76,10 @@ fn open_protected(path: &Path, dados: &[u8]) -> io::Result<Keypair> {
     }
 }
 
-/// Arquivo antigo em claro (32 bytes): lê a chave e a regrava protegida.
 #[cfg(windows)]
 fn open_plain(path: &Path, dados: &[u8]) -> io::Result<Keypair> {
     let kp = keypair_from(dados)?;
     let migrado = protected_file(kp.secret_bytes()).and_then(|arquivo| {
-        // Só troca o arquivo se o protegido decifra para a mesma chave.
         let bloco = &arquivo[MAGIC.len()..];
         let mut volta = crate::dpapi::unprotect(bloco)?;
         let igual = ps_secure::ct_eq(&volta, kp.secret_bytes());
@@ -129,7 +96,6 @@ fn open_plain(path: &Path, dados: &[u8]) -> io::Result<Keypair> {
     Ok(kp)
 }
 
-/// Erro de um arquivo protegido que não abre. Preserva uma cópia ao lado (uma vez) e não toca no original.
 #[cfg(windows)]
 fn unreadable(path: &Path, motivo: &str) -> io::Error {
     let mut nome = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
@@ -151,10 +117,6 @@ Se a chave não tem como ser recuperada, apague o arquivo e pareie de novo (`psd
     )
 }
 
-// ---------------------------------------------------------------------------------------------
-// Outros sistemas: arquivo de 32 bytes, modo 0600
-// ---------------------------------------------------------------------------------------------
-
 #[cfg(not(windows))]
 fn create(path: &Path) -> io::Result<(Keypair, bool)> {
     let kp = Keypair::generate().map_err(|e| io::Error::other(e.to_string()))?;
@@ -172,26 +134,15 @@ fn open_plain(_path: &Path, dados: &[u8]) -> io::Result<Keypair> {
     keypair_from(dados)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Android Keystore: formato PSAKS001 e política (protetor atrás de um trait)
-// ---------------------------------------------------------------------------------------------
-
-/// Cabeçalho do arquivo protegido pelo Android Keystore.
 pub const MAGIC_AKS: &[u8] = b"PSAKS001";
-/// Tamanho do nonce (IV) do AES-GCM do Keystore.
 pub const AKS_NONCE_LEN: usize = 12;
-/// Tamanho máximo aceito para o bloco cifrado (a chave tem 32 bytes; sobra margem para a etiqueta).
 const AKS_MAX_BLOCK: usize = 256;
 
-/// Quem cifra e decifra a chave do cliente (no Android, o Keystore; nos testes, um protetor falso).
 pub trait KeyProtector {
-    /// Cifra os 32 bytes da chave. Devolve (nonce, bloco cifrado).
     fn protect(&self, secret: &[u8; 32]) -> io::Result<(Vec<u8>, Vec<u8>)>;
-    /// Decifra o bloco. Devolve os bytes em claro (têm de ser 32).
     fn unprotect(&self, nonce: &[u8], block: &[u8]) -> io::Result<Vec<u8>>;
 }
 
-/// Monta o arquivo `PSAKS001` + nonce + bloco.
 pub fn aks_compose(nonce: &[u8], block: &[u8]) -> io::Result<Vec<u8>> {
     if nonce.len() != AKS_NONCE_LEN {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("o nonce deveria ter {AKS_NONCE_LEN} bytes, tem {}", nonce.len())));
@@ -206,7 +157,6 @@ pub fn aks_compose(nonce: &[u8], block: &[u8]) -> io::Result<Vec<u8>> {
     Ok(f)
 }
 
-/// Separa um arquivo `PSAKS001` em (nonce, bloco). Erro (nunca pânico) se o cabeçalho, o tamanho ou o bloco não servem.
 pub fn aks_parse(file: &[u8]) -> io::Result<(&[u8], &[u8])> {
     let invalido = |m: &str| io::Error::new(io::ErrorKind::InvalidData, format!("arquivo da chave (Keystore) inválido: {m}"));
     if !file.starts_with(MAGIC_AKS) {
@@ -223,10 +173,6 @@ pub fn aks_parse(file: &[u8]) -> io::Result<(&[u8], &[u8])> {
     Ok((nonce, bloco))
 }
 
-/// Como [`load_or_create_client_key`], com o formato `PSAKS001` e o protetor `p`. Arquivo que não abre é erro claro:
-/// uma cópia fica ao lado (`.ilegivel`), o original não é tocado e **nenhuma chave nova** é criada por cima. A chave
-/// nunca é gravada em claro: se o protetor falha ao criar (ou não devolve de volta a mesma chave), o erro sobe e nada
-/// é gravado. Um arquivo de 32 bytes em claro ou de formato desconhecido é erro, não é aceito.
 pub fn load_or_create_with(path: &Path, p: &dyn KeyProtector) -> io::Result<(Keypair, bool)> {
     let mut dados = match read_limited(path) {
         Ok(d) => d,
@@ -249,7 +195,6 @@ fn create_with(path: &Path, p: &dyn KeyProtector) -> io::Result<(Keypair, bool)>
     let kp = Keypair::generate().map_err(|e| io::Error::other(e.to_string()))?;
     let (nonce, bloco) = p.protect(kp.secret_bytes()).map_err(|e| io::Error::other(format!("não foi possível proteger a chave do cliente com o Keystore: {e}")))?;
     let arquivo = aks_compose(&nonce, &bloco)?;
-    // Só grava se o que foi cifrado decifra para a mesma chave.
     let mut volta = p.unprotect(&nonce, &bloco).map_err(|e| io::Error::other(format!("a conferência da proteção da chave falhou: {e}")))?;
     let igual = ps_secure::ct_eq(&volta, kp.secret_bytes());
     wipe(&mut volta);
@@ -272,7 +217,6 @@ fn open_aks(path: &Path, dados: &[u8], p: &dyn KeyProtector) -> io::Result<Keypa
     }
 }
 
-/// Erro de um arquivo do Keystore que não abre. Preserva uma cópia ao lado (uma vez) e não toca no original.
 fn unreadable_aks(path: &Path, motivo: &str) -> io::Error {
     let mut nome = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     nome.push(".ilegivel");
@@ -356,7 +300,6 @@ mod tests {
         let arq = fs::read(&p).unwrap();
         assert!(arq.starts_with(MAGIC), "migrou para o formato protegido");
         assert!(!contem(&arq, kp.secret_bytes()));
-        // A segunda leitura já vem do arquivo protegido e devolve a mesma chave.
         let (de_novo, _) = load_or_create_client_key(&p).unwrap();
         assert_eq!(de_novo.public(), kp.public());
         let _ = fs::remove_dir_all(&d);
@@ -376,13 +319,10 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         let texto = e.to_string();
         assert!(texto.contains("protegido pelo Windows") && texto.contains("Nada foi sobrescrito"), "{texto}");
-        // Sem chave nova por cima: o arquivo é o mesmo (adulterado) e a cópia está ao lado.
         assert_eq!(fs::read(&p).unwrap(), ruim);
         assert_eq!(fs::read(d.join("chave-do-cliente.ilegivel")).unwrap(), ruim);
-        // E o erro se repete (não vira chave nova na segunda tentativa).
         assert!(load_or_create_client_key(&p).is_err());
         assert_eq!(fs::read(&p).unwrap(), ruim);
-        // Restaurando o arquivo bom, a identidade original volta.
         let _ = original;
         let _ = fs::remove_dir_all(&d);
     }
@@ -416,9 +356,6 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    // ---- PSAKS001 ----
-
-    /// Protetor falso: XOR com uma chave fixa e um nonce fixo (basta para provar a política do arquivo).
     struct Falso {
         falha_ao_criar: bool,
         recusa_abrir: bool,
@@ -477,7 +414,7 @@ mod tests {
         load_or_create_with(&p, &Falso::bom()).unwrap();
         let mut ruim = fs::read(&p).unwrap();
         let ultimo = ruim.len() - 1;
-        ruim[ultimo] ^= 0x01; // mexe na etiqueta
+        ruim[ultimo] ^= 0x01;
         fs::write(&p, &ruim).unwrap();
         let e = load_or_create_with(&p, &Falso::bom()).expect_err("adulterado");
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
@@ -501,7 +438,6 @@ mod tests {
             assert!(load_or_create_with(&p, &Falso::bom()).is_err(), "corte em {corte}");
             assert_eq!(fs::read(&p).unwrap(), &bom[..corte], "o arquivo não pode ser tocado (corte {corte})");
         }
-        // Arquivo vazio também não vira chave nova.
         fs::write(&p, b"").unwrap();
         assert!(load_or_create_with(&p, &Falso::bom()).is_err());
         assert_eq!(fs::read(&p).unwrap(), b"");
@@ -527,7 +463,6 @@ mod tests {
         let e = load_or_create_with(&p, &Falso { falha_ao_criar: true, ..Falso::bom() }).expect_err("falha");
         assert!(e.to_string().contains("proteger a chave"), "{e}");
         assert!(!p.exists(), "sem proteção não há arquivo, e muito menos chave em claro");
-        // Protetor que devolve outra chave na conferência: também não grava.
         let e = load_or_create_with(&p, &Falso { mentiroso: true, ..Falso::bom() }).expect_err("conferência");
         assert!(e.to_string().contains("conferência"), "{e}");
         assert!(!p.exists());

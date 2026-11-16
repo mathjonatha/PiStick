@@ -1,5 +1,3 @@
-# Marco 7B, desvio aceito na revisão (docs/24, retomada): a escrita no soquete do PipeWire segue o relógio do sistema.
-# Prova: 5 minutos de gravação contínua da fonte, sem deriva nem acúmulo (tools\testar-microfone.ps1 -Teste deriva).
 waitwin 1 15000
 micstats start
 waitmic on 90000

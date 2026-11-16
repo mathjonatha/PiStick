@@ -1,46 +1,22 @@
-//! Máquina de estados do Noise, padrão XX, `Noise_XX_25519_ChaChaPoly_SHA256` (revisão 34 da
-//! especificação, noiseprotocol.org). A implementação é nossa; só as primitivas (X25519, ChaCha20-Poly1305
-//! e SHA-256) vêm de crates. Conferida contra os vetores de teste públicos (`tests/vetores.rs`).
-//!
-//! Padrão XX:
-//!
-//! ```text
-//!   -> e
-//!   <- e, ee, s, es
-//!   -> s, se
-//! ```
-//!
-//! Os três recados levam carga útil (a do primeiro vai em claro; as outras, cifradas).
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key as AeadKey, Nonce, Tag};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-/// Nome do protocolo, já com exatamente 32 bytes (cabe no `h` sem passar pelo hash).
 pub const PROTOCOL_NAME: &[u8] = b"Noise_XX_25519_ChaChaPoly_SHA256";
-/// Tamanho do hash (SHA-256), da chave e da chave pública.
 pub const HASH_LEN: usize = 32;
 pub const KEY_LEN: usize = 32;
-/// Tamanho da etiqueta de autenticação do Poly1305.
 pub const TAG_LEN: usize = 16;
-/// Tamanho máximo de um recado Noise (regra da especificação).
 pub const MAX_MESSAGE: usize = 65535;
 
-/// Falhas do Noise. Nenhuma carrega dados secretos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseError {
-    /// A etiqueta de autenticação não confere (recado adulterado, repetido ou fora de ordem).
     Decrypt,
-    /// Recado curto demais, longo demais ou com bytes sobrando.
     BadLength,
-    /// O recado não é o esperado agora (papel ou ordem errados, ou o aperto de mão já falhou).
     BadState,
-    /// A troca de chaves deu resultado todo zero (ponto de ordem baixa): recusada.
     WeakKey,
-    /// O contador de nonce chegou ao fim (2^64 - 1 recados).
     NonceExhausted,
-    /// Falha do gerador de números aleatórios do sistema.
     Random,
 }
 
@@ -59,11 +35,6 @@ impl std::fmt::Display for NoiseError {
 
 impl std::error::Error for NoiseError {}
 
-// ---------------------------------------------------------------------------------------------
-// Primitivas fininhas
-// ---------------------------------------------------------------------------------------------
-
-/// Segredo de 32 bytes que se apaga ao ser largado.
 #[derive(Clone)]
 pub struct Secret([u8; 32]);
 
@@ -89,7 +60,6 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// Par de chaves X25519.
 #[derive(Clone)]
 pub struct Keypair {
     secret: Secret,
@@ -97,13 +67,11 @@ pub struct Keypair {
 }
 
 impl Keypair {
-    /// Deriva a chave pública do segredo (o grampo de bits é feito pelo X25519).
     pub fn from_secret(secret: [u8; 32]) -> Keypair {
         let public = x25519_dalek::x25519(secret, x25519_dalek::X25519_BASEPOINT_BYTES);
         Keypair { secret: Secret(secret), public }
     }
 
-    /// Gera um par novo com o gerador do sistema.
     pub fn generate() -> Result<Keypair, NoiseError> {
         let mut s = [0u8; 32];
         getrandom::fill(&mut s).map_err(|_| NoiseError::Random)?;
@@ -116,14 +84,12 @@ impl Keypair {
         &self.public
     }
 
-    /// O segredo (para gravar em arquivo). Não registrar nem imprimir.
     pub fn secret_bytes(&self) -> &[u8; 32] {
         self.secret.as_bytes()
     }
 
     fn dh(&self, public: &[u8; 32]) -> Result<Secret, NoiseError> {
         let mut out = x25519_dalek::x25519(*self.secret.as_bytes(), *public);
-        // Ponto de ordem baixa: o resultado é todo zero. A especificação deixa recusar; recusamos.
         let fraca = crate::ct_eq(&out, &[0u8; 32]);
         let secret = Secret(out);
         out.zeroize();
@@ -148,7 +114,6 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// HMAC-SHA256 (RFC 2104), como a especificação do Noise define `HMAC-HASH`.
 fn hmac(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut ipad = [0x36u8; BLOCK];
@@ -172,7 +137,6 @@ fn hmac(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
     out
 }
 
-/// `HKDF(chaining_key, input_key_material, 2)` do Noise (duas saídas).
 fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32]) {
     let mut temp = hmac(ck, &[ikm]);
     let out1 = hmac(&temp, &[&[0x01]]);
@@ -181,17 +145,11 @@ fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32]) {
     (out1, out2)
 }
 
-/// `HMAC-SHA256` exposto só para o teste contra os vetores da RFC 4231.
 #[doc(hidden)]
 pub fn hmac_sha256_for_test(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     hmac(key, &[data])
 }
 
-// ---------------------------------------------------------------------------------------------
-// CipherState
-// ---------------------------------------------------------------------------------------------
-
-/// `CipherState` do Noise: chave e contador de 64 bits. Sem chave, passa o texto como está.
 pub struct CipherState {
     k: Option<Secret>,
     n: u64,
@@ -210,7 +168,6 @@ impl CipherState {
         self.k.is_some()
     }
 
-    /// Quantos recados esta direção já processou.
     pub fn nonce(&self) -> u64 {
         self.n
     }
@@ -221,8 +178,6 @@ impl CipherState {
         b.into()
     }
 
-    /// `EncryptWithAd` sobre uma fatia: cifra `buf` no lugar e devolve a etiqueta de 16 bytes (o chamador a
-    /// coloca depois do texto cifrado). Exige chave (só o transporte usa isto).
     pub fn encrypt_detached(&mut self, ad: &[u8], buf: &mut [u8]) -> Result<[u8; TAG_LEN], NoiseError> {
         let Some(k) = &self.k else { return Err(NoiseError::BadState) };
         if self.n == u64::MAX {
@@ -234,8 +189,6 @@ impl CipherState {
         Ok(tag.into())
     }
 
-    /// `EncryptWithAd` no lugar: `buf` vira texto cifrado seguido da etiqueta de 16 bytes. Sem chave, não
-    /// muda nada (regra do Noise para o começo do aperto de mão).
     pub fn encrypt_in_place(&mut self, ad: &[u8], buf: &mut Vec<u8>) -> Result<(), NoiseError> {
         if self.k.is_none() {
             return Ok(());
@@ -245,8 +198,6 @@ impl CipherState {
         Ok(())
     }
 
-    /// `DecryptWithAd` no lugar: `buf` traz texto cifrado e etiqueta; em caso de sucesso fica só o texto
-    /// claro. Em caso de falha o contador **não** avança e `buf` não deve ser usado.
     pub fn decrypt_in_place(&mut self, ad: &[u8], buf: &mut Vec<u8>) -> Result<(), NoiseError> {
         let Some(k) = &self.k else { return Ok(()) };
         if self.n == u64::MAX {
@@ -265,16 +216,11 @@ impl CipherState {
         Ok(())
     }
 
-    /// Só para os testes de repetição: fixa o contador.
     #[doc(hidden)]
     pub fn set_nonce_for_test(&mut self, n: u64) {
         self.n = n;
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// SymmetricState
-// ---------------------------------------------------------------------------------------------
 
 struct SymmetricState {
     ck: [u8; 32],
@@ -284,7 +230,6 @@ struct SymmetricState {
 
 impl SymmetricState {
     fn new() -> Self {
-        // O nome tem 32 bytes: `h = nome` (sem hash), como a especificação manda para nome <= HASHLEN.
         let mut h = [0u8; 32];
         h.copy_from_slice(PROTOCOL_NAME);
         SymmetricState { ck: h, h, cs: CipherState::empty() }
@@ -301,7 +246,6 @@ impl SymmetricState {
         temp_k.zeroize();
     }
 
-    /// Acrescenta o texto cifrado (ou claro, sem chave) de `plain` a `out` e o mistura no hash.
     fn encrypt_and_hash(&mut self, plain: &[u8], out: &mut Vec<u8>) -> Result<(), NoiseError> {
         let start = out.len();
         out.extend_from_slice(plain);
@@ -336,30 +280,19 @@ impl Drop for SymmetricState {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// HandshakeState
-// ---------------------------------------------------------------------------------------------
-
-/// Quem começa o aperto de mão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Initiator,
     Responder,
 }
 
-/// Resultado de um aperto de mão concluído.
 pub struct Established {
-    /// Cifra das mensagens que **nós** enviamos.
     pub send: CipherState,
-    /// Cifra das mensagens que **recebemos**.
     pub recv: CipherState,
-    /// `h` final: o mesmo nos dois lados; dele sai o código de 6 dígitos.
     pub handshake_hash: [u8; 32],
-    /// Chave pública estática da outra ponta (autenticada pelo aperto de mão).
     pub remote_static: [u8; 32],
 }
 
-/// Aperto de mão XX. Cada recado é lido ou escrito na ordem do padrão; qualquer falha o inutiliza.
 pub struct HandshakeState {
     role: Role,
     ss: SymmetricState,
@@ -367,22 +300,18 @@ pub struct HandshakeState {
     e: Option<Keypair>,
     rs: Option<[u8; 32]>,
     re: Option<[u8; 32]>,
-    /// Próximo recado do padrão: 0, 1 ou 2; 3 = concluído.
     step: u8,
     failed: bool,
     forced_e: Option<[u8; 32]>,
 }
 
 impl HandshakeState {
-    /// Começa um aperto de mão. `prologue` precisa ser igual nos dois lados.
     pub fn new(role: Role, prologue: &[u8], s: Keypair) -> HandshakeState {
         let mut ss = SymmetricState::new();
         ss.mix_hash(prologue);
         HandshakeState { role, ss, s, e: None, rs: None, re: None, step: 0, failed: false, forced_e: None }
     }
 
-    /// **Só para testes:** fixa a chave efêmera (os vetores oficiais trazem as delas). Em produção a efêmera
-    /// sai do gerador do sistema.
     #[doc(hidden)]
     pub fn with_ephemeral_for_test(mut self, e: [u8; 32]) -> Self {
         self.forced_e = Some(e);
@@ -393,17 +322,14 @@ impl HandshakeState {
         self.step == 3 && !self.failed
     }
 
-    /// Esta ponta escreve o recado seguinte?
     pub fn my_turn_to_write(&self) -> bool {
         matches!((self.role, self.step), (Role::Initiator, 0 | 2) | (Role::Responder, 1))
     }
 
-    /// Chave estática da outra ponta, depois que ela chegou.
     pub fn remote_static(&self) -> Option<[u8; 32]> {
         self.rs
     }
 
-    /// `h` atual (depois de concluído, é o `handshake_hash` final).
     pub fn handshake_hash(&self) -> [u8; 32] {
         self.ss.h
     }
@@ -416,7 +342,6 @@ impl HandshakeState {
         Ok(())
     }
 
-    /// Escreve o próximo recado com a carga `payload` e acrescenta os bytes a `out`.
     pub fn write_message(&mut self, payload: &[u8], out: &mut Vec<u8>) -> Result<(), NoiseError> {
         if self.failed || !self.my_turn_to_write() {
             return Err(NoiseError::BadState);
@@ -431,14 +356,12 @@ impl HandshakeState {
     fn write_inner(&mut self, payload: &[u8], out: &mut Vec<u8>) -> Result<(), NoiseError> {
         let start = out.len();
         match self.step {
-            // -> e
             0 => {
                 self.new_ephemeral()?;
                 let epub = *self.e.as_ref().ok_or(NoiseError::BadState)?.public();
                 out.extend_from_slice(&epub);
                 self.ss.mix_hash(&epub);
             }
-            // <- e, ee, s, es
             1 => {
                 self.new_ephemeral()?;
                 let e = self.e.as_ref().ok_or(NoiseError::BadState)?;
@@ -450,15 +373,12 @@ impl HandshakeState {
                 self.ss.mix_key(ee.as_bytes());
                 let spub = *self.s.public();
                 self.ss.encrypt_and_hash(&spub, out)?;
-                // es: o respondedor usa a estática dele com a efêmera remota.
                 let es = self.s.dh(&re)?;
                 self.ss.mix_key(es.as_bytes());
             }
-            // -> s, se
             2 => {
                 let spub = *self.s.public();
                 self.ss.encrypt_and_hash(&spub, out)?;
-                // se: o iniciador usa a estática dele com a efêmera remota.
                 let re = self.re.ok_or(NoiseError::BadState)?;
                 let se = self.s.dh(&re)?;
                 self.ss.mix_key(se.as_bytes());
@@ -473,7 +393,6 @@ impl HandshakeState {
         Ok(())
     }
 
-    /// Lê o próximo recado e devolve a carga dele.
     pub fn read_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, NoiseError> {
         if self.failed || self.my_turn_to_write() || self.step >= 3 {
             return Err(NoiseError::BadState);
@@ -496,14 +415,12 @@ impl HandshakeState {
             Ok(s)
         };
         match self.step {
-            // -> e   (lido pelo respondedor)
             0 => {
                 let mut re = [0u8; 32];
                 re.copy_from_slice(take(32)?);
                 self.re = Some(re);
                 self.ss.mix_hash(&re);
             }
-            // <- e, ee, s, es   (lido pelo iniciador)
             1 => {
                 let mut re = [0u8; 32];
                 re.copy_from_slice(take(32)?);
@@ -516,18 +433,15 @@ impl HandshakeState {
                 let mut rs = [0u8; 32];
                 rs.copy_from_slice(&rs_bytes);
                 self.rs = Some(rs);
-                // es: o iniciador usa a efêmera dele com a estática remota.
                 let es = self.e.as_ref().ok_or(NoiseError::BadState)?.dh(&rs)?;
                 self.ss.mix_key(es.as_bytes());
             }
-            // -> s, se   (lido pelo respondedor)
             2 => {
                 let enc_s = take(KEY_LEN + TAG_LEN)?;
                 let rs_bytes = self.ss.decrypt_and_hash(enc_s)?;
                 let mut rs = [0u8; 32];
                 rs.copy_from_slice(&rs_bytes);
                 self.rs = Some(rs);
-                // se: o respondedor usa a efêmera dele com a estática remota.
                 let se = self.e.as_ref().ok_or(NoiseError::BadState)?.dh(&rs)?;
                 self.ss.mix_key(se.as_bytes());
             }
@@ -538,7 +452,6 @@ impl HandshakeState {
         Ok(payload)
     }
 
-    /// Conclui o aperto de mão (os três recados já passaram) e entrega as cifras de transporte.
     pub fn finish(self) -> Result<Established, NoiseError> {
         if !self.is_finished() {
             return Err(NoiseError::BadState);
@@ -562,12 +475,9 @@ mod tests {
 
     #[test]
     fn hmac_confere_com_os_vetores_da_rfc_4231() {
-        // Caso 2: chave "Jefe". O HMAC completa a chave com zeros até o bloco, então a chave de 32 bytes
-        // da nossa função (preenchida com zeros) é equivalente.
         let mut key = [0u8; 32];
         key[..4].copy_from_slice(b"Jefe");
         assert_eq!(hex(&hmac_sha256_for_test(&key, b"what do ya want for nothing?")), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-        // Caso 3: chave 20 x 0xaa, dados 50 x 0xdd.
         let mut key = [0u8; 32];
         key[..20].fill(0xaa);
         assert_eq!(hex(&hmac_sha256_for_test(&key, &[0xddu8; 50])), "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe");

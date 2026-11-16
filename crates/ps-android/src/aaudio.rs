@@ -1,13 +1,3 @@
-//! Saída de som por AAudio (docs/26, decisão 9): fluxo de saída de 48 kHz, estéreo, `i16`, modo de baixa latência, com
-//! retorno de chamada de dados que puxa da fila do `AudioEngine` (a mesma fila adaptativa do WASAPI do `psc`).
-//!
-//! - O retorno de chamada de dados roda numa thread de tempo real do sistema: só chama [`crate::saida_audio::encher`]
-//!   (sem alocação, sem registro, sem trava demorada).
-//! - O retorno de chamada de erro (aparelho de som trocado, fone plugado) **não** fecha nem reabre nada: só levanta um
-//!   sinalizador; uma thread de supervisão reabre o fluxo fora dele, com a espera crescente de [`Reabertura`].
-//! - Parar e fechar: [`AudioSink::stop`] (chamado pelo `shutdown` do motor) e o `Drop` do fluxo.
-//!
-//! Todo o `unsafe` da saída de som está aqui; as declarações do NDK, em `ndk.rs`.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,56 +11,37 @@ use crate::ndk::{self, AAudioStream, AAudioStreamBuilder, AAUDIO_CALLBACK_RESULT
 use crate::registro;
 use crate::saida_audio::{encher, Contadores, Reabertura, CANAIS, TAXA};
 
-/// O que o retorno de chamada vê: o motor, os contadores e o sinalizador de erro. Vive (dentro de um `Arc`) até depois
-/// de o fluxo ser fechado.
 struct Compartilhado {
     engine: Arc<AudioEngine>,
     contadores: Contadores,
     erro: AtomicBool,
 }
 
-/// Retorno de chamada de dados (thread de tempo real do sistema).
-///
-/// # Safety
-/// Chamado só pelo AAudio, com `user_data` igual ao `*const Compartilhado` dado em `abrir_fluxo` (vivo enquanto o
-/// fluxo existe) e `audio_data` apontando para `num_frames * 2` amostras `i16` graváveis.
 unsafe extern "C" fn dados(_stream: *mut AAudioStream, user_data: *mut c_void, audio_data: *mut c_void, num_frames: i32) -> i32 {
     if user_data.is_null() || audio_data.is_null() || num_frames <= 0 {
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
-    // SAFETY: contrato da função: `user_data` aponta para o `Compartilhado` vivo (o `Arc` é solto só depois do
-    // `close` do fluxo, que espera o retorno de chamada terminar) e `audio_data` tem `num_frames * CANAIS` amostras.
     let (c, buf) = unsafe { (&*(user_data as *const Compartilhado), std::slice::from_raw_parts_mut(audio_data as *mut i16, num_frames as usize * CANAIS)) };
     encher(&c.engine, buf, &c.contadores);
     AAUDIO_CALLBACK_RESULT_CONTINUE
 }
 
-/// Retorno de chamada de erro (outra thread do sistema): só levanta o sinalizador.
-///
-/// # Safety
-/// Como em [`dados`].
 unsafe extern "C" fn erro(_stream: *mut AAudioStream, user_data: *mut c_void, _codigo: i32) {
     if user_data.is_null() {
         return;
     }
-    // SAFETY: contrato da função.
     let c = unsafe { &*(user_data as *const Compartilhado) };
     c.erro.store(true, Ordering::SeqCst);
 }
 
-/// Um fluxo aberto e iniciado; o `Drop` o para e o fecha.
 struct Fluxo {
     stream: *mut AAudioStream,
 }
 
-// SAFETY: o fluxo do AAudio pode ser parado e fechado de qualquer thread; esta estrutura o possui e só a thread de
-// supervisão a usa depois de criada.
 unsafe impl Send for Fluxo {}
 
 impl Drop for Fluxo {
     fn drop(&mut self) {
-        // SAFETY: `stream` é um fluxo válido que esta estrutura possui; parado e fechado uma única vez. O `close` só
-        // volta quando os retornos de chamada terminaram, então o `Compartilhado` pode ser solto depois.
         unsafe {
             ndk::AAudioStream_requestStop(self.stream);
             ndk::AAudioStream_close(self.stream);
@@ -78,14 +49,9 @@ impl Drop for Fluxo {
     }
 }
 
-/// Abre e inicia um fluxo de saída que puxa do motor.
 fn abrir_fluxo(c: &Arc<Compartilhado>) -> Result<Fluxo, String> {
     let user = Arc::as_ptr(c) as *mut c_void;
     let mut builder: *mut AAudioStreamBuilder = std::ptr::null_mut();
-    // SAFETY: `builder` é um ponteiro local que recebe o construtor novo; todas as chamadas seguintes usam esse
-    // construtor válido com argumentos de enumeração e funções com a assinatura do NDK; `user` aponta para o
-    // `Compartilhado` que o chamador mantém vivo enquanto o fluxo existir; o construtor é apagado no fim (o fluxo já
-    // aberto não depende dele).
     unsafe {
         let r = ndk::AAudio_createStreamBuilder(&mut builder);
         if r != AAUDIO_OK || builder.is_null() {
@@ -113,8 +79,6 @@ fn abrir_fluxo(c: &Arc<Compartilhado>) -> Result<Fluxo, String> {
     }
 }
 
-/// A saída de som: o primeiro fluxo é aberto na construção (se falhar, o cliente não anuncia `CAP_AUDIO`); uma thread
-/// de supervisão o reabre depois de um erro e registra as faltas.
 pub struct SaidaAAudio {
     parar: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -134,7 +98,6 @@ impl SaidaAAudio {
     }
 }
 
-/// Reabre o fluxo quando o sistema avisa erro e registra as faltas do retorno de chamada, fora dele.
 fn supervisionar(c: Arc<Compartilhado>, fluxo: Fluxo, parar: Arc<AtomicBool>) {
     let mut fluxo = Some(fluxo);
     let mut reab = Reabertura::new();
@@ -148,7 +111,7 @@ fn supervisionar(c: Arc<Compartilhado>, fluxo: Fluxo, parar: Arc<AtomicBool>) {
         }
         if c.erro.swap(false, Ordering::SeqCst) || (fluxo.is_none() && reab.falhas() > 0) {
             registro::info("saída de som: erro do AAudio (aparelho de som trocado?); reabrindo o fluxo");
-            drop(fluxo.take()); // para e fecha o fluxo antigo (fora do retorno de chamada de erro)
+            drop(fluxo.take());
             match abrir_fluxo(&c) {
                 Ok(novo) => {
                     fluxo = Some(novo);
@@ -168,7 +131,6 @@ fn supervisionar(c: Arc<Compartilhado>, fluxo: Fluxo, parar: Arc<AtomicBool>) {
             }
         }
     }
-    // O fluxo é fechado aqui (`Drop`), antes de o `Arc<Compartilhado>` ser solto.
     drop(fluxo);
 }
 

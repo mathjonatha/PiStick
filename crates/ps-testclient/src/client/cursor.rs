@@ -1,5 +1,3 @@
-//! Cursor do cliente de teste: nomeado (`wp_cursor_shape_v1`), por imagem (`wl_pointer.set_cursor` com
-//! uma superfície) ou oculto. É aplicado quando o ponteiro entra na janela.
 
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
@@ -13,23 +11,15 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1:
 
 use super::State;
 
-/// Lado da imagem de cursor de teste.
 pub const IMAGE_SIDE: u32 = 16;
-/// Ponto de ação da imagem de cursor de teste.
 pub const IMAGE_HOTSPOT: (i32, i32) = (3, 4);
-/// Pixel da imagem de cursor de teste, BGRA pré-multiplicado (vermelho a 50%).
 pub const IMAGE_PIXEL: [u8; 4] = [0, 0, 128, 128];
 
-/// Como o cliente de teste define o cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CursorMode {
-    /// Pelo nome, com `wp_cursor_shape_v1`.
     Named(String),
-    /// Imagem: a superfície recebe o buffer antes de `set_cursor`.
     Image,
-    /// Imagem: `set_cursor` primeiro, o buffer depois (a outra ordem possível).
     ImageLate,
-    /// Cursor oculto (`set_cursor` com superfície nula).
     Hidden,
 }
 
@@ -57,7 +47,6 @@ fn shape_of(nome: &str) -> Shape {
 }
 
 impl State {
-    /// O ponteiro entrou na janela com `serial`: define o cursor do modo escolhido.
     pub(super) fn apply_cursor(&mut self, serial: u32, qh: &QueueHandle<State>) {
         for _ in 0..=self.cursor_repeat {
             self.apply_cursor_once(serial, qh);

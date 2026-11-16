@@ -1,5 +1,3 @@
-//! Uma sessão do servidor com um cliente: handshake, janelas, controle de fluxo,
-//! codificação por dano e tratamento das mensagens do cliente.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -24,32 +22,18 @@ use crate::video::detect::{Action, BlockRect, Detector, StopReason, ENCODER_FAIL
 use crate::video::{EncodedFrame, VideoConfig, VideoEncoder, VideoEncoderFactory, MIN_CAPTURE_INTERVAL_MS, VIDEO_FPS};
 use crate::ServerOptions;
 
-/// Acima desta quantidade de retângulos pendentes, o dano vira o retângulo envolvente.
 const MAX_PENDING_RECTS: usize = 32;
-/// Um bloco que mudou na última vez em que foi codificado conta como "mudou" na detecção de vídeo por
-/// este tempo (ms), mesmo sem dano pendente: cerca de 3 quadros de conteúdo a 30 por segundo. Cobre o
-/// bloco que mudou na passada anterior de um quadro fatiado e ainda não teve vez de novo.
 const RECENT_CHANGE_MS: u64 = 100;
-/// Por quanto tempo um bloco que saiu diferente na última comparação e segue sob dano pendente conta como mudado
-/// (veja `deliver_detection`). Cobre um ciclo inteiro da janela pelo fluxo apertado (1,5 MiB/s leva ~0,25 s por quadro de
-/// 720p) com folga, e não mais: depois disso o bloco precisa ser comparado de novo.
 const PENDING_CREDIT_MS: u64 = 2000;
 
-/// Como a sessão terminou.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEnd {
-    /// O cliente fechou a conexão.
     ClientClosed,
-    /// O cliente se despediu (`GOODBYE`, motivo 0) antes de fechar: a sessão acabou na hora, sem esperar a conexão cair.
     ClientGoodbye,
-    /// O servidor encerrou a sessão (troca de hospedeiro ou serviço parando): o motivo do `GOODBYE` (`GOODBYE_*`).
     ServerGoodbye(u8),
-    /// Falha de protocolo ou de transporte.
     Error(String),
 }
 
-/// Pedido de fora para encerrar a sessão em curso (a troca de hospedeiro, marco 8A). Quem pede chama
-/// [`SessionCtl::request_end`] de qualquer thread; a sessão manda o `GOODBYE` (se o cliente entende) e termina.
 pub struct SessionCtl {
     state: Mutex<CtlState>,
 }
@@ -69,7 +53,6 @@ impl SessionCtl {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Pede o fim da sessão com este motivo (`GOODBYE_*`) e texto. Vale uma vez; o primeiro pedido fica.
     pub fn request_end(&self, reason: u8, text: &str) {
         let waker = {
             let mut g = self.lock();
@@ -83,7 +66,6 @@ impl SessionCtl {
         }
     }
 
-    /// A sessão começou a esperar eventos: registra o acordador (e o usa já, se o pedido chegou antes).
     fn attach(&self, waker: Waker) {
         let pendente = {
             let mut g = self.lock();
@@ -100,8 +82,6 @@ impl SessionCtl {
     }
 }
 
-/// Teclas e botões que o cliente apertou e ainda não soltou: no fim de **toda** sessão o servidor os solta, para não
-/// ficar um Shift ou um botão do mouse preso para o cliente seguinte.
 #[derive(Default)]
 struct Held {
     keys: Vec<(u32, u32)>,
@@ -115,14 +95,12 @@ impl Held {
             Message::PointerButton { win, button, pressed } => (&mut self.buttons, (*win, *button), *pressed),
             _ => return,
         };
-        // Soltar vale para o mesmo código em qualquer janela (o cliente pode ter trocado o id no meio).
         lista.retain(|p| p.1 != par.1);
         if pressed {
             lista.push(par);
         }
     }
 
-    /// Solta tudo na fonte e registra quantos eram.
     fn release_all(&mut self, source: &mut dyn WindowSource, opts: &ServerOptions) {
         let (teclas, botoes) = (self.keys.len(), self.buttons.len());
         for (win, keycode) in self.keys.drain(..) {
@@ -137,8 +115,6 @@ impl Held {
     }
 }
 
-/// Falha de leitura ou escrita: queda normal da conexão (cliente fechou ou foi encerrado)
-/// ou erro de verdade.
 fn end_from(e: ProtoError, contexto: &str) -> SessionEnd {
     match e {
         ProtoError::Closed => SessionEnd::ClientClosed,
@@ -154,23 +130,16 @@ fn end_from(e: ProtoError, contexto: &str) -> SessionEnd {
     }
 }
 
-/// Evento interno vindo da thread de leitura.
 enum Ev {
     Msg(Message),
     End(ProtoError),
-    /// A fonte de janelas tem eventos novos.
     Wake,
 }
 
-/// Quadro fatiado em curso (`docs/20`): o instantâneo da janela no começo do quadro e o dano que ainda falta
-/// enviar dele. Todas as fatias saem desta cópia, não do conteúdo vivo; o dano novo que o app entrega
-/// enquanto isso se acumula em `Win::pending` e vira o quadro seguinte.
 struct Snapshot {
     pixels: Vec<u8>,
     pending: Vec<Rect>,
-    /// Próxima faixa a enviar.
     cursor: usize,
-    /// `capture_us` do instante do instantâneo.
     capture_us: u64,
 }
 
@@ -180,44 +149,27 @@ struct Win {
     height: u32,
     encoder: Encoder,
     seq: u32,
-    /// Dano acumulado desde o último quadro (ou instantâneo) enviado: o próximo quadro.
     pending: Vec<Rect>,
-    /// Quadro fatiado em curso, se houver.
     snap: Option<Snapshot>,
-    /// Memória da última cópia, reaproveitada no instantâneo seguinte.
     spare: Vec<u8>,
-    /// Depois de criar/redimensionar, o próximo quadro é inteiro.
     need_full: bool,
-    /// Instante (µs) da última atualização de conteúdo, usado como `capture_us`.
     content_us: u64,
-    /// Decide quando a janela entra e sai do modo vídeo (só consultado com `CAP_H264` e fábrica).
     detector: Detector,
-    /// O fluxo de vídeo em andamento, se houver.
     video: Option<ActiveVideo>,
-    /// Há dano novo na região de vídeo desde a última captura.
     video_dirty: bool,
-    /// Blocos da região tocados pelo dano desde o último `VIDEO_FRAME` (grade da janela inteira).
     video_touched: Vec<bool>,
-    /// Blocos codificados pelas fatias de um quadro ainda incompleto (grade da janela inteira).
     changed_acc: Vec<bool>,
-    /// Instante (ms) do último quadro entregue à detecção.
     last_det_ms: u64,
-    /// Por bloco: o resultado da última codificação que cobriu o bloco (`true` = saiu diferente de SKIP).
     last_coded: Vec<bool>,
-    /// Por bloco: instante (ms) da última vez que ele saiu diferente de SKIP.
     last_coded_ms: Vec<u64>,
 }
 
-/// Um fluxo de vídeo aberto numa janela.
 struct ActiveVideo {
     stream: u32,
-    /// A região em pixels (múltiplos de 64).
     rect: Rect,
     block_rect: BlockRect,
     encoder: Box<dyn VideoEncoder>,
-    /// Instante (ms desde o início da sessão) da última captura, para o intervalo mínimo.
     last_capture_ms: u64,
-    /// Tamanho esperado do próximo quadro, para o controle de fluxo.
     est_bytes: usize,
     frames: u32,
 }
@@ -239,7 +191,6 @@ impl Win {
             content_us: 0,
             detector: {
                 let mut d = Detector::new(width, height);
-                // Rastro da detecção no log (`PSD_DEBUG_DETECT=1`): sem a variável não se registra nada.
                 if std::env::var_os("PSD_DEBUG_DETECT").is_some_and(|v| v != "0") {
                     d.enable_trace();
                 }
@@ -255,8 +206,6 @@ impl Win {
         }
     }
 
-    /// Acumula dano. Com vídeo ativo, o dano que cai todo dentro da região vai só para a captura
-    /// de vídeo (não vira dano do codec de blocos, que não olha a região) e alimenta a detecção.
     fn add_damage(&mut self, rects: Vec<Rect>, now_ms: u64) {
         let rects: Vec<Rect> = rects.into_iter().filter(|r| !r.is_empty()).collect();
         let Some(v) = &self.video else {
@@ -292,7 +241,6 @@ impl Win {
         }
     }
 
-    /// Descarta o estado de vídeo e de detecção (a janela mudou de tamanho).
     fn reset_video(&mut self) {
         self.video = None;
         self.video_dirty = false;
@@ -307,7 +255,6 @@ impl Win {
         self.last_coded_ms.resize(grid, 0);
     }
 
-    /// Zera o que a detecção acumulou entre quadros (no começo e no fim do vídeo e no redimensionamento).
     fn clear_detection_history(&mut self) {
         self.changed_acc.fill(false);
         self.last_coded.fill(false);
@@ -315,7 +262,6 @@ impl Win {
     }
 }
 
-/// Marca em `flags` (grade de `cols` blocos por linha) os blocos que `r` toca.
 fn mark_blocks(r: Rect, cols: usize, flags: &mut [bool]) {
     let b = BLOCK as u32;
     for by in (r.y / b)..=((r.y + r.h - 1) / b) {
@@ -327,41 +273,31 @@ fn mark_blocks(r: Rect, cols: usize, flags: &mut [bool]) {
     }
 }
 
-/// Estado do vídeo da sessão inteira.
 struct VideoCtl {
-    /// `Some` só se o servidor tem codificador e o cliente anunciou `CAP_H264`.
     factory: Option<Arc<dyn VideoEncoderFactory>>,
     bitrate: u32,
     max_qp: u32,
-    /// Próximo identificador de fluxo (crescente por conexão).
     next_stream: u32,
-    /// Depois de um erro do codificador, nenhuma janela entra em vídeo antes deste instante (ms).
     blocked_until_ms: u64,
-    /// Outra janela já tem um fluxo aberto: um fluxo por vez na conexão.
     busy_other: bool,
 }
 
 #[derive(Default)]
 struct Stats {
-    /// (janela, quadros, bytes)
     per_win: Vec<(u32, u32, u64)>,
     enc_total_us: u64,
     enc_max_us: u64,
     enc_count: u32,
     held: u32,
     slices: u32,
-    /// Quadros entregues à detecção de vídeo neste segundo.
     det_frames: u32,
-    /// Pacotes e bytes de áudio enviados neste segundo.
     audio_packets: u32,
     audio_bytes: u64,
 }
 
-/// Estado do áudio da sessão: a inscrição no hub e a numeração dos pacotes.
 struct AudioCtl {
     sub: Subscription,
     seq: u32,
-    /// Pacotes descartados por atraso já informados no log.
     dropped_logged: u64,
 }
 
@@ -403,12 +339,10 @@ impl Stats {
     }
 }
 
-/// Atende um cliente até a conexão cair.
 pub fn serve_session<T: Transport>(transport: T, opts: &ServerOptions, source: &mut dyn WindowSource) -> SessionEnd {
     serve_session_with(transport, opts, source, None)
 }
 
-/// Como [`serve_session`], com um [`SessionCtl`] para encerrar a sessão de fora (troca de hospedeiro).
 pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, source: &mut dyn WindowSource, ctl: Option<Arc<SessionCtl>>) -> SessionEnd {
     let peer = transport.peer();
     if let Err(e) = transport.set_send_queue_limit(opts.send_queue_bytes) {
@@ -419,8 +353,6 @@ pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, sour
         Err(e) => return SessionEnd::Error(format!("não foi possível separar o transporte: {e}")),
     };
 
-    // Abertura: o cliente fala primeiro; o servidor responde HELLO e cria as janelas.
-    // Vigia: se o HELLO não chegar a tempo, fecha a conexão (o que desbloqueia a leitura).
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let vigia_closer = closer.clone();
     let prazo = opts.hello_timeout;
@@ -446,7 +378,6 @@ pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, sour
         Err(e) => return SessionEnd::Error(format!("handshake falhou: {e}")),
         Ok(_) => unreachable!(),
     };
-    // Só vale o que os dois lados anunciaram. O H.264 só é anunciado se o servidor tem codificador.
     let ours = CAP_BLOCK_CODEC | CAPS_MARCO3 | CAP_ATOMIC | if opts.video.is_some() { CAP_H264 } else { 0 } | if opts.audio.is_some() { CAP_AUDIO } else { 0 } | if opts.mic.is_some() { CAP_MIC } else { 0 } | CAP_SESSION;
     let caps = client_caps & ours;
     if let Err(e) = write_message(&mut writer, &Message::hello_with_caps(&opts.name, ours)) {
@@ -462,13 +393,10 @@ pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, sour
         c.attach(waker.clone());
     }
     source.set_client_caps(caps);
-    // Áudio: só com o bit anunciado pelos dois lados. A inscrição vale até o fim da sessão.
     let audio = match (&opts.audio, caps & CAP_AUDIO != 0) {
         (Some(hub), true) => Some(AudioCtl { sub: hub.subscribe(waker.clone()), seq: 0, dropped_logged: 0 }),
         _ => None,
     };
-    // Microfone (marco 7B): só com o bit anunciado pelos dois lados. Sem `--mic` no cliente, o bit não vem e nada
-    // do microfone existe nesta sessão (nem o monitor de ligações).
     let mic = match (&opts.mic, caps & CAP_MIC != 0) {
         (Some(hub), true) => Some(hub.attach(waker.clone())),
         _ => None,
@@ -491,13 +419,9 @@ pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, sour
 
     let mut held = Held::default();
     let end = run_loop(&mut writer, &rx, &mut windows, initial, caps, source, opts, audio, mic, ctl.as_deref(), &mut held);
-    // Em toda saída, antes de a fonte saber que a sessão acabou: o próximo cliente não herda tecla nem botão presos.
     held.release_all(source, opts);
     source.stop();
     if matches!(end, SessionEnd::ServerGoodbye(_)) && caps & CAP_SESSION != 0 {
-        // Depois do `GOODBYE` a conexão não fecha na hora: fechar com dados do cliente ainda por ler faz o sistema mandar RST,
-        // e o cliente (Windows em especial) descarta o `GOODBYE` que ainda não leu. A thread de leitura continua
-        // esvaziando o que o cliente mandar; a conexão fecha quando ele fecha ou em 250 ms, sem segurar a sessão seguinte.
         let _ = std::thread::Builder::new().name("adeus".into()).spawn(move || {
             let fim = Instant::now() + Duration::from_millis(250);
             while let Some(resto) = fim.checked_duration_since(Instant::now()) {
@@ -509,7 +433,7 @@ pub fn serve_session_with<T: Transport>(transport: T, opts: &ServerOptions, sour
             closer.close();
         });
     } else {
-        closer.close(); // desbloqueia a thread de leitura
+        closer.close();
     }
     end
 }
@@ -534,8 +458,6 @@ fn run_loop<W: std::io::Write>(
     let mut last_move_log = start - Duration::from_secs(1);
     let mut moves_suppressed = 0u32;
     let mut flow = Flow::new(opts.flow_initial_throughput, opts.flow_adaptive);
-    // Limite de taxa de teste (`--max-rate`): depois de cada quadro, nada de imagem sai até o instante em que os
-    // bytes dele teriam passado pela taxa. Instante em µs desde o início da sessão.
     let mut pace_until_us = 0u64;
     let atomic = caps & CAP_ATOMIC != 0;
     let mut vctl = VideoCtl {
@@ -553,7 +475,6 @@ fn run_loop<W: std::io::Write>(
         }
         opts.log(&format!("áudio: fluxo aberto ({:?}, {} Hz, {} canais, {} quadros por pacote)", a.sub.codec(), ps_audio::SAMPLE_RATE, CHANNELS, BLOCK_FRAMES));
     }
-    // Janelas que já existiam quando o cliente chegou.
     for ev in initial {
         if let Err(end) = apply_event(writer, windows, &mut flow, ev, 0, caps, opts) {
             return end;
@@ -562,10 +483,7 @@ fn run_loop<W: std::io::Write>(
 
     loop {
         let now_ms = start.elapsed().as_millis() as u64;
-        // Sem prazo próprio, acorda a cada 250 ms para as estatísticas.
         let mut wait = source.next_poll_in(now_ms).unwrap_or(Duration::from_millis(250)).min(Duration::from_millis(250));
-        // Com vídeo ativo a saída por tempo precisa de olhos a cada 50 ms, e a próxima captura
-        // acorda o laço no instante em que o intervalo mínimo termina.
         for w in windows.iter() {
             if let Some(v) = &w.video {
                 wait = wait.min(Duration::from_millis(50));
@@ -592,7 +510,6 @@ fn run_loop<W: std::io::Write>(
                     }
                     opts.log("GOODBYE de um cliente que não anunciou CAP_SESSION; ignorado");
                 } else if handle_mic_message(mic.as_mut(), &msg, now_us, opts) {
-                    // Mensagem do microfone: já tratada.
                 } else if let Err(end) = handle_message(writer, source, &mut flow, now_us, msg, opts, &mut last_move_log, &mut moves_suppressed) {
                     return end;
                 }
@@ -628,8 +545,6 @@ fn run_loop<W: std::io::Write>(
                     }
                 }
             }
-            // Relógio da detecção: os quadros do app chegam a 30 por segundo mesmo quando o fluxo apertado só deixa
-            // sair uma fatia de vez em quando; a detecção segue o ritmo do app (veja `deliver_detection`).
             let mut ocupadas: Vec<u32> = windows.iter().filter(|o| o.video.is_some()).map(|o| o.id).collect();
             for w in windows.iter_mut() {
                 let ms = now_us / 1000;
@@ -646,10 +561,7 @@ fn run_loop<W: std::io::Write>(
             }
         }
 
-        // A decisão do que enviar é tomada aqui, no último momento antes de codificar e escrever:
-        // nada fica enfileirado esperando vez.
         loop {
-            // O áudio pendente sai antes de cada quadro de imagem.
             if let Err(end) = flush_audio(writer, audio.as_mut(), &mut stats, opts) {
                 return end;
             }
@@ -667,10 +579,6 @@ fn run_loop<W: std::io::Write>(
                     vctl.busy_other = windows.iter().any(|o| o.id != pick.win && o.video.is_some());
                     let Some(w) = windows.iter_mut().find(|w| w.id == pick.win) else { break };
                     let r = if w.has_block_work() {
-                        // Com vídeo ativo o resto da janela não é fatiado: o dano fora da região quase sempre é "sujo mas
-                        // igual" (o app suja a janela inteira a cada quadro), e fatiar daria uma cadeia de `FRAME` só de SKIP
-                        // que toma a vez dos `VIDEO_FRAME`. O quadro inteiro de blocos sai de uma vez, ou não sai (veja
-                        // `send_frame`). Um quadro fatiado já em curso termina como começou.
                         let fatia = if w.video.is_some() && w.snap.is_none() { None } else { pick.slice_bytes };
                         send_frame(writer, source, w, fatia, atomic, &mut flow, now_us, opts, &mut stats, &mut vctl)
                     } else {
@@ -718,8 +626,6 @@ fn run_loop<W: std::io::Write>(
     }
 }
 
-/// O servidor encerra a sessão: desliga o microfone do cliente, se estava ligado, e manda o `GOODBYE` (só a quem anunciou
-/// `CAP_SESSION`; um cliente antigo é apenas desconectado). Uma falha de escrita não muda nada: a sessão acaba igual.
 fn say_goodbye<W: std::io::Write>(writer: &mut W, caps: u32, reason: u8, text: &str, mic: Option<&MicSession>, opts: &ServerOptions) -> SessionEnd {
     if caps & CAP_SESSION == 0 {
         opts.log(&format!("sessão encerrada pelo servidor (motivo {reason}); o cliente não anunciou CAP_SESSION, só é desconectado"));
@@ -733,7 +639,6 @@ fn say_goodbye<W: std::io::Write>(writer: &mut W, caps: u32, reason: u8, text: &
     SessionEnd::ServerGoodbye(reason)
 }
 
-/// Confere se a captura do microfone deve ligar ou desligar e, se sim, envia o `AUDIO_REQUEST` (e registra quem pediu).
 fn poll_mic<W: std::io::Write>(writer: &mut W, mic: Option<&mut MicSession>, opts: &ServerOptions) -> Result<(), SessionEnd> {
     let Some(m) = mic else { return Ok(()) };
     let Some(on) = m.poll(Instant::now()) else { return Ok(()) };
@@ -746,8 +651,6 @@ fn poll_mic<W: std::io::Write>(writer: &mut W, mic: Option<&mut MicSession>, opt
     write_message(writer, &Message::AudioRequest { stream: AUDIO_STREAM_MIC, on }).map_err(|e| end_from(e, "falha ao enviar AUDIO_REQUEST"))
 }
 
-/// Trata `AUDIO_START`, `AUDIO_DATA` e `AUDIO_STOP` do fluxo 1 (microfone). Devolve `true` se a mensagem era do
-/// microfone (e foi consumida). Sem `CAP_MIC` na sessão a mensagem é descartada e registrada, sem encerrar nada.
 fn handle_mic_message(mic: Option<&mut MicSession>, msg: &Message, now_us: u64, opts: &ServerOptions) -> bool {
     let stream = match msg {
         Message::AudioStart { stream, .. } | Message::AudioData { stream, .. } | Message::AudioStop { stream } => *stream,
@@ -785,7 +688,6 @@ fn handle_mic_message(mic: Option<&mut MicSession>, msg: &Message, now_us: u64, 
     true
 }
 
-/// Envia os pacotes de áudio que esperam, numerando-os (a numeração vem depois de qualquer descarte).
 fn flush_audio<W: std::io::Write>(writer: &mut W, audio: Option<&mut AudioCtl>, stats: &mut Stats, opts: &ServerOptions) -> Result<(), SessionEnd> {
     let Some(a) = audio else { return Ok(()) };
     let mut pkts = Vec::new();
@@ -807,14 +709,11 @@ fn flush_audio<W: std::io::Write>(writer: &mut W, audio: Option<&mut AudioCtl>, 
 }
 
 impl Win {
-    /// Blocos que o próximo `FRAME` tentaria codificar, já sem a região de vídeo.
     fn block_dirty_blocks(&self) -> usize {
         let damage = if self.need_full { None } else { Some(self.frame_pending()) };
         self.encoder.dirty_per_strip(damage).iter().sum()
     }
 
-    /// O dano do quadro que vai sair: o que falta do quadro fatiado em curso (sobre o instantâneo) ou, sem ele,
-    /// o dano acumulado.
     fn frame_pending(&self) -> &[Rect] {
         match &self.snap {
             Some(s) => &s.pending,
@@ -822,11 +721,8 @@ impl Win {
         }
     }
 
-    /// Há algo para o codec de blocos. Sem vídeo, é o dano acumulado (como sempre); com vídeo, o dano
-    /// só dentro da região não conta: vai por `VIDEO_FRAME`.
     fn has_block_work(&self) -> bool {
         if self.snap.is_some() {
-            // Quadro fatiado em curso: sempre há o que enviar (ao menos o `FRAME` que o fecha).
             true
         } else if self.video.is_none() {
             !self.pending.is_empty()
@@ -835,7 +731,6 @@ impl Win {
         }
     }
 
-    /// A região de vídeo tem dano novo e o intervalo mínimo entre capturas já passou.
     fn video_due(&self, now_ms: u64) -> bool {
         self.video.as_ref().is_some_and(|v| self.video_dirty && now_ms >= v.last_capture_ms + MIN_CAPTURE_INTERVAL_MS)
     }
@@ -848,14 +743,12 @@ impl Win {
         }
         let mut blocks = if block_work { self.block_dirty_blocks() } else { 0 };
         if let (true, Some(v)) = (video_due, &self.video) {
-            // O quadro de vídeo entra na estimativa como blocos equivalentes, para o orçamento de bytes.
             blocks += (v.est_bytes as f64 / flow.bytes_per_block(self.id).max(1.0)).ceil() as usize;
         }
         Some(Candidate { win: self.id, pending_blocks: blocks, can_slice: !self.need_full })
     }
 }
 
-/// Aplica um evento da fonte: cria, redimensiona, retitula, destrói ou acumula dano.
 fn apply_event<W: std::io::Write>(writer: &mut W, windows: &mut Vec<Win>, flow: &mut Flow, ev: SourceEvent, now_us: u64, caps: u32, opts: &ServerOptions) -> Result<(), SessionEnd> {
     let send = |writer: &mut W, m: &Message| write_message(writer, m).map_err(|e| end_from(e, "falha ao enviar"));
     match ev {
@@ -873,7 +766,6 @@ fn apply_event<W: std::io::Write>(writer: &mut W, windows: &mut Vec<Win>, flow: 
                     opts.log(&format!("janela {win}: redimensionada para {width}x{height}"));
                     w.width = width;
                     w.height = height;
-                    // `WIN_RESIZE` encerra o fluxo de vídeo sem `VIDEO_STOP`; o próximo quadro é inteiro.
                     if let Some(v) = w.video.as_ref() {
                         opts.log(&format!("janela {win}: vídeo (fluxo {}) encerrado pelo redimensionamento", v.stream));
                     }
@@ -944,23 +836,14 @@ fn apply_event<W: std::io::Write>(writer: &mut W, windows: &mut Vec<Win>, flow: 
     Ok(())
 }
 
-/// O que uma codificação de `send_frame` produziu.
 struct Encoded {
     coded: usize,
-    /// Faixas de blocos que o `FRAME` cobre.
     strips: Range<usize>,
-    /// Há mais fatias do mesmo quadro depois desta.
     more: bool,
-    /// `FRAME` de uma fatia (e não de um quadro inteiro).
     slice: bool,
     capture_us: u64,
 }
 
-/// Codifica e envia um `FRAME`: o quadro todo com o dano acumulado, ou, se `slice_bytes` vier preenchido, só uma
-/// fatia de faixas de blocos. Um quadro fatiado sai todo do mesmo instante: a primeira fatia copia o conteúdo da
-/// janela (`Snapshot`) e as seguintes saem da cópia, enquanto o dano novo espera em `w.pending`. Com `atomic`
-/// (`CAP_ATOMIC` nos dois lados) toda fatia que não é a última leva `FRAME_FLAG_MORE`.
-/// Devolve os bytes enviados (0 se nada saiu).
 #[allow(clippy::too_many_arguments)]
 fn send_frame<W: std::io::Write>(
     writer: &mut W,
@@ -982,19 +865,15 @@ fn send_frame<W: std::io::Write>(
     let win_id = w.id;
     let seq = w.seq;
     let mut result: Option<Encoded> = None;
-    // Continuação de um quadro fatiado: o `FRAME` precisa sair mesmo que todos os blocos sejam SKIP (a fatia anterior
-    // prometeu mais uma).
     let continuacao = w.snap.is_some();
 
     if let Some(mut s) = w.snap.take() {
-        // Continuação de um quadro fatiado: tudo sai do instantâneo, nunca do conteúdo vivo.
         let t0 = Instant::now();
         let por_faixa = w.encoder.dirty_per_strip(Some(&s.pending));
         let r = match slice_bytes {
             Some(target) => plan_slice(&por_faixa, s.cursor, flow.bytes_per_block(win_id), target),
             None => 0..n_strips,
         };
-        // Intervalo vazio: o quadro só de SKIP que fecha o quadro fatiado (a fatia anterior prometeu mais uma).
         let coded = w.encoder.encode_range(&s.pixels, stride, Some(&s.pending), r.clone(), &mut data);
         enc_us = t0.elapsed().as_micros() as u64;
         if slice_bytes.is_some() && !r.is_empty() {
@@ -1016,7 +895,6 @@ fn send_frame<W: std::io::Write>(
         }
         result = Some(Encoded { coded, strips: r, more, slice: true, capture_us });
     } else {
-        // `None`: a fonte não tem a janela ou ela mudou de tamanho (o `Resized` ainda vai chegar).
         source.with_pixels(win_id, &mut |pw, ph, pixels| {
             if (pw, ph) != (width, height) {
                 return;
@@ -1025,7 +903,6 @@ fn send_frame<W: std::io::Write>(
             let mut more = false;
             let mut slice = false;
             let (coded, strips) = if w.need_full {
-                // Primeira FRAME depois da criação ou de WIN_RESIZE: inteira, sem SKIP, nunca fatiada.
                 w.pending.clear();
                 (w.encoder.encode(pixels, stride, None, &mut data), 0..n_strips)
             } else if let Some(target) = slice_bytes {
@@ -1042,7 +919,6 @@ fn send_frame<W: std::io::Write>(
                 let mut resto = std::mem::take(&mut w.pending);
                 subtract_band(&mut resto, y0, y1);
                 if w.encoder.dirty_per_strip(Some(&resto)).iter().sum::<usize>() > 0 {
-                    // Sobrou quadro: este é o instante dele. Copia o conteúdo agora; as próximas fatias saem da cópia.
                     let mut copia = std::mem::take(&mut w.spare);
                     copia.clear();
                     copia.extend_from_slice(pixels);
@@ -1071,9 +947,6 @@ fn send_frame<W: std::io::Write>(
     if enc.strips.is_empty() && !enc.slice {
         return Ok(0);
     }
-    // Com vídeo ativo numa região, o app costuma sujar a janela inteira a cada quadro (o `mpv`, o GTK) sem mudar nada fora
-    // dela: o `FRAME` sairia só de SKIP (~0,1 KiB, centenas por segundo) e tomaria o orçamento e a vez dos
-    // `VIDEO_FRAME`. Não se envia; o app só precisa saber que o quadro foi apresentado.
     if w.video.is_some() && enc.coded == 0 && !enc.more && !continuacao {
         source.frame_sent(w.id);
         return Ok(0);
@@ -1092,11 +965,6 @@ fn send_frame<W: std::io::Write>(
     w.seq = w.seq.wrapping_add(1);
     stats.record_frame(w.id, bytes, enc_us);
 
-    // Detecção de vídeo: alimentada pelos blocos que saíram diferentes de SKIP. Todo envio (quadro
-    // inteiro ou fatia) é um quadro para a detecção, no máximo um por intervalo de captura: os blocos atrás
-    // do cursor estão em `changed_acc` ou mudaram há pouco, e os à frente estão sob dano pendente (veja
-    // `last_coded` abaixo), então uma fatia não precisa esperar a passada fechar. Com vídeo ativo a janela é
-    // alimentada pelos `VIDEO_FRAME` (veja `send_video_frame`).
     if vctl.factory.is_some() && w.video.is_none() {
         let now_ms = now_us / 1000;
         let cols = w.encoder.block_cols();
@@ -1104,9 +972,6 @@ fn send_frame<W: std::io::Write>(
         for (a, &c) in w.changed_acc.iter_mut().zip(coded_now) {
             *a |= c;
         }
-        // Resultado da última tentativa nos blocos que este quadro ou esta fatia cobriu.
-        // Só os blocos de fato tentados (sujos pelo dano, dentro das faixas codificadas) entram: um bloco coberto
-        // sem estar sujo sai SKIP por não ter sido examinado e não pode apagar o que se sabia dele.
         let attempted = w.encoder.attempted_blocks();
         let (lo, hi) = (strips.start * cols, (strips.end * cols).min(coded_now.len()));
         for (((last, ms), &c), &t) in w.last_coded[lo..hi].iter_mut().zip(&mut w.last_coded_ms[lo..hi]).zip(&coded_now[lo..hi]).zip(&attempted[lo..hi]) {
@@ -1117,7 +982,6 @@ fn send_frame<W: std::io::Write>(
                 }
             }
         }
-        // O que as fatias entre duas entregas mudaram continua acumulado em `changed_acc`.
         let intervalo_ok = now_ms >= w.last_det_ms + MIN_CAPTURE_INTERVAL_MS;
         if !sent_slice || intervalo_ok || (w.pending.is_empty() && w.snap.is_none()) {
             stats.det_frames += 1;
@@ -1127,27 +991,12 @@ fn send_frame<W: std::io::Write>(
     Ok(bytes)
 }
 
-/// Entrega um quadro à detecção de vídeo da janela e, se ela manda entrar em vídeo, abre o fluxo.
-///
-/// Chamada a cada envio de imagem (quadro inteiro ou fatia) e **também pelo relógio da detecção no laço da sessão**
-/// (o bloco "Relógio da detecção" de `run_loop`, que a chama para as janelas com quadro fatiado em curso): sob vazão baixa o quadro do app sai em muitas fatias e os envios ficam raros (7 por
-/// segundo no Wi-Fi), então os 16 quadros do histórico não cabiam em `HOT_WINDOW_MS`. A cadência da detecção é a dos
-/// quadros do APP (no máximo um a cada `MIN_CAPTURE_INTERVAL_MS`), não a dos envios.
 fn deliver_detection<W: std::io::Write>(writer: &mut W, w: &mut Win, flow: &Flow, now_us: u64, opts: &ServerOptions, vctl: &mut VideoCtl) -> Result<(), SessionEnd> {
     let now_ms = now_us / 1000;
     let (width, height) = (w.width, w.height);
     let cols = w.encoder.block_cols();
     w.last_det_ms = now_ms;
     let changed = std::mem::replace(&mut w.changed_acc, vec![false; w.video_touched.len()]);
-    // Bloco que a última tentativa achou diferente (`last_coded`) e que continua sob dano pendente conta como mudado
-    // neste quadro do app: o app segue declarando o bloco sujo e a última comparação mostrou conteúdo novo; o fluxo
-    // apertado é que não deu vez a ele neste quadro. A "quentura" reflete o conteúdo mudar a cada quadro do app, não
-    // quantas vezes o bloco coube no orçamento. Dois limites: o bloco só tem esse crédito por `PENDING_CREDIT_MS`
-    // depois da última vez que saiu diferente (um app parado não vira vídeo por uma comparação antiga), e, sem dano
-    // pendente, só vale a mudança de até `RECENT_CHANGE_MS` atrás.
-    // Dano sozinho não vale (um app pode declarar a janela inteira suja e mudar só uma parte): sem `last_coded` o
-    // bloco não conta.
-    // Dano pendente é o do quadro fatiado em curso mais o que chegou depois dele.
     let mut changed = changed;
     let mut pend = vec![false; changed.len()];
     let em_curso = w.snap.as_ref().map_or(&[][..], |s| s.pending.as_slice());
@@ -1166,7 +1015,6 @@ fn deliver_detection<W: std::io::Write>(writer: &mut W, w: &mut Win, flow: &Flow
     }
     if let Some(Action::Start(rect)) = action {
         if vctl.busy_other {
-            // Um fluxo por vez: esta janela fica no codec de blocos e pode tentar de novo depois.
             w.detector.decline();
         } else {
             start_video(writer, w, rect, now_us, opts, vctl)?;
@@ -1175,14 +1023,11 @@ fn deliver_detection<W: std::io::Write>(writer: &mut W, w: &mut Win, flow: &Flow
     Ok(())
 }
 
-/// Por que um fluxo de vídeo termina.
 enum StopWhy {
     Detector(StopReason),
     EncoderError,
 }
 
-/// Abre o codificador e o fluxo de vídeo da região. Se o codificador não abre, a janela continua no
-/// codec de blocos e nada entra em vídeo por 10 s.
 fn start_video<W: std::io::Write>(writer: &mut W, w: &mut Win, brect: BlockRect, now_us: u64, opts: &ServerOptions, vctl: &mut VideoCtl) -> Result<(), SessionEnd> {
     let now_ms = now_us / 1000;
     let Some(factory) = vctl.factory.clone() else { return Ok(()) };
@@ -1204,7 +1049,6 @@ fn start_video<W: std::io::Write>(writer: &mut W, w: &mut Win, brect: BlockRect,
     vctl.next_stream += 1;
     write_message(writer, &Message::VideoStart { win: w.id, stream, x: rect.x, y: rect.y, width: rect.w, height: rect.h, codec: CODEC_H264 })
         .map_err(|e| end_from(e, "falha ao enviar VIDEO_START"))?;
-    // Daqui em diante o codec de blocos ignora a região.
     w.clear_detection_history();
     w.encoder.set_excluded(Some(rect));
     opts.log(&format!("janela {}: vídeo iniciado (fluxo {stream}) na região {}x{} em ({}, {}) t={:.3}s", w.id, rect.w, rect.h, rect.x, rect.y, now_us as f64 / 1e6));
@@ -1217,13 +1061,11 @@ fn start_video<W: std::io::Write>(writer: &mut W, w: &mut Win, brect: BlockRect,
         est_bytes: (vctl.bitrate as usize / 8 / VIDEO_FPS as usize).max(1),
         frames: 0,
     });
-    w.video_dirty = true; // o primeiro quadro (chave) sai já
+    w.video_dirty = true;
     w.video_touched.fill(false);
     Ok(())
 }
 
-/// Encerra o fluxo de vídeo: `VIDEO_STOP` (se `send_stop`) e a volta da região ao codec de blocos,
-/// que a envia inteira, sem SKIP, no próximo `FRAME`.
 fn stop_video<W: std::io::Write>(writer: &mut W, w: &mut Win, why: StopWhy, send_stop: bool, now_us: u64, opts: &ServerOptions) -> Result<(), SessionEnd> {
     let Some(v) = w.video.take() else { return Ok(()) };
     let motivo = match why {
@@ -1239,8 +1081,6 @@ fn stop_video<W: std::io::Write>(writer: &mut W, w: &mut Win, why: StopWhy, send
     w.clear_detection_history();
     w.encoder.set_excluded(None);
     w.encoder.invalidate_rect(v.rect);
-    // Um quadro fatiado em curso (instantâneo) volta ao dano acumulado: o primeiro `FRAME` depois do
-    // `VIDEO_STOP` tem de ser feito do conteúdo vivo e cobrir a região inteira sem SKIP.
     if let Some(s) = w.snap.take() {
         w.pending.extend(s.pending);
         w.spare = s.pixels;
@@ -1250,8 +1090,6 @@ fn stop_video<W: std::io::Write>(writer: &mut W, w: &mut Win, why: StopWhy, send
     Ok(())
 }
 
-/// Captura a região, codifica e envia um `VIDEO_FRAME`. O quadro codificado sempre sai: o próximo
-/// depende dele. Erro do codificador encerra o fluxo.
 #[allow(clippy::too_many_arguments)]
 fn send_video_frame<W: std::io::Write>(
     writer: &mut W,
@@ -1278,7 +1116,6 @@ fn send_video_frame<W: std::io::Write>(
         result = Some(v.encoder.encode(&pixels[origin..], stride));
         enc_us = t0.elapsed().as_micros() as u64;
     });
-    // `None`: a janela sumiu ou mudou de tamanho (o `Resized` ainda vai chegar).
     let Some(result) = result else {
         v.last_capture_ms = now_ms;
         w.video_dirty = false;
@@ -1311,7 +1148,6 @@ fn send_video_frame<W: std::io::Write>(
         v.est_bytes = (v.est_bytes + bytes) / 2;
     }
     w.video_dirty = false;
-    // O histórico da detecção também anda com os quadros de vídeo; a saída não depende dele.
     let _ = w.detector.on_frame(now_ms, &w.video_touched, flow.bytes_per_block(win_id));
     w.video_touched.fill(false);
     Ok(bytes)
@@ -1378,7 +1214,6 @@ fn handle_message<W: std::io::Write>(
             opts.log(&format!("entrada: área de transferência do hospedeiro ({mime}, {} bytes)", data.len()));
             source.input(&msg);
         }
-        // Mensagens do sentido servidor -> cliente ou HELLO repetido: ignoradas.
         other => opts.log(&format!("mensagem inesperada do cliente ignorada: kind {}", other.kind())),
     }
     Ok(())

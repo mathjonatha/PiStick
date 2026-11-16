@@ -1,34 +1,11 @@
-//! O manifesto de uma atualização: texto canônico, estrito e sem ambiguidade.
-//!
-//! ```text
-//! pistick-update 1
-//! serial 7
-//! versao 0.2.0-abc1234
-//! <sha256 em 64 hex> <tamanho> <caminho relativo>
-//! ...
-//! ```
-//!
-//! Regras (tudo que foge delas é recusado, e o leitor nunca entra em pânico):
-//! - codificação UTF-8, linhas terminadas em `\n` (sem `\r`), com `\n` também na última;
-//! - `serial` é um inteiro decimal sem zeros à esquerda e sem sinal (cresce a cada publicação, contra retrocesso);
-//! - `versao` tem de 1 a 64 caracteres entre letras, dígitos, `.`, `_`, `+`, `-` e `~`;
-//! - cada arquivo: SHA-256 em 64 dígitos hexadecimais minúsculos, um espaço, o tamanho em decimal (sem zeros à
-//!   esquerda), um espaço e o caminho até o fim da linha;
-//! - caminho relativo, com `/` como separador, sem `..`, sem `.`, sem componente vazio, sem barra inicial ou final,
-//!   sem `\`, sem `:`, sem caracteres de controle, sem espaço no começo ou no fim; sem repetição;
-//! - as linhas de arquivo estão em ordem crescente dos bytes do caminho (uma só ordem possível).
 
 use crate::{hex_decode, hex_encode, Erro};
 
 pub const CABECALHO: &str = "pistick-update 1";
-/// Maior manifesto aceito (bytes): barra entradas absurdas antes de ler.
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
-/// Maior número de arquivos num manifesto.
 pub const MAX_ARQUIVOS: usize = 100_000;
-/// Maior tamanho de um caminho (bytes).
 pub const MAX_CAMINHO: usize = 1024;
 
-/// Um arquivo da atualização.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entrada {
     pub sha256: [u8; 32],
@@ -36,7 +13,6 @@ pub struct Entrada {
     pub caminho: String,
 }
 
-/// O manifesto lido ou montado.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub serial: u64,
@@ -48,12 +24,10 @@ fn erro(m: impl Into<String>) -> Erro {
     Erro::Manifesto(m.into())
 }
 
-/// `versao` válida (veja o texto do módulo).
 pub fn versao_valida(v: &str) -> bool {
     !v.is_empty() && v.len() <= 64 && v.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-' | b'~'))
 }
 
-/// Inteiro decimal canônico: só dígitos, sem zero à esquerda (menos o próprio "0"), cabendo em `u64`.
 fn decimal(s: &str) -> Option<u64> {
     if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) || (s.len() > 1 && s.starts_with('0')) {
         return None;
@@ -61,7 +35,6 @@ fn decimal(s: &str) -> Option<u64> {
     s.parse().ok()
 }
 
-/// Verifica o caminho relativo de um arquivo. `Err` traz o motivo.
 pub fn caminho_valido(c: &str) -> Result<(), String> {
     if c.is_empty() {
         return Err("caminho vazio".into());
@@ -99,7 +72,6 @@ pub fn caminho_valido(c: &str) -> Result<(), String> {
 }
 
 impl Manifest {
-    /// O texto canônico. Não valida: use [`Manifest::validar`] antes de assinar.
     pub fn to_text(&self) -> String {
         let mut s = String::new();
         s.push_str(CABECALHO);
@@ -112,7 +84,6 @@ impl Manifest {
         s
     }
 
-    /// Confere as regras que valem para um manifesto montado em memória (versão, caminhos, ordem, repetição).
     pub fn validar(&self) -> Result<(), Erro> {
         if !versao_valida(&self.versao) {
             return Err(erro("versão inválida (1 a 64 caracteres entre letras, dígitos, '.', '_', '+', '-' e '~')"));
@@ -136,7 +107,6 @@ impl Manifest {
         Ok(())
     }
 
-    /// Lê o manifesto. Estrito: a leitura e a escrita são inversas (qualquer desvio do texto canônico é recusado).
     pub fn parse(bytes: &[u8]) -> Result<Manifest, Erro> {
         if bytes.len() > MAX_BYTES {
             return Err(erro("arquivo grande demais"));
@@ -173,7 +143,6 @@ impl Manifest {
         }
         let m = Manifest { serial, versao, arquivos };
         m.validar()?;
-        // Forma canônica única: o que entrou tem de ser o que sairia.
         if m.to_text().as_bytes() != bytes {
             return Err(erro("fora da forma canônica"));
         }

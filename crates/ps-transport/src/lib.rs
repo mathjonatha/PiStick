@@ -1,9 +1,3 @@
-//! Transportes: um fluxo de bytes confiável, ordenado e bidirecional.
-//!
-//! O protocolo (`ps-proto`) só precisa de `Read` e `Write`. Este crate define o
-//! trait [`Transport`], que entrega as duas metades separadas (uma para a thread
-//! que lê, outra para a que escreve) e um [`Closer`] para derrubar a conexão de
-//! qualquer thread. Hoje há TCP; depois haverá USB bulk com o mesmo trait.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -11,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Fecha a conexão de qualquer thread; desbloqueia leituras e escritas pendentes.
 #[derive(Clone)]
 pub struct Closer(Arc<dyn Fn() + Send + Sync>);
 
@@ -25,9 +18,6 @@ impl Closer {
     }
 }
 
-/// Roda `f` e, se ela passar de `timeout`, fecha a conexão por `closer` (o que desbloqueia leituras e escritas
-/// pendentes de `f`). Devolve o resultado de `f` e se o prazo estourou. Serve para o limite de tempo do
-/// aperto de mão e da abertura.
 pub fn with_deadline<T>(closer: &Closer, timeout: Duration, f: impl FnOnce() -> T) -> (T, bool) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let c = closer.clone();
@@ -44,43 +34,33 @@ pub fn with_deadline<T>(closer: &Closer, timeout: Duration, f: impl FnOnce() -> 
     (r, expirou)
 }
 
-/// As duas metades de uma conexão, mais o meio de fechá-la.
 pub struct Split<R, W> {
     pub reader: R,
     pub writer: W,
     pub closer: Closer,
 }
 
-/// Fluxo de bytes confiável e bidirecional.
 pub trait Transport: Send + 'static {
     type Reader: Read + Send + 'static;
     type Writer: Write + Send + 'static;
 
-    /// Separa em leitor e escritor, que podem viver em threads diferentes.
     fn split(self) -> io::Result<Split<Self::Reader, Self::Writer>>;
 
-    /// Descrição legível da outra ponta, para logs.
     fn peer(&self) -> String;
 
-    /// Limita a fila de envio do sistema, para o atraso não se esconder no kernel.
-    /// Transportes sem esse conceito ignoram.
     fn set_send_queue_limit(&self, _bytes: usize) -> io::Result<()> {
         Ok(())
     }
 }
 
-/// Quem aceita conexões de entrada.
 pub trait Listener {
     type Conn: Transport;
 
-    /// Bloqueia até chegar uma conexão.
     fn accept(&self) -> io::Result<Self::Conn>;
 
-    /// Descrição legível do endereço em que escuta.
     fn local(&self) -> String;
 }
 
-/// Transporte TCP com `TCP_NODELAY`.
 pub struct TcpTransport {
     stream: TcpStream,
 }
@@ -91,25 +71,19 @@ impl TcpTransport {
         Ok(TcpTransport { stream })
     }
 
-    /// O soquete por baixo (para `peek`, endereço do par e clones).
     pub fn stream(&self) -> &TcpStream {
         &self.stream
     }
 
-    /// Endereço IP da outra ponta, se conhecido.
     pub fn peer_ip(&self) -> Option<std::net::IpAddr> {
         self.stream.peer_addr().ok().map(|a| a.ip())
     }
 
-    /// Conecta a `addr` (por exemplo `"127.0.0.1:7700"`).
     pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Self> {
         Self::from_stream(TcpStream::connect(addr)?)
     }
 }
 
-/// Leitor TCP que acorda periodicamente para ver se a conexão foi fechada por um [`Closer`].
-/// No Windows, `shutdown` feito por outra thread não desbloqueia um `recv` em andamento
-/// (verificado), então a leitura usa um tempo limite curto e repete enquanto não fechou.
 pub struct TcpReader {
     stream: TcpStream,
     closed: Arc<AtomicBool>,
@@ -149,7 +123,6 @@ impl Transport for TcpTransport {
         })
     }
 
-    /// `SO_SNDBUF`. (`TCP_NOTSENT_LOWAT` não existe em `std` nem em `socket2`; ficou de fora.)
     fn set_send_queue_limit(&self, bytes: usize) -> io::Result<()> {
         socket2::SockRef::from(&self.stream).set_send_buffer_size(bytes)
     }
@@ -162,7 +135,6 @@ impl Transport for TcpTransport {
     }
 }
 
-/// Listener TCP.
 pub struct TcpAcceptor {
     listener: TcpListener,
 }
@@ -180,7 +152,6 @@ impl TcpAcceptor {
         self.listener.local_addr()
     }
 
-    /// Outra alça para o mesmo soquete de escuta (para uma thread que só aceita conexões).
     pub fn try_clone_listener(&self) -> io::Result<TcpListener> {
         self.listener.try_clone()
     }
@@ -243,7 +214,6 @@ mod tests {
         assert!(expirou);
         assert!(matches!(r, Ok(0) | Err(_)));
         assert!(t0.elapsed() < Duration::from_secs(1));
-        // Dentro do prazo: não expira.
         let (_, expirou) = with_deadline(&closer, Duration::from_secs(5), || 1 + 1);
         assert!(!expirou);
         t.join().unwrap();
@@ -257,7 +227,6 @@ mod tests {
             let c = acc.accept().unwrap();
             c.set_send_queue_limit(256 * 1024).unwrap();
             let sz = socket2::SockRef::from(&c.stream).send_buffer_size().unwrap();
-            // O Linux dobra o valor pedido; o Windows usa o pedido. Em todo caso, bem abaixo de 1 MiB.
             assert!((64 * 1024..=1024 * 1024).contains(&sz), "SO_SNDBUF = {sz}");
         });
         let _c = TcpTransport::connect(addr).unwrap();
@@ -280,7 +249,6 @@ mod tests {
         });
         let mut b = [0u8; 1];
         let t0 = std::time::Instant::now();
-        // Retorna (0 bytes ou erro) quando fechado, em vez de bloquear.
         let r = reader.read(&mut b);
         assert!(matches!(r, Ok(0) | Err(_)));
         assert!(t0.elapsed() < std::time::Duration::from_secs(2), "o Closer não desbloqueou a leitura");

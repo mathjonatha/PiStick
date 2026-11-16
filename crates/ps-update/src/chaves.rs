@@ -1,11 +1,3 @@
-//! Chaves de publicação Ed25519: gerar, gravar, ler e impressão digital.
-//!
-//! Arquivos de texto, uma forma só:
-//! - privada: `pistick-chave-privada 1`, depois `semente <64 hex>` (os 32 bytes da semente do RFC 8032), modo 0600;
-//! - pública: `pistick-chave-publica 1`, depois `chave <64 hex>`.
-//!
-//! **A chave privada de publicação nunca entra no repositório nem no Pi.** [`gerar`] recusa gravar dentro de uma árvore
-//! que tenha `.git` e recusa sobrescrever um arquivo que já existe.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -19,19 +11,15 @@ use crate::{hex_decode, hex_encode, Erro};
 
 const CAB_PRIVADA: &str = "pistick-chave-privada 1";
 const CAB_PUBLICA: &str = "pistick-chave-publica 1";
-/// As chaves são arquivos pequenos; nada maior é lido.
 const MAX_ARQUIVO: u64 = 4096;
 
-/// Chave privada de publicação (zerada da memória ao soltar).
 pub struct ChavePrivada(pub(crate) SigningKey);
 
-/// Chave pública de verificação.
 #[derive(Clone)]
 #[derive(Debug)]
 pub struct ChavePublica(pub(crate) VerifyingKey);
 
 impl ChavePrivada {
-    /// A partir de uma semente de 32 bytes (RFC 8032).
     pub fn de_semente(semente: &[u8; 32]) -> ChavePrivada {
         ChavePrivada(SigningKey::from_bytes(semente))
     }
@@ -42,7 +30,6 @@ impl ChavePrivada {
 }
 
 impl ChavePublica {
-    /// A partir dos 32 bytes da chave. Recusa pontos inválidos.
     pub fn de_bytes(b: &[u8; 32]) -> Result<ChavePublica, Erro> {
         VerifyingKey::from_bytes(b).map(ChavePublica).map_err(|_| Erro::Chave("a chave pública não é um ponto válido da curva".into()))
     }
@@ -51,7 +38,6 @@ impl ChavePublica {
         self.0.to_bytes()
     }
 
-    /// Impressão digital: os 8 primeiros bytes do SHA-256 da chave pública, em 16 dígitos hexadecimais.
     pub fn impressao(&self) -> String {
         let h: [u8; 32] = Sha256::digest(self.0.to_bytes()).into();
         hex_encode(&h[..8])
@@ -62,7 +48,6 @@ fn erro_io(caminho: &Path, e: std::io::Error) -> Erro {
     Erro::Io(format!("{}: {e}", caminho.display()))
 }
 
-/// Lê um arquivo pequeno como texto, sem passar de [`MAX_ARQUIVO`] bytes.
 fn ler_pequeno(caminho: &Path) -> Result<String, Erro> {
     let mut b = Vec::new();
     fs::File::open(caminho).map_err(|e| erro_io(caminho, e))?.take(MAX_ARQUIVO + 1).read_to_end(&mut b).map_err(|e| erro_io(caminho, e))?;
@@ -80,7 +65,6 @@ fn ler_pequeno(caminho: &Path) -> Result<String, Erro> {
     }
 }
 
-/// `CAB\nPREFIXO <64 hex>\n` → os 32 bytes.
 fn ler_hex_de(texto: &str, cab: &str, prefixo: &str) -> Option<[u8; 32]> {
     let mut l = texto.strip_suffix('\n')?.split('\n');
     if l.next()? != cab {
@@ -117,11 +101,8 @@ pub fn ler_publica(caminho: &Path) -> Result<ChavePublica, Erro> {
     }
 }
 
-/// `true` se `caminho` está dentro de uma árvore que tem `.git` (pasta ou arquivo) em algum ancestral.
-/// O caminho não precisa existir: vale o ancestral mais próximo que existe.
 pub fn dentro_de_repositorio(caminho: &Path) -> bool {
     let mut base: PathBuf = if caminho.is_absolute() { caminho.to_path_buf() } else { std::env::current_dir().map(|c| c.join(caminho)).unwrap_or_else(|_| caminho.to_path_buf()) };
-    // O ancestral existente mais próximo, resolvido (links simbólicos e `..` somem).
     let resolvido = loop {
         if let Ok(r) = fs::canonicalize(&base) {
             break r;
@@ -154,8 +135,6 @@ fn gravar_novo(caminho: &Path, conteudo: &str, privado: bool) -> Result<(), Erro
     f.sync_all().map_err(|e| erro_io(caminho, e))
 }
 
-/// Gera um par de chaves: a privada em `saida` e a pública em `saida` + `.pub`. Recusa gravar dentro de uma árvore com
-/// `.git` e recusa sobrescrever.
 pub fn gerar(saida: &Path) -> Result<ChavePublica, Erro> {
     let mut pub_nome = saida.file_name().ok_or_else(|| Erro::Chave("caminho de saída sem nome de arquivo".into()))?.to_os_string();
     pub_nome.push(".pub");
@@ -219,9 +198,7 @@ mod tests {
         let e = gerar(&d.join("sub/dir/chave")).expect_err("deveria recusar");
         assert!(e.to_string().contains("repositório git"), "{e}");
         assert!(!d.join("sub/dir/chave").exists() && !d.join("sub/dir/chave.pub").exists());
-        // Pasta que ainda não existe, dentro do repositório, também é recusada.
         assert!(gerar(&d.join("nova/pasta/chave")).is_err());
-        // `.git` como arquivo (worktree, submódulo) também vale.
         let d2 = pasta("repo2");
         fs::write(d2.join(".git"), "gitdir: x\n").unwrap();
         assert!(gerar(&d2.join("chave")).is_err());
@@ -259,7 +236,6 @@ semente {}
         assert!(ler_privada(&d.join("g")).is_err());
         assert!(ler_privada(&d.join("nao-existe")).is_err());
         fs::write(d.join("h"), "pistick-chave-publica 1\nchave 0000000000000000000000000000000000000000000000000000000000000002\n").unwrap();
-        // 0x02... pode ou não ser ponto válido; o que importa é não entrar em pânico.
         let _ = ler_publica(&d.join("h"));
         let _ = fs::remove_dir_all(&d);
     }

@@ -1,9 +1,3 @@
-//! Gravação em WAV do que o cliente decodificou (`--audio-dump`), para os testes.
-//!
-//! A linha do tempo é a do emissor: lacunas grandes entre os `pts_us` (o servidor para de enviar depois de
-//! 200 ms de silêncio) viram quadros de silêncio, de modo que a duração do arquivo é a duração real e os
-//! trechos de som e de silêncio ficam nas posições certas. Diferenças pequenas (jitter de relógio) são
-//! ignoradas: os pacotes seguintes são só emendados.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
@@ -11,27 +5,22 @@ use std::path::Path;
 
 use ps_audio::SAMPLE_RATE;
 
-/// Lacuna mínima, em quadros, que vira silêncio (100 ms).
 const MIN_GAP_FRAMES: u64 = SAMPLE_RATE as u64 / 10;
 
 pub struct WavDump {
     w: BufWriter<File>,
-    /// `pts_us` do primeiro pacote.
     t0_us: Option<u64>,
-    /// Quadros já escritos (som e silêncio inseridos).
     frames: u64,
     failed: bool,
 }
 
 impl WavDump {
-    /// Cria o arquivo e escreve o cabeçalho (tamanhos acertados a cada `flush`).
     pub fn create(path: &Path) -> io::Result<WavDump> {
         let mut w = BufWriter::new(File::create(path)?);
         w.write_all(&header(0))?;
         Ok(WavDump { w, t0_us: None, frames: 0, failed: false })
     }
 
-    /// Grava um pacote (estéreo intercalado) cujo primeiro quadro está em `pts_us`.
     pub fn write(&mut self, pts_us: u64, samples: &[i16]) {
         if self.failed {
             return;
@@ -66,7 +55,6 @@ impl WavDump {
         Ok(())
     }
 
-    /// Esvazia o buffer e acerta os tamanhos do cabeçalho (o arquivo fica válido a qualquer momento).
     pub fn flush(&mut self) {
         if self.failed {
             return;
@@ -85,7 +73,6 @@ impl WavDump {
         }
     }
 
-    /// Quadros gravados até agora.
     pub fn frames(&self) -> u64 {
         self.frames
     }
@@ -97,7 +84,6 @@ impl Drop for WavDump {
     }
 }
 
-/// Cabeçalho WAV PCM S16LE estéreo de 48 kHz para `data_bytes` bytes de dados.
 fn header(data_bytes: u64) -> [u8; 44] {
     let data = data_bytes.min(u32::MAX as u64 - 36) as u32;
     let mut h = [0u8; 44];
@@ -106,18 +92,17 @@ fn header(data_bytes: u64) -> [u8; 44] {
     h[8..12].copy_from_slice(b"WAVE");
     h[12..16].copy_from_slice(b"fmt ");
     h[16..20].copy_from_slice(&16u32.to_le_bytes());
-    h[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
-    h[22..24].copy_from_slice(&2u16.to_le_bytes()); // canais
+    h[20..22].copy_from_slice(&1u16.to_le_bytes());
+    h[22..24].copy_from_slice(&2u16.to_le_bytes());
     h[24..28].copy_from_slice(&SAMPLE_RATE.to_le_bytes());
-    h[28..32].copy_from_slice(&(SAMPLE_RATE * 4).to_le_bytes()); // bytes por segundo
-    h[32..34].copy_from_slice(&4u16.to_le_bytes()); // alinhamento do bloco
+    h[28..32].copy_from_slice(&(SAMPLE_RATE * 4).to_le_bytes());
+    h[32..34].copy_from_slice(&4u16.to_le_bytes());
     h[34..36].copy_from_slice(&16u16.to_le_bytes());
     h[36..40].copy_from_slice(b"data");
     h[40..44].copy_from_slice(&data.to_le_bytes());
     h
 }
 
-/// Lê um WAV PCM S16LE estéreo de 48 kHz (o que `WavDump` grava): devolve as amostras intercaladas.
 pub fn read_wav(path: &Path) -> io::Result<Vec<i16>> {
     let b = std::fs::read(path)?;
     if b.len() < 44 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" || &b[36..40] != b"data" {

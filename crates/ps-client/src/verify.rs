@@ -1,27 +1,9 @@
-//! Verificação da imagem composta do cliente contra o gerador da janela de vídeo sintética
-//! (`ps_codec::testutil::video`), usada pelos comandos `verify-video` e `verify-still` do roteiro.
-//!
-//! Tudo aqui é função pura sobre buffers BGRX (linhas contíguas, `largura * 4` bytes). **A
-//! comparação olha só B, G e R**: o quarto byte (X) não carrega informação. O decodificador do `psc`
-//! já grava X = 0xFF, mas o critério não depende disso.
-//!
-//! O gerador é determinístico por número de quadro, e fora da região animada ([`video::REGION`]) a
-//! imagem é a mesma em todos os quadros. Daí:
-//!
-//! - **durante o vídeo**: o que está fora da região ativa tem de ser idêntico à parte parada da
-//!   origem; dentro dela, procura-se o número de quadro cuja região tem o maior PSNR;
-//! - **parado**: a janela inteira tem de ser idêntica à origem em algum quadro.
-//!
-//! A região de vídeo ativa tem de coincidir com a região animada do gerador; se não coincidir, a
-//! "parte parada" seria ambígua (haveria pixels animados fora da região) e a verificação reprova.
 
 use ps_codec::testutil::video;
 use ps_codec::Rect;
 
-/// Quantos quadros para cada lado do centro a busca do número de quadro examina (150 = 5 s).
 pub const SEARCH_RADIUS: u64 = 150;
 
-/// Onde comparar.
 #[derive(Debug, Clone, Copy)]
 pub enum Area {
     All,
@@ -29,7 +11,6 @@ pub enum Area {
     Outside(Rect),
 }
 
-/// Pixels diferentes (em B, G ou R) e o menor retângulo que os contém.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiffInfo {
     pub count: u64,
@@ -62,7 +43,6 @@ impl DiffInfo {
     }
 }
 
-/// Faixas de colunas `[x0, x1)` da linha `y` que pertencem à área.
 fn spans(area: Area, y: u32, w: u32) -> [(u32, u32); 2] {
     let clip = |r: Rect| (r.x.min(w), (r.x.saturating_add(r.w)).min(w));
     let in_rows = |r: Rect| y >= r.y && y < r.y.saturating_add(r.h);
@@ -78,7 +58,6 @@ fn spans(area: Area, y: u32, w: u32) -> [(u32, u32); 2] {
     }
 }
 
-/// Conta os pixels diferentes entre `a` e `b` (ambos `w`×`h`, BGRX) na área, olhando só B, G e R.
 pub fn diff_count(a: &[u8], b: &[u8], w: u32, h: u32, area: Area) -> DiffInfo {
     assert!(a.len() >= (w as usize) * (h as usize) * 4 && b.len() >= (w as usize) * (h as usize) * 4, "buffers menores que {w}x{h}");
     let mut d = DiffInfo::default();
@@ -95,7 +74,6 @@ pub fn diff_count(a: &[u8], b: &[u8], w: u32, h: u32, area: Area) -> DiffInfo {
     d
 }
 
-/// PSNR em dB sobre B, G e R dentro de `r`. `f64::INFINITY` se for idêntico.
 pub fn psnr_rect(a: &[u8], b: &[u8], w: u32, r: Rect) -> f64 {
     let (mut se, mut n) = (0f64, 0f64);
     for y in r.y..r.y + r.h {
@@ -115,37 +93,29 @@ pub fn psnr_rect(a: &[u8], b: &[u8], w: u32, r: Rect) -> f64 {
     10.0 * (255.0f64 * 255.0 / (se / n)).log10()
 }
 
-/// A parte parada da origem (a região animada fica com a cor de fundo).
 fn static_image(w: u32, h: u32) -> Vec<u8> {
     let mut buf = vec![0u8; w as usize * h as usize * 4];
     video::draw_static(&mut buf, w, h);
     buf
 }
 
-/// Quadros candidatos em ordem de distância ao centro: c, c-1, c+1, c-2, c+2, ...
 fn candidates(center: u64, radius: u64) -> impl Iterator<Item = u64> {
     std::iter::once(center).chain((1..=radius).flat_map(move |k| [center.checked_sub(k), center.checked_add(k)].into_iter().flatten()))
 }
 
-/// Número de quadro da animação que corresponde a um `capture_us` do relógio da sessão do servidor.
 pub fn frame_from_capture_us(capture_us: u64) -> u64 {
     video::frame_at(capture_us / 1000, None)
 }
 
-/// Resultado de [`check_video`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoReport {
     pub ok: bool,
     pub frame: u64,
-    /// PSNR da região no melhor quadro (`INFINITY` se idêntica).
     pub psnr: f64,
     pub outside_diff: DiffInfo,
     pub problem: Option<String>,
 }
 
-/// Durante o vídeo: `img` é a janela `w`×`h` composta pelo cliente; `active` é a região de vídeo
-/// ativa (`None` = não há); `center` é o quadro esperado (a busca vai de `center - radius` a
-/// `center + radius`).
 pub fn check_video(img: &[u8], w: u32, h: u32, active: Option<Rect>, center: Option<u64>, radius: u64, min_db: f64) -> VideoReport {
     let mut r = VideoReport { ok: false, frame: 0, psnr: f64::NEG_INFINITY, outside_diff: DiffInfo::default(), problem: None };
     let Some(active) = active else {
@@ -165,7 +135,6 @@ pub fn check_video(img: &[u8], w: u32, h: u32, active: Option<Rect>, center: Opt
         r.problem.get_or_insert_with(|| "nenhum quadro recebido: não há como estimar o número do quadro".into());
         return r;
     };
-    // O melhor PSNR numa vizinhança do quadro esperado.
     let mut best = (center, f64::NEG_INFINITY);
     for n in candidates(center, radius) {
         video::draw_region(&mut origin, w, h, n);
@@ -182,18 +151,14 @@ pub fn check_video(img: &[u8], w: u32, h: u32, active: Option<Rect>, center: Opt
     r
 }
 
-/// Resultado de [`check_still`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct StillReport {
     pub ok: bool,
-    /// Quadro em que a animação parou (o de menos pixels diferentes, se nenhum for idêntico).
     pub frame: u64,
     pub diff: DiffInfo,
     pub problem: Option<String>,
 }
 
-/// Parado: a janela inteira tem de ser idêntica à origem em algum quadro de `center ± radius`.
-/// `video_active`: ainda há região de vídeo ativa (reprova sem comparar).
 pub fn check_still(img: &[u8], w: u32, h: u32, video_active: bool, center: Option<u64>, radius: u64) -> StillReport {
     let mut r = StillReport { ok: false, frame: 0, diff: DiffInfo::default(), problem: None };
     if video_active {
@@ -206,7 +171,6 @@ pub fn check_still(img: &[u8], w: u32, h: u32, video_active: bool, center: Optio
     };
     let mut origin = static_image(w, h);
     let region = video::region_in(w, h);
-    // Fora da região animada a origem é a mesma em todos os quadros: compara uma vez só.
     let outside = match region {
         Some(reg) => diff_count(img, &origin, w, h, Area::Outside(reg)),
         None => diff_count(img, &origin, w, h, Area::All),
@@ -245,7 +209,6 @@ mod tests {
         video::REGION
     }
 
-    /// Soma `delta` (saturando) a B, G e R de todos os pixels de `r`.
     fn ruido(img: &mut [u8], r: Rect, delta: u8) {
         for y in r.y..r.y + r.h {
             for x in r.x..r.x + r.w {
@@ -277,7 +240,6 @@ mod tests {
         assert!(r.ok && r.frame == 200, "{r:?}");
         let s = check_still(&img, W, H, false, Some(207), 30);
         assert!(s.ok && s.frame == 200, "{s:?}");
-        // Fora do alcance da busca: não acha.
         let s = check_still(&img, W, H, false, Some(300), 30);
         assert!(!s.ok, "{s:?}");
     }
@@ -311,19 +273,15 @@ mod tests {
         let mut img = video::render(W, H, 80);
         ruido(&mut img, reg(), 2);
         let r = check_video(&img, W, H, Some(reg()), Some(80), 3, 30.0);
-        // Erro de 2 em quase todos os canais: PSNR perto de 10*log10(255^2/4) = 42,1 dB (a saturação em
-        // 255 reduz um pouco o erro, então o valor sobe levemente).
         assert!(r.ok, "{r:?}");
         assert_eq!(r.frame, 80);
         assert!(r.psnr.is_finite() && (41.5..45.0).contains(&r.psnr), "psnr {}", r.psnr);
-        // Ruído maior (+20 em quase todos os canais): perto de 22 dB, abaixo do limite de 30 dB.
         let mut img2 = video::render(W, H, 80);
         ruido(&mut img2, reg(), 20);
         let r2 = check_video(&img2, W, H, Some(reg()), Some(80), 3, 30.0);
         assert!(!r2.ok && r2.frame == 80 && (20.0..25.0).contains(&r2.psnr), "{r2:?}");
         assert!(r2.psnr < r.psnr);
         assert!(check_video(&img2, W, H, Some(reg()), Some(80), 3, 20.0).ok);
-        // Com ruído na região, a janela parada não é idêntica.
         let s = check_still(&img, W, H, false, Some(80), 3);
         assert!(!s.ok);
         assert_eq!(s.diff.bbox, Some(reg()), "{s:?}");
@@ -338,7 +296,6 @@ mod tests {
         let r = check_video(&img, W, H, Some(menor), Some(10), 2, 30.0);
         assert!(!r.ok && r.problem.as_deref().is_some_and(|p| p.contains("difere")), "{r:?}");
         assert!(check_video(&img, W, H, Some(reg()), None, 2, 30.0).problem.is_some());
-        // Parado com o vídeo ainda ativo: reprova sem comparar.
         let s = check_still(&img, W, H, true, Some(10), 2);
         assert!(!s.ok && s.problem.is_some());
     }
@@ -352,7 +309,6 @@ mod tests {
         }
         let d = diff_count(&a, &b, 8, 6, Area::All);
         assert_eq!((d.count, d.bbox), (2, Some(Rect::new(2, 1, 4, 4))));
-        // Dentro e fora de um retângulo que contém só o primeiro pixel.
         let r = Rect::new(2, 1, 2, 2);
         assert_eq!(diff_count(&a, &b, 8, 6, Area::Inside(r)).count, 1);
         assert_eq!(diff_count(&a, &b, 8, 6, Area::Outside(r)).bbox, Some(Rect::new(5, 4, 1, 1)));

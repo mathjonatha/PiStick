@@ -24,14 +24,12 @@ opt-level = 3
 debug = false
 lto = "thin"
 
-# O codec é código quente; otimizado mesmo em debug mantém os testes rápidos.
 [profile.dev.package.ps-codec]
 opt-level = 3
 
 [profile.dev.package.ps-server]
 opt-level = 2
 
-# Primitivas criptográficas otimizadas mesmo em debug: os testes do canal fazem muitas trocas de chaves.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 [profile.dev.package.x25519-dalek]

@@ -1,5 +1,3 @@
-//! Atualização inteira: pasta de teste, manifesto, assinatura, verificação, e tudo o que deve ser recusado.
-//! As chaves são geradas na hora, numa pasta temporária fora de qualquer repositório; nada é commitado.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +15,6 @@ fn pasta(nome: &str) -> PathBuf {
     d
 }
 
-/// Cria uma pasta de atualização de teste com subpastas, um arquivo vazio e um com acento no nome.
 fn atualizacao(raiz: &Path) -> PathBuf {
     let dir = raiz.join("conteudo");
     fs::create_dir_all(dir.join("bin")).unwrap();
@@ -61,7 +58,6 @@ fn manifesto_de_uma_pasta_assina_e_verifica() {
     let m = verificar(&p.manifesto, &p.sig, &p.publica, Some(5)).unwrap();
     assert_eq!((m.serial, m.versao.as_str(), m.arquivos.len()), (5, "0.2.0-teste", 5));
     assert_eq!(conferir(&p.dir, &m).unwrap(), 5);
-    // Caminhos em ordem de bytes ("ação.txt" vem antes de "bin": 'a' < 'b'), com `/`.
     let nomes: Vec<&str> = m.arquivos.iter().map(|e| e.caminho.as_str()).collect();
     assert_eq!(nomes, ["ação.txt", "bin/pistick-pair", "bin/psd", "etc/pistick/psd.conf", "vazio"]);
     let _ = fs::remove_dir_all(&raiz);
@@ -88,7 +84,6 @@ fn um_bit_trocado_em_qualquer_byte_da_assinatura_e_recusado() {
         s[i / 8] ^= 1 << (i % 8);
         assert!(verificar(&p.manifesto, &s, &p.publica, None).is_err(), "bit {i} da assinatura foi aceito");
     }
-    // Truncada, vazia e com lixo no fim.
     for corte in [0, 1, p.sig.len() / 2, p.sig.len() - 1] {
         assert!(verificar(&p.manifesto, &p.sig[..corte], &p.publica, None).is_err());
     }
@@ -113,7 +108,6 @@ fn um_bit_trocado_em_qualquer_arquivo_da_pasta_e_recusado() {
             let r = conferir(&p.dir, &m);
             assert!(matches!(r, Err(Erro::Conteudo(_))), "{}: bit {i} aceito", e.caminho);
         }
-        // Byte a mais, byte a menos.
         let mut mais = original.clone();
         mais.push(0);
         fs::write(&c, &mais).unwrap();
@@ -133,7 +127,6 @@ fn arquivo_a_mais_ou_a_menos_na_pasta_e_recusado() {
     let raiz = pasta("extra");
     let p = pacote(&raiz, 1);
     let m = verificar(&p.manifesto, &p.sig, &p.publica, None).unwrap();
-    // A mais: no raiz, numa subpasta existente, numa subpasta nova, vazio, e no lugar certo da ordem.
     for novo in ["extra.txt", "bin/extra", "novo/dir/extra", "aaa", "zzz", "vazio2"] {
         let c = p.dir.join(novo);
         fs::create_dir_all(c.parent().unwrap()).unwrap();
@@ -143,11 +136,9 @@ fn arquivo_a_mais_ou_a_menos_na_pasta_e_recusado() {
         fs::remove_file(&c).unwrap();
         let _ = fs::remove_dir_all(p.dir.join("novo"));
     }
-    // O manifesto e a assinatura dentro da pasta contam como arquivo a mais.
     fs::write(p.dir.join("manifesto"), &p.manifesto).unwrap();
     assert!(conferir(&p.dir, &m).is_err());
     fs::remove_file(p.dir.join("manifesto")).unwrap();
-    // A menos.
     for c in ["bin/psd", "vazio", "ação.txt"] {
         let original = fs::read(p.dir.join(c)).unwrap();
         fs::remove_file(p.dir.join(c)).unwrap();
@@ -207,7 +198,6 @@ fn caminhos_perigosos_no_manifesto_sao_recusados_ao_montar_e_ao_assinar() {
     let _ = fs::remove_dir_all(&raiz);
 }
 
-/// Gerador pseudoaleatório pequeno (xorshift64*), determinístico: o teste é repetível.
 struct Prng(u64);
 
 impl Prng {
@@ -232,9 +222,7 @@ fn dez_mil_manifestos_pseudoaleatorios_nao_causam_panico() {
     let mut recusados = 0;
     for i in 0..10_000 {
         let bytes: Vec<u8> = match i % 4 {
-            // Bytes totalmente aleatórios.
             0 => (0..r.ate(300)).map(|_| r.proximo() as u8).collect(),
-            // Pedaços de sintaxe do manifesto em ordem aleatória.
             1 => {
                 let mut v = Vec::new();
                 for _ in 0..r.ate(40) {
@@ -242,7 +230,6 @@ fn dez_mil_manifestos_pseudoaleatorios_nao_causam_panico() {
                 }
                 v
             }
-            // Um manifesto válido com 1 a 4 bytes trocados, apagados ou inseridos.
             2 => {
                 let mut v = p.manifesto.clone();
                 for _ in 0..1 + r.ate(4) {
@@ -257,13 +244,11 @@ fn dez_mil_manifestos_pseudoaleatorios_nao_causam_panico() {
                 }
                 v
             }
-            // Um manifesto válido cortado em qualquer ponto.
             _ => p.manifesto[..r.ate(p.manifesto.len() + 1)].to_vec(),
         };
         if Manifest::parse(&bytes).is_err() {
             recusados += 1;
         }
-        // Com a assinatura boa (de outro conteúdo) e com uma assinatura aleatória: sempre recusa, nunca entra em pânico.
         assert!(verificar(&bytes, &p.sig, &p.publica, None).is_err() || bytes == p.manifesto);
         let sig_aleatoria: Vec<u8> = (0..r.ate(260)).map(|_| r.proximo() as u8).collect();
         assert!(verificar(&bytes, &sig_aleatoria, &p.publica, None).is_err());
@@ -281,7 +266,6 @@ fn keygen_dentro_de_um_repositorio_e_recusado() {
     assert!(e.to_string().contains("repositório git"), "{e}");
     assert!(!raiz.join("meu-repo/chaves/pub").exists());
     assert!(!raiz.join("meu-repo/chaves/pub.pub").exists());
-    // Fora do repositório vale.
     assert!(chaves::gerar(&raiz.join("fora")).is_ok());
     let _ = fs::remove_dir_all(&raiz);
 }

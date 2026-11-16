@@ -4,10 +4,6 @@ use ps_audio::decode;
 
 use super::*;
 
-// ---------------------------------------------------------------------------------------------------------------
-// Auxiliares
-// ---------------------------------------------------------------------------------------------------------------
-
 fn log_guardado() -> (LogFn, Arc<Mutex<Vec<String>>>) {
     let v = Arc::new(Mutex::new(Vec::<String>::new()));
     let v2 = v.clone();
@@ -29,8 +25,6 @@ fn espera(mut cond: impl FnMut() -> bool, ate: Duration) -> bool {
     cond()
 }
 
-/// Captura de mentira: conta as chamadas, registra se o "dispositivo" foi liberado ao retornar e manda pacotes
-/// constantes de amplitude `amp` a cada milissegundo até `stop`.
 struct Falsa {
     chamadas: Arc<AtomicU32>,
     liberada: Arc<AtomicBool>,
@@ -53,7 +47,6 @@ fn falsa(falha: bool, amp: i16) -> (RunFn, Falsa) {
             sink(&bloco);
             std::thread::sleep(Duration::from_millis(1));
         }
-        // O dispositivo é liberado ANTES de retornar.
         a.store(false, Ordering::SeqCst);
         l.store(true, Ordering::SeqCst);
         Ok(())
@@ -97,10 +90,6 @@ fn arquivo_temp(nome: &str, bytes: &[u8]) -> PathBuf {
     p
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Decisão de privacidade
-// ---------------------------------------------------------------------------------------------------------------
-
 #[test]
 fn sem_mic_nada_e_anunciado_em_nenhuma_conexao() {
     let o = MicOptions::default();
@@ -115,9 +104,7 @@ fn com_mic_so_anuncia_em_sessao_cifrada_pareada_ou_laco_local() {
     let o = MicOptions { enabled: true, file: None };
     assert_eq!(decide(&o, LinkTrust::Paired), Decision::Announce);
     assert_eq!(decide(&o, LinkTrust::Loopback), Decision::Announce);
-    // `--insecure` fora do laço (texto claro), ou conexão desconhecida: não anuncia, mesmo com --mic.
     assert!(matches!(decide(&o, LinkTrust::Untrusted), Decision::Blocked(_)));
-    // O padrão de `LinkTrust` é o mais seguro.
     assert_eq!(LinkTrust::default(), LinkTrust::Untrusted);
     assert!(matches!(decide(&o, LinkTrust::default()), Decision::Blocked(_)));
 }
@@ -169,10 +156,6 @@ fn arquivo_invalido_e_erro_do_plano() {
     let _ = std::fs::remove_file(ruim);
     assert!(plan(&MicOptions { enabled: true, file: Some(PathBuf::from("nao-existe-mesmo.wav")) }, LinkTrust::Loopback, &log).is_err());
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// WAV em laço
-// ---------------------------------------------------------------------------------------------------------------
 
 #[test]
 fn wav_so_aceita_48k_e_um_ou_dois_canais_e_mono_vira_estereo() {
@@ -226,13 +209,8 @@ fn captura_de_arquivo_anda_em_tempo_real_e_para_logo() {
     h.join().unwrap().unwrap();
     assert!(t0.elapsed() < Duration::from_millis(100), "parou em {:?}", t0.elapsed());
     assert_eq!(abriu.load(Ordering::SeqCst), 1);
-    // 10 ms por bloco: cerca de 30 blocos em 305 ms (margem larga para máquina ocupada).
     assert!((20..=34).contains(&n), "blocos em 305 ms: {n}");
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// A máquina de pedidos
-// ---------------------------------------------------------------------------------------------------------------
 
 #[test]
 fn sem_pedido_a_captura_nunca_abre() {
@@ -255,7 +233,6 @@ fn sem_cap_mic_o_pedido_e_contado_e_ignorado() {
     let (run, f) = falsa(false, 100);
     let (tx, rx) = mpsc::channel();
     let (log, linhas) = log_guardado();
-    // `run` existe, mas o microfone não foi anunciado: nenhuma thread, nenhuma captura.
     let mic = Mic::new(Some(run), false, tx, log);
     mic.request(true);
     mic.request(false);
@@ -279,7 +256,6 @@ fn pedido_liga_manda_start_e_dados_e_o_desligar_libera_antes_do_stop() {
     assert!(mic.is_open());
     assert!(f.aberta.load(Ordering::SeqCst));
     mic.request(false);
-    // O AUDIO_STOP só chega depois de o dispositivo ser liberado.
     let mut msgs = Vec::new();
     let fim = Instant::now() + Duration::from_secs(3);
     while Instant::now() < fim && !msgs.iter().any(|m| matches!(m, Message::AudioStop { .. })) {
@@ -350,9 +326,7 @@ fn sem_dispositivo_responde_com_audio_stop_imediato_e_tenta_de_novo_no_pedido_se
     assert!(matches!(m, Message::AudioStop { stream: 1 }), "{m:?}");
     assert!(tem_linha(&linhas, "sem captura"));
     assert!(!mic.is_open());
-    // Nenhum AUDIO_START nem AUDIO_DATA foi enviado.
     assert!(mensagens(&rx).is_empty());
-    // Um novo pedido (gravador reabriu) tenta de novo.
     mic.request(false);
     mic.request(true);
     assert!(espera(|| f.chamadas.load(Ordering::SeqCst) == 2, Duration::from_secs(3)));
@@ -372,7 +346,6 @@ fn fim_da_sessao_libera_o_dispositivo() {
     assert!(!mic.is_open());
     assert!(tem_linha(&linhas, "fim da sessão"));
     assert!(mensagens(&rx).iter().any(|m| matches!(m, Message::AudioStop { .. })));
-    // Chamar de novo é inofensivo; pedidos depois do fim são só contados.
     mic.shutdown();
     mic.request(true);
     assert_eq!(f.chamadas.load(Ordering::SeqCst), 1);
@@ -398,7 +371,6 @@ fn conexao_fechada_para_a_captura_sozinha() {
     let mic = Mic::new(Some(run), true, tx, log);
     mic.request(true);
     assert!(espera(|| mic.is_open(), Duration::from_secs(3)));
-    // A fila de saída da conexão sumiu (escritor encerrou): a captura percebe no próximo envio e libera.
     drop(rx);
     assert!(espera(|| f.liberada.load(Ordering::SeqCst), Duration::from_secs(3)), "a captura deve parar quando a conexão some");
 }

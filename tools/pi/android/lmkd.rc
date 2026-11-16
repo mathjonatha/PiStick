@@ -1,12 +1,3 @@
-# lmkd.rc do Android do Waydroid (LineageOS 20, imagem VANILLA arm64) SEM a linha `critical`.
-# (Comentarios sem acentos de proposito: este arquivo e lido pelo init do Android.)
-#
-# Instalado em /var/lib/waydroid/overlay/system/etc/init/lmkd.rc (camada `overlay` do Waydroid) por
-# tools/pi/instalar-android.sh, junto com o substituto do lmkd (lmkd-substituto.c), SO quando o kernel do
-# Pi nao tem /proc/pressure/memory (sem PSI). O `lmkd` de verdade sai com "Kernel does not support memory
-# pressure events" nesse caso; com `critical` o init do Android trataria isso como falha grave e reiniciaria
-# o container em laco. O que mudou em relacao ao arquivo da imagem: so a ausencia de `critical` no servico.
-# Origem: AOSP, system/memory/lmkd (Apache 2.0).
 service lmkd /system/bin/lmkd
     class core
     user lmkd
@@ -18,13 +9,9 @@ service lmkd /system/bin/lmkd
 on property:lmkd.reinit=1
     exec_background /system/bin/lmkd --reinit
 
-# reinitialize lmkd after device finished booting if experiments set any flags during boot
 on property:sys.boot_completed=1 && property:lmkd.reinit=0
     setprop lmkd.reinit 1
 
-# properties most likely to be used in experiments
-# setting persist.device_config.* property either triggers immediate lmkd re-initialization
-# if the device finished booting or sets lmkd.reinit=0 to re-initialize lmkd after boot completes
 on property:persist.device_config.lmkd_native.debug=*
     setprop lmkd.reinit ${sys.boot_completed:-0}
 

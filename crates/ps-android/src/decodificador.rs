@@ -1,41 +1,20 @@
-//! A parte pura do decodificador H.264 do Android (docs/26, decisão 8): a máquina de estados da saída do `AMediaCodec`,
-//! o cálculo dos planos a partir de `stride`, `slice-height` e do recorte, e a conversão do buffer em BGRX. O que fala
-//! com o NDK está em `mediacodec.rs`; tudo daqui roda e é testado no computador.
-//!
-//! Layout do buffer de saída em memória (o que os decodificadores de hardware entregam):
-//! - **NV12** (`COLOR_FormatYUV420SemiPlanar`, 21): plano Y de `slice-height` linhas de `stride` bytes; logo depois o
-//!   plano UV intercalado, `slice-height / 2` linhas de `stride` bytes;
-//! - **I420** (`COLOR_FormatYUV420Planar`, 19): plano Y como acima; depois U e V, cada um com `slice-height / 2` linhas
-//!   de `stride / 2` bytes.
-//!
-//! O quadro devolvido tem sempre o tamanho da **região** do `VIDEO_START` (o cliente de rede exige isso), tomado a
-//! partir do canto do recorte (`crop-left`, `crop-top`, alinhados para baixo a um número par). Se o buffer é menor do
-//! que o formato anuncia, é erro claro: nunca se lê fora dele.
 
 use std::time::Duration;
 
 use ps_client::video::nv12::{i420_to_bgrx, nv12_to_bgrx, ColorSpec, Matrix, Range};
 
-/// `MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar` e `COLOR_FormatYUV420SemiPlanar`.
 pub const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
 pub const COLOR_FORMAT_YUV420_SEMI_PLANAR: i32 = 21;
 
-/// Quanto esperar pela saída na primeira chamada (o hardware demora a acordar) e nas seguintes.
 pub const ESPERA_PRIMEIRA: Duration = Duration::from_millis(500);
 pub const ESPERA_NORMAL: Duration = Duration::from_millis(15);
 
-/// O que `AMediaCodec_dequeueOutputBuffer` devolveu (`media/NdkMediaCodec.h`: `AMEDIACODEC_INFO_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Retorno {
-    /// Há um buffer de saída com este índice.
     Buffer(usize),
-    /// `AMEDIACODEC_INFO_TRY_AGAIN_LATER` (-1): nada pronto neste prazo.
     TentarDepois,
-    /// `AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED` (-2): ler o formato de saída de novo.
     FormatoMudou,
-    /// `AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED` (-3, obsoleto): ignorar.
     BuffersMudaram,
-    /// Outro valor negativo: erro do decodificador.
     Erro(isize),
 }
 
@@ -49,25 +28,15 @@ pub fn classificar(r: isize) -> Retorno {
     }
 }
 
-/// O que fazer a seguir na drenagem da saída.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Acao {
-    /// Ler e liberar o buffer de saída `i` (e continuar sem esperar).
     Ler(usize),
-    /// Ler o formato de saída e tentar de novo com o mesmo prazo.
     LerFormato,
-    /// Ignorar e tentar de novo com o mesmo prazo.
     Repetir,
-    /// Não há mais quadro agora: acabar a chamada (devolve o último quadro lido, se houver).
     Terminar,
-    /// Erro do decodificador.
     Falha(String),
 }
 
-/// A máquina de estados da saída. Cada `decode` percorre a saída com [`Drenagem::acao`]; o prazo de espera da
-/// primeira leitura é [`ESPERA_PRIMEIRA`] só na **primeira chamada** do decodificador (o hardware acorda devagar) e
-/// [`ESPERA_NORMAL`] depois; as leituras seguintes da mesma chamada não esperam (`0`). Um decodificador com latência
-/// de vários quadros devolve "sem quadro" nas primeiras chamadas, sem demorar 500 ms cada.
 #[derive(Debug, Default)]
 pub struct Drenagem {
     chamadas: u64,
@@ -79,13 +48,11 @@ impl Drenagem {
         Drenagem::default()
     }
 
-    /// Começa uma chamada de `decode`.
     pub fn comecar(&mut self) {
         self.chamadas += 1;
         self.leituras = 0;
     }
 
-    /// Prazo, em microssegundos, de `dequeueOutputBuffer` na próxima leitura.
     pub fn espera_us(&self) -> i64 {
         if self.leituras > 0 {
             0
@@ -96,7 +63,6 @@ impl Drenagem {
         }
     }
 
-    /// Decide o próximo passo para o retorno `r` e registra a leitura.
     pub fn acao(&mut self, r: isize) -> Acao {
         match classificar(r) {
             Retorno::Buffer(i) => {
@@ -111,19 +77,15 @@ impl Drenagem {
     }
 }
 
-/// O formato de saída que o decodificador anuncia (`AMediaCodec_getOutputFormat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatoSaida {
     pub largura: u32,
     pub altura: u32,
-    /// `stride` e `slice-height` (`None` = o decodificador não disse: usa a largura e a altura).
     pub stride: Option<u32>,
     pub slice_height: Option<u32>,
-    /// `crop-left` e `crop-top` (`None` = zero).
     pub crop_esq: Option<i32>,
     pub crop_topo: Option<i32>,
     pub color_format: i32,
-    /// `color-standard` (1 = BT.709, 2 e 4 = BT.601) e `color-range` (1 = completa, 2 = limitada), se vierem.
     pub padrao_de_cor: Option<i32>,
     pub faixa_de_cor: Option<i32>,
 }
@@ -134,26 +96,20 @@ pub enum Pixel {
     I420,
 }
 
-/// Onde estão os planos dentro do buffer e que pedaço copiar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Planos {
     pub pixel: Pixel,
     pub stride: usize,
     pub y_off: usize,
-    /// NV12: o plano UV; I420: o plano U.
     pub u_off: usize,
     pub u_stride: usize,
-    /// I420: o plano V.
     pub v_off: usize,
-    /// Canto do recorte (pares) e tamanho do quadro devolvido.
     pub x: usize,
     pub y: usize,
     pub w: usize,
     pub h: usize,
 }
 
-/// Calcula os planos de um buffer de `tam` bytes para a região `regiao` (`largura`, `altura`, pares). Erro claro se o
-/// formato de cor não é suportado, se a região não cabe no quadro decodificado ou se o buffer é menor que o anunciado.
 pub fn calcular_planos(f: &FormatoSaida, tam: usize, regiao: (u32, u32)) -> Result<Planos, String> {
     let pixel = match f.color_format {
         COLOR_FORMAT_YUV420_SEMI_PLANAR => Pixel::Nv12,
@@ -177,7 +133,6 @@ pub fn calcular_planos(f: &FormatoSaida, tam: usize, regiao: (u32, u32)) -> Resu
     let y_tam = stride.checked_mul(slice).ok_or("tamanho do plano Y estoura")?;
     let (u_stride, u_off, v_off, fim) = match pixel {
         Pixel::Nv12 => {
-            // A última linha de UV usada termina em x + w (par), dentro da linha de `stride`.
             let ultima = y_tam + ((y + h) / 2 - 1) * stride + x + w;
             (stride, y_tam, 0, ultima)
         }
@@ -197,7 +152,6 @@ pub fn calcular_planos(f: &FormatoSaida, tam: usize, regiao: (u32, u32)) -> Resu
     Ok(Planos { pixel, stride, y_off: 0, u_off, u_stride, v_off, x, y, w, h })
 }
 
-/// Matriz e faixa a partir do que o decodificador disse; o que faltar vem da altura (como no `psc`).
 pub fn cor_de(f: &FormatoSaida, altura: u32) -> ColorSpec {
     let chute = ColorSpec::guess(altura);
     let matrix = match f.padrao_de_cor {
@@ -213,7 +167,6 @@ pub fn cor_de(f: &FormatoSaida, altura: u32) -> ColorSpec {
     ColorSpec { matrix, range }
 }
 
-/// Converte o buffer (já conferido por [`calcular_planos`]) em BGRX com linhas contíguas em `out`.
 pub fn converter(p: &Planos, buf: &[u8], cor: ColorSpec, out: &mut Vec<u8>) -> Result<(u32, u32), String> {
     out.clear();
     out.resize(p.w * p.h * 4, 0);
@@ -244,7 +197,6 @@ mod tests {
         FormatoSaida { largura: larg, altura: alt, stride, slice_height: slice, crop_esq: None, crop_topo: None, color_format: cf, padrao_de_cor: None, faixa_de_cor: None }
     }
 
-    /// Buffer NV12 com stride e slice-height dados: Y = i % 251, UV constantes (128), com lixo fora da região útil.
     fn nv12(larg: usize, alt: usize, stride: usize, slice: usize, y: u8, u: u8, v: u8) -> Vec<u8> {
         let mut b = vec![0xEEu8; stride * slice + stride * (slice / 2)];
         for r in 0..alt {
@@ -278,7 +230,6 @@ mod tests {
         let mut d = Drenagem::new();
         d.comecar();
         assert_eq!(d.espera_us(), 500_000);
-        // Formato mudou: a mesma espera ainda vale.
         assert_eq!(d.acao(-2), Acao::LerFormato);
         assert_eq!(d.espera_us(), 500_000);
         assert_eq!(d.acao(0), Acao::Ler(0));
@@ -290,11 +241,9 @@ mod tests {
 
     #[test]
     fn planos_do_nv12_com_stride_e_slice_height_maiores_e_recorte() {
-        // Quadro codificado 1280x736 (alinhado), região 1280x720, stride 1280, slice-height 736.
         let f = formato(21, 1280, 736, Some(1280), Some(736));
         let p = calcular_planos(&f, 1280 * 736 * 3 / 2, (1280, 720)).unwrap();
         assert_eq!((p.pixel, p.stride, p.u_off, p.u_stride, p.w, p.h, p.x, p.y), (Pixel::Nv12, 1280, 1280 * 736, 1280, 1280, 720, 0, 0));
-        // Stride maior que a largura (alinhamento de 32 ou 64) e crop com canto ímpar (alinha para baixo).
         let f = FormatoSaida { crop_esq: Some(3), crop_topo: Some(5), ..formato(21, 640, 400, Some(704), Some(416)) };
         let p = calcular_planos(&f, 704 * 416 * 3 / 2, (320, 200)).unwrap();
         assert_eq!((p.x, p.y, p.w, p.h, p.stride), (2, 4, 320, 200, 704));
@@ -312,7 +261,6 @@ mod tests {
         let f = formato(21, 64, 48, None, None);
         let p = calcular_planos(&f, 64 * 48 * 3 / 2, (64, 48)).unwrap();
         assert_eq!((p.stride, p.u_off), (64, 64 * 48));
-        // Stride menor que a largura (valor absurdo) é corrigido para a largura.
         let f = formato(21, 64, 48, Some(10), Some(1));
         assert_eq!(calcular_planos(&f, 64 * 48 * 3 / 2, (64, 48)).unwrap().stride, 64);
     }
@@ -324,7 +272,6 @@ mod tests {
             let e = calcular_planos(&f, tam, (1280, 720)).expect_err("buffer curto");
             assert!(e.contains("precisa de pelo menos"), "{tam}: {e}");
         }
-        // O mínimo exato passa (a última linha de UV não precisa do stride inteiro).
         assert!(calcular_planos(&f, 1280 * 736 + 1280 * 359 + 1280, (1280, 720)).is_ok());
         let f = formato(19, 64, 48, Some(64), Some(48));
         assert!(calcular_planos(&f, 64 * 48, (64, 48)).is_err());
@@ -352,7 +299,6 @@ mod tests {
         let cor = ColorSpec { matrix: Matrix::Bt709, range: Range::Limited };
         assert_eq!(converter(&p, &buf, cor, &mut out).unwrap(), (8, 4));
         assert_eq!(out.len(), 8 * 4 * 4);
-        // Cinza: B = G = R, X = 255, o mesmo em todos os pixels (nada do 0xEE do alinhamento vazou).
         let px0 = [out[0], out[1], out[2], out[3]];
         assert!(px0[0] == px0[1] && px0[1] == px0[2] && px0[3] == 255);
         assert!(out.chunks(4).all(|q| q == px0));
@@ -360,7 +306,6 @@ mod tests {
 
     #[test]
     fn conversao_i420_e_nv12_dao_a_mesma_imagem_e_o_recorte_escolhe_o_pedaco() {
-        // Y com degradê horizontal, U/V constantes; região 4x2 no canto (2, 2) de um quadro 8x6.
         let (larg, alt) = (8usize, 6usize);
         let mut y = vec![0u8; larg * alt];
         for r in 0..alt {
@@ -385,7 +330,6 @@ mod tests {
         assert_eq!(converter(&pa, &b_nv12, cor, &mut a).unwrap(), (4, 2));
         assert_eq!(converter(&pb, &b_i420, cor, &mut b).unwrap(), (4, 2));
         assert_eq!(a, b);
-        // O primeiro pixel do recorte vem do Y em (2, 2): 40 + 20 + 2 = 62; com U=100, V=160 (cor completa).
         let esperado = {
             let (yy, u, v) = (62.0f64, 100.0 - 128.0, 160.0 - 128.0);
             [(yy + 1.772 * u).round(), (yy - 0.344136 * u - 0.714136 * v).round(), (yy + 1.402 * v).round()]
@@ -402,7 +346,6 @@ mod tests {
         let p = calcular_planos(&f, buf.len(), (8, 4)).unwrap();
         let mut out = Vec::new();
         let cor = ColorSpec::guess(4);
-        // Um buffer recortado depois do cálculo (defeito do chamador) ainda não lê fora.
         assert!(converter(&p, &buf[..20], cor, &mut out).is_err());
         assert!(converter(&p, &[], cor, &mut out).is_err());
     }

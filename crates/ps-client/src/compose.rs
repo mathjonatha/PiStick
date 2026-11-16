@@ -1,43 +1,28 @@
-//! Composição de uma janela com os popups dela num só quadro BGRX: a captura "janela com os popups" do `psc` (comando
-//! `shot`) e a tela do cliente Android, que mostra a janela em foco com os popups por cima.
-//!
-//! A parte pura ([`Camada`], [`compor`]) não conhece janelas nem travas; [`compose_with_popups`] a alimenta com o
-//! registro de janelas do cliente.
 
 use crate::registry::WinInfo;
 
-/// Uma janela (a raiz ou um popup) com o quadro dela, para compor.
 #[derive(Debug, Clone)]
 pub struct Camada {
     pub id: u32,
-    /// Janela mãe (a raiz tem 0). Popups ficam na posição `x, y` **relativa ao conteúdo da mãe**.
     pub parent: u32,
     pub x: i32,
     pub y: i32,
     pub w: u32,
     pub h: u32,
-    /// BGRX, `w * h * 4` bytes.
     pub pixels: Vec<u8>,
 }
 
-/// O quadro composto: o menor retângulo que cobre a raiz e todos os popups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Composto {
     pub largura: u32,
     pub altura: u32,
-    /// BGRX, `largura * altura * 4` bytes (fundo cinza onde não há janela).
     pub pixels: Vec<u8>,
-    /// Posição do canto superior esquerdo do quadro composto em coordenadas da janela raiz (zero ou negativa: um popup
-    /// pode sair para cima ou para a esquerda da janela).
     pub origem_x: i32,
     pub origem_y: i32,
 }
 
-/// Cinza do fundo (o mesmo que o `psc` usa fora do quadro remoto).
 pub const FUNDO_BGRX: [u8; 4] = [0x30, 0x30, 0x30, 0xFF];
 
-/// Cola `src` (BGRX) em `dst` (BGRX, `dw` x `dh`) com o canto superior esquerdo em (ox, oy),
-/// recortando o que sai do destino.
 #[allow(clippy::too_many_arguments)]
 pub fn paste_bgrx(dst: &mut [u8], dw: usize, dh: usize, src: &[u8], sw: usize, sh: usize, ox: i32, oy: i32) {
     for sy in 0..sh {
@@ -57,9 +42,6 @@ pub fn paste_bgrx(dst: &mut [u8], dw: usize, dh: usize, src: &[u8], sw: usize, s
     }
 }
 
-/// Compõe `camadas` (a primeira é a raiz, em (0, 0); os popups vêm depois, o pai sempre antes do filho, na ordem de
-/// empilhamento: o último fica por cima). Popup cujo pai não está na lista é ignorado. Camada com quadro de tamanho
-/// incoerente (`pixels` menor que `w * h * 4`) é ignorada. `None` se a lista está vazia.
 pub fn compor(camadas: &[Camada]) -> Option<Composto> {
     let raiz = camadas.first()?;
     let mut itens: Vec<(&Camada, i32, i32)> = vec![(raiz, 0, 0)];
@@ -87,16 +69,12 @@ pub fn compor(camadas: &[Camada]) -> Option<Composto> {
     Some(Composto { largura: cw as u32, altura: ch as u32, pixels, origem_x: x0, origem_y: y0 })
 }
 
-/// Quadro atual de uma janela: largura, altura e pixels BGRX.
 pub fn frame_of(w: &WinInfo) -> (u32, u32, Vec<u8>) {
     let g = w.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
     (g.decoder.width(), g.decoder.height(), g.display_pixels().to_vec())
 }
 
-/// Janela `raiz` com os popups vivos sobre ela, nas posições em que o hospedeiro os mostra.
-/// `None` se a raiz não tem popup.
 pub fn compose_with_popups(root: &WinInfo, all: &[WinInfo]) -> Option<(u32, u32, Vec<u8>)> {
-    // (janela, posição absoluta) em ordem de criação; o pai sempre vem antes do filho.
     let mut ids: Vec<&WinInfo> = vec![root];
     for w in all.iter().filter(|w| w.alive && w.popup) {
         if ids.iter().any(|p| p.id == w.parent) {
@@ -147,17 +125,14 @@ mod tests {
 
     #[test]
     fn popup_que_sai_da_janela_amplia_o_quadro_e_a_origem_fica_negativa() {
-        // Um popup de 4x4 em (-2, -1) e outro, filho dele, em (3, 5) relativo ao primeiro.
         let c = compor(&[camada(1, 0, 0, 0, 6, 6, 1), camada(2, 1, -2, -1, 4, 4, 7), camada(3, 2, 3, 5, 2, 2, 5)]).unwrap();
         assert_eq!((c.origem_x, c.origem_y), (-2, -1));
-        // Largura: de -2 até max(6, -2+3+2=3, ...) = 6 => 8; altura: de -1 até max(6, -1+5+2=6) = 6 => 7.
         assert_eq!((c.largura, c.altura), (8, 7));
         let px = |x: i32, y: i32| c.pixels[(((y + 1) * 8 + (x + 2)) as usize) * 4];
         assert_eq!(px(-2, -1), 7);
         assert_eq!(px(1, 1), 7);
         assert_eq!(px(2, 2), 1);
         assert_eq!(px(1, 4), 5);
-        // Fora de qualquer janela: fundo cinza.
         assert_eq!(&c.pixels[6 * 4..][..4], &FUNDO_BGRX);
     }
 

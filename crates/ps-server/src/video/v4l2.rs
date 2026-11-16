@@ -1,13 +1,3 @@
-//! Codificador H.264 do Raspberry Pi 4 pela API V4L2 de memória para memória com plano múltiplo
-//! (`/dev/video11`, driver `bcm2835-codec`). Só Linux.
-//!
-//! Entrada: `AB24` (o BGRX do protocolo, sem conversão de cor na CPU; veja `PIX_FMT_INPUT`) na fila `OUTPUT_MPLANE`. Saída:
-//! H.264 Annex B na fila `CAPTURE_MPLANE`. Os buffers são mapeados com `mmap`.
-//!
-//! **Todo o `unsafe` do servidor para V4L2 está neste arquivo**: as chamadas `ioctl`, `mmap`,
-//! `munmap` e `poll`, cada uma com `// SAFETY:`. As estruturas do kernel são declaradas aqui (sem
-//! `bindgen`) e os testes `size_of` e de números de `ioctl` as conferem com o cabeçalho do Pi
-//! (`/usr/include/linux/videodev2.h`, aarch64).
 
 use std::fs::OpenOptions;
 use std::io;
@@ -18,14 +8,9 @@ use std::time::{Duration, Instant};
 
 use super::{EncodedFrame, VideoConfig, VideoEncoder, VideoEncoderFactory};
 
-/// Dispositivo do codificador H.264 do Pi 4.
 pub const DEFAULT_DEVICE: &str = "/dev/video11";
-/// Prazo de um quadro (entrada até a saída), como manda o trait.
 pub const ENCODE_DEADLINE: Duration = Duration::from_millis(200);
-/// Buffers em cada fila.
 const BUFFERS: u32 = 3;
-
-// ---------------------------------------------------------------- constantes do V4L2
 
 const BUF_TYPE_CAPTURE_MPLANE: u32 = 9;
 const BUF_TYPE_OUTPUT_MPLANE: u32 = 10;
@@ -39,10 +24,6 @@ const BUF_FLAG_LAST: u32 = 0x0010_0000;
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     a as u32 | (b as u32) << 8 | (c as u32) << 16 | (d as u32) << 24
 }
-/// Formato de entrada. O driver lista `BGR4` ("32-bit BGRA/X") e `AB24` ("32-bit RGBA"), mas o
-/// firmware do Pi 4 interpreta os dois com os nomes trocados em relação à memória do BGRX do
-/// protocolo (B, G, R, X): com `BGR4` as cores saem com vermelho e azul trocados (medido nas amostras
-/// de barras de cor), então a entrada usa `AB24`.
 const PIX_FMT_INPUT: u32 = fourcc(b'A', b'B', b'2', b'4');
 const PIX_FMT_H264: u32 = fourcc(b'H', b'2', b'6', b'4');
 
@@ -62,8 +43,6 @@ const BITRATE_MODE_VBR: i32 = 0;
 const H264_PROFILE_HIGH: i32 = 4;
 const H264_LEVEL_4_0: i32 = 11;
 
-// ---------------------------------------------------------------- estruturas do kernel (aarch64)
-
 #[repr(C)]
 struct Capability {
     driver: [u8; 16],
@@ -75,9 +54,6 @@ struct Capability {
     reserved: [u32; 3],
 }
 
-/// `struct v4l2_format`. A união do kernel (200 bytes, alinhada em 8 por causa de ponteiros em
-/// `v4l2_window`) é tratada como bytes; os campos de `v4l2_pix_format_mplane` são lidos e escritos por
-/// deslocamento (veja `PIX_*`), o que dispensa `unsafe` para acessar a união.
 #[repr(C)]
 struct Format {
     type_: u32,
@@ -85,7 +61,6 @@ struct Format {
     fmt: [u8; 200],
 }
 
-// Deslocamentos dentro de `Format::fmt` para `struct v4l2_pix_format_mplane` (empacotada).
 const PIX_WIDTH: usize = 0;
 const PIX_HEIGHT: usize = 4;
 const PIX_PIXELFORMAT: usize = 8;
@@ -125,7 +100,6 @@ struct RequestBuffers {
 struct Plane {
     bytesused: u32,
     length: u32,
-    /// `union { mem_offset; userptr; fd }`: 8 bytes em 64 bits.
     m: u64,
     data_offset: u32,
     reserved: [u32; 11],
@@ -144,7 +118,6 @@ struct Buffer {
     timecode: [u8; 16],
     sequence: u32,
     memory: u32,
-    /// `union { offset; userptr; planes; fd }`: aqui, o ponteiro para o vetor de `Plane`.
     m: u64,
     length: u32,
     reserved2: u32,
@@ -164,12 +137,9 @@ struct StreamParm {
     parm: [u8; 200],
 }
 
-// ---------------------------------------------------------------- ioctl
-
 const IOC_WRITE: u64 = 1;
 const IOC_READ: u64 = 2;
 
-/// `_IOC(dir, 'V', nr, size)` da convenção genérica (arm, aarch64, x86).
 const fn ioc(dir: u64, nr: u64, size: usize) -> u64 {
     (dir << 30) | ((size as u64) << 16) | ((b'V' as u64) << 8) | nr
 }
@@ -186,14 +156,8 @@ const VIDIOC_S_PARM: u64 = ioc(IOC_READ | IOC_WRITE, 22, std::mem::size_of::<Str
 const VIDIOC_S_CTRL: u64 = ioc(IOC_READ | IOC_WRITE, 28, std::mem::size_of::<Control>());
 const VIDIOC_G_CTRL: u64 = ioc(IOC_READ | IOC_WRITE, 27, std::mem::size_of::<Control>());
 
-/// Chama `ioctl(fd, req, arg)`. O tamanho de `T` já está codificado em `req` (as constantes acima o
-/// derivam de `size_of`), e os testes comparam cada número com o do cabeçalho do Pi.
 fn ioctl<T>(fd: RawFd, req: u64, arg: &mut T) -> io::Result<()> {
     loop {
-        // SAFETY: `fd` é um descritor aberto de que o chamador é dono; `arg` é uma referência exclusiva
-        // a um `T` `repr(C)` que o kernel lê e escreve no máximo `size_of::<T>()` bytes (o `req` leva
-        // esse tamanho); os ponteiros dentro de `T` (`Buffer::m` para `Plane`) apontam para memória
-        // viva do chamador durante a chamada.
         let r = unsafe { libc::ioctl(fd, req as libc::Ioctl, arg as *mut T) };
         if r >= 0 {
             return Ok(());
@@ -205,11 +169,9 @@ fn ioctl<T>(fd: RawFd, req: u64, arg: &mut T) -> io::Result<()> {
     }
 }
 
-/// Espera `fd` ficar legível (um quadro codificado pronto) por até `timeout`. `false` = prazo.
 fn poll_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
     let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-    // SAFETY: `p` é um único `pollfd` válido na pilha e `nfds` é 1.
     let r = unsafe { libc::poll(&mut p, 1, ms) };
     if r < 0 {
         let e = io::Error::last_os_error();
@@ -218,7 +180,6 @@ fn poll_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
     Ok(r > 0 && p.revents & (libc::POLLIN | libc::POLLERR) != 0)
 }
 
-/// Um buffer do driver mapeado na memória do processo.
 struct Mapping {
     ptr: usize,
     len: usize,
@@ -226,8 +187,6 @@ struct Mapping {
 
 impl Mapping {
     fn new(fd: RawFd, len: usize, offset: u32) -> io::Result<Mapping> {
-        // SAFETY: `mmap` com endereço nulo (o kernel escolhe) numa região de `len` bytes do buffer do
-        // driver que ele mesmo informou em `QUERYBUF` (`length` e `mem_offset`); o resultado é conferido.
         let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, offset as libc::off_t) };
         if p == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
@@ -236,48 +195,35 @@ impl Mapping {
     }
 
     fn as_slice(&self) -> &[u8] {
-        // SAFETY: `ptr` e `len` vêm de um `mmap` bem-sucedido que só é desfeito no `Drop`. O buffer só
-        // é lido depois do `DQBUF`, quando o driver já o devolveu ao programa.
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: como em `as_slice`; `&mut self` garante acesso exclusivo deste lado, e o buffer
-        // mapeado de saída está com o programa (não enfileirado) quando é preenchido.
         unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.len) }
     }
 }
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: `ptr` e `len` são exatamente os de um `mmap` que ainda não foi desfeito; nenhuma
-        // referência a ele sobrevive, pois `as_slice` e `as_mut_slice` emprestam de `self`.
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.len);
         }
     }
 }
 
-// ---------------------------------------------------------------- o codificador
-
-/// O que o driver aceitou na fila de entrada (para relatórios e testes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Negotiated {
     pub width: u32,
     pub height: u32,
-    /// Bytes por linha do buffer de entrada.
     pub bytes_per_line: u32,
-    /// Tamanho do buffer de entrada.
     pub size_image: u32,
     pub colorspace: u32,
     pub ycbcr_enc: u32,
     pub quantization: u32,
     pub xfer_func: u32,
-    /// Tamanho do buffer de saída (H.264).
     pub capture_size: u32,
 }
 
-/// Contadores para medir o atraso do driver.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counters {
     pub frames_in: u64,
@@ -291,19 +237,14 @@ pub struct V4l2Encoder {
     size_image: u32,
     out_bufs: Vec<Mapping>,
     cap_bufs: Vec<Mapping>,
-    /// Buffers de entrada que o programa pode preencher.
     out_free: Vec<u32>,
     first: bool,
     negotiated: Negotiated,
     counters: Counters,
-    /// Controles aplicados e lidos de volta na abertura (linha de log).
     description: String,
-    /// Tem de ser o último campo: os campos são soltos na ordem de declaração, e os `Mapping` fazem `munmap` antes de o descritor fechar.
     fd: OwnedFd,
 }
 
-/// Tamanho mínimo, em bytes, que um buffer de entrada mapeado precisa ter para receber `height` linhas
-/// de `width` pixels BGRX com `stride` bytes por linha (a última linha não precisa do preenchimento).
 fn min_input_len(width: u32, height: u32, stride: u32) -> usize {
     (stride as usize) * (height as usize).saturating_sub(1) + width as usize * 4
 }
@@ -328,7 +269,6 @@ impl V4l2Encoder {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "o dispositivo não é um codec M2M de plano múltiplo com streaming"));
         }
 
-        // Entrada: BGR4, BT.709 em faixa limitada (o que o driver aceitar fica em `negotiated`).
         let mut f = Format::new(BUF_TYPE_OUTPUT_MPLANE);
         f.set_u32(PIX_WIDTH, cfg.width);
         f.set_u32(PIX_HEIGHT, cfg.height);
@@ -362,7 +302,6 @@ impl V4l2Encoder {
             capture_size: 0,
         };
 
-        // Saída: H.264.
         let mut c = Format::new(BUF_TYPE_CAPTURE_MPLANE);
         c.set_u32(PIX_WIDTH, cfg.width);
         c.set_u32(PIX_HEIGHT, cfg.height);
@@ -376,14 +315,12 @@ impl V4l2Encoder {
         }
         negotiated.capture_size = c.u32_at(PIX_PLANE0_SIZEIMAGE);
 
-        // Controles. A taxa de bits é obrigatória; os outros só afinam o fluxo e o driver pode recusar.
         let bitrate = cfg.bitrate.clamp(25_000, 25_000_000) as i32;
         set_ctrl(raw, CID_BITRATE, bitrate).map_err(|e| io_err("taxa de bits", e))?;
         let mut applied = vec![Applied { name: "taxa", cid: CID_BITRATE, wanted: bitrate, result: Ok(()) }];
         for (name, cid, wanted) in [("modo", CID_BITRATE_MODE, BITRATE_MODE_VBR), ("perfil", CID_H264_PROFILE, H264_PROFILE_HIGH), ("nível", CID_H264_LEVEL, H264_LEVEL_4_0)] {
             applied.push(Applied { name, cid, wanted, result: set_ctrl(raw, cid, wanted) });
         }
-        // Sem quadros-chave periódicos: o período de quadros I vai ao máximo que o controle aceitar.
         let mut i_period = Applied { name: "i_period", cid: CID_H264_I_PERIOD, wanted: i32::MAX, result: Err(io::Error::other("nenhum valor aceito")) };
         for p in [i32::MAX, 1 << 24, 1 << 20, 60_000] {
             i_period.wanted = p;
@@ -395,10 +332,9 @@ impl V4l2Encoder {
         applied.push(i_period);
         let max_qp = cfg.max_qp.clamp(1, 51) as i32;
         applied.push(Applied { name: "qp_max", cid: CID_H264_MAX_QP, wanted: max_qp, result: set_ctrl(raw, CID_H264_MAX_QP, max_qp) });
-        // Quadros por segundo (afina o controle de taxa); opcional.
         let mut parm = StreamParm { type_: BUF_TYPE_OUTPUT_MPLANE, parm: [0; 200] };
-        parm.parm[8..12].copy_from_slice(&1u32.to_ne_bytes()); // timeperframe.numerator
-        parm.parm[12..16].copy_from_slice(&cfg.fps.max(1).to_ne_bytes()); // timeperframe.denominator
+        parm.parm[8..12].copy_from_slice(&1u32.to_ne_bytes());
+        parm.parm[12..16].copy_from_slice(&cfg.fps.max(1).to_ne_bytes());
         let _ = ioctl(raw, VIDIOC_S_PARM, &mut parm);
 
         let out_bufs = request_and_map(raw, BUF_TYPE_OUTPUT_MPLANE)?;
@@ -406,12 +342,10 @@ impl V4l2Encoder {
         if out_bufs.is_empty() || cap_bufs.is_empty() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "o driver não concedeu buffers em uma das filas"));
         }
-        // O `encode` copia linha a linha e informa `size_image` no `QBUF`: o buffer mapeado precisa comportar os dois.
         let need = min_input_len(width, height, stride).max(size_image as usize);
         if let Some(m) = out_bufs.iter().find(|m| m.len < need) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("buffer de entrada mapeado com {} bytes; o necessário é {need} ({width}x{height}, {stride} bytes por linha, size_image {size_image})", m.len)));
         }
-        // Os buffers de saída começam com o driver, prontos para receber quadros codificados.
         for i in 0..cap_bufs.len() as u32 {
             queue(raw, BUF_TYPE_CAPTURE_MPLANE, i, 0)?;
         }
@@ -424,7 +358,6 @@ impl V4l2Encoder {
         Ok(V4l2Encoder { width, height, stride: stride as usize, size_image, out_bufs, cap_bufs, out_free, first: true, negotiated, counters: Counters::default(), description, fd })
     }
 
-    /// O que o driver aceitou na entrada.
     pub fn negotiated(&self) -> Negotiated {
         self.negotiated
     }
@@ -433,7 +366,6 @@ impl V4l2Encoder {
         self.counters
     }
 
-    /// Recolhe os buffers de entrada que o driver já consumiu (sem bloquear).
     fn reclaim_inputs(&mut self) -> io::Result<()> {
         while let Some(index) = dequeue(self.fd.as_raw_fd(), BUF_TYPE_OUTPUT_MPLANE)? {
             self.out_free.push(index.0);
@@ -442,7 +374,6 @@ impl V4l2Encoder {
     }
 }
 
-/// Um controle aplicado na abertura: o que se pediu e o que o driver respondeu.
 struct Applied {
     name: &'static str,
     cid: u32,
@@ -456,7 +387,6 @@ fn get_ctrl(fd: RawFd, id: u32) -> io::Result<i32> {
     Ok(c.value)
 }
 
-/// Texto legível do valor de um controle lido de volta.
 fn ctrl_text(name: &str, v: i32) -> String {
     match name {
         "modo" => match v {
@@ -485,14 +415,11 @@ fn ctrl_text(name: &str, v: i32) -> String {
     }
 }
 
-/// Linha de log com os controles lidos de volta (`VIDIOC_G_CTRL`) depois de aplicados. Marca com `!` o
-/// que o driver recusou ou ajustou (valor lido diferente do pedido).
 fn describe_controls(fd: RawFd, cfg: &VideoConfig, applied: &[Applied]) -> String {
     let mut out = format!("codificador: {}x{}", cfg.width, cfg.height);
     for a in applied {
         let lido = get_ctrl(fd, a.cid);
         let valor = lido.as_ref().map_or("?".to_string(), |v| ctrl_text(a.name, *v));
-        // O QP máximo aparece junto do mínimo: `qp=MIN..MAX`.
         if a.name == "qp_max" {
             let min = get_ctrl(fd, CID_H264_MIN_QP).map_or("?".to_string(), |v| v.to_string());
             out += &format!(" qp={min}..{valor}");
@@ -513,7 +440,6 @@ fn set_ctrl(fd: RawFd, id: u32, value: i32) -> io::Result<()> {
     ioctl(fd, VIDIOC_S_CTRL, &mut c)
 }
 
-/// `REQBUFS` + `QUERYBUF` + `mmap` de uma fila.
 fn request_and_map(fd: RawFd, type_: u32) -> io::Result<Vec<Mapping>> {
     let mut rb = RequestBuffers { count: BUFFERS, type_, memory: MEMORY_MMAP, capabilities: 0, flags: 0, reserved: [0; 3] };
     ioctl(fd, VIDIOC_REQBUFS, &mut rb).map_err(|e| io_err("REQBUFS", e))?;
@@ -525,13 +451,11 @@ fn request_and_map(fd: RawFd, type_: u32) -> io::Result<Vec<Mapping>> {
         let mut plane = Plane::default();
         let mut b = new_buffer(type_, index, &mut plane);
         ioctl(fd, VIDIOC_QUERYBUF, &mut b).map_err(|e| io_err("QUERYBUF", e))?;
-        // `m` do plano é a união `mem_offset` (32 bits) para `V4L2_MEMORY_MMAP`.
         maps.push(Mapping::new(fd, plane.length as usize, plane.m as u32).map_err(|e| io_err("mmap", e))?);
     }
     Ok(maps)
 }
 
-/// `v4l2_buffer` de um plano. `plane` tem de viver até o fim do `ioctl` (o buffer guarda o endereço).
 fn new_buffer(type_: u32, index: u32, plane: &mut Plane) -> Buffer {
     Buffer {
         index,
@@ -553,17 +477,14 @@ fn new_buffer(type_: u32, index: u32, plane: &mut Plane) -> Buffer {
     }
 }
 
-/// `QBUF` com `bytesused` no plano 0.
 fn queue(fd: RawFd, type_: u32, index: u32, bytesused: u32) -> io::Result<()> {
     let mut plane = Plane { bytesused, ..Plane::default() };
     let mut b = new_buffer(type_, index, &mut plane);
     ioctl(fd, VIDIOC_QBUF, &mut b).map_err(|e| io_err("QBUF", e))
 }
 
-/// Resultado de um `DQBUF`: índice, bytes usados, deslocamento dos dados e flags.
 type Dequeued = (u32, u32, u32, u32);
 
-/// `DQBUF` sem bloquear: `None` se não há buffer pronto.
 fn dequeue(fd: RawFd, type_: u32) -> io::Result<Option<Dequeued>> {
     let mut plane = Plane::default();
     let mut b = new_buffer(type_, 0, &mut plane);
@@ -590,7 +511,6 @@ impl VideoEncoder for V4l2Encoder {
         let index = match self.out_free.pop() {
             Some(i) => i,
             None => {
-                // Todos os buffers de entrada estão com o driver: espera algum voltar.
                 let fim = started + ENCODE_DEADLINE;
                 loop {
                     std::thread::sleep(Duration::from_millis(1));
@@ -604,7 +524,6 @@ impl VideoEncoder for V4l2Encoder {
                 }
             }
         };
-        // Copia a região linha a linha para o buffer, respeitando os bytes por linha do driver.
         let dst = self.out_bufs[index as usize].as_mut_slice();
         let line = w * 4;
         for row in 0..h {
@@ -613,7 +532,6 @@ impl VideoEncoder for V4l2Encoder {
         queue(raw, BUF_TYPE_OUTPUT_MPLANE, index, self.size_image)?;
         self.counters.frames_in += 1;
 
-        // Espera o quadro codificado.
         loop {
             let restante = ENCODE_DEADLINE.saturating_sub(started.elapsed());
             if let Some((i, used, offset, flags)) = dequeue(raw, BUF_TYPE_CAPTURE_MPLANE)? {
@@ -652,12 +570,9 @@ impl Drop for V4l2Encoder {
             let mut ty = t as i32;
             let _ = ioctl(raw, VIDIOC_STREAMOFF, &mut ty);
         }
-        // Depois deste `drop`, os campos são soltos na ordem de declaração: os `Mapping` fazem `munmap` e,
-        // por último (`fd` é o último campo), o `OwnedFd` fecha o descritor.
     }
 }
 
-/// Fábrica do codificador do Pi.
 pub struct V4l2Factory {
     device: PathBuf,
 }
@@ -667,7 +582,6 @@ impl V4l2Factory {
         V4l2Factory { device: device.into() }
     }
 
-    /// O dispositivo padrão existe?
     pub fn default_available() -> bool {
         Path::new(DEFAULT_DEVICE).exists()
     }
@@ -690,8 +604,6 @@ mod tests {
     use super::*;
     use std::mem::size_of;
 
-    /// Valores impressos por um programa em C compilado no Pi contra `/usr/include/linux/videodev2.h`
-    /// (aarch64, Linux 6.18).
     #[test]
     fn tamanhos_das_estruturas_batem_com_o_cabecalho_do_pi() {
         assert_eq!(size_of::<Capability>(), 104);
@@ -701,8 +613,6 @@ mod tests {
         assert_eq!(size_of::<Buffer>(), 88);
         assert_eq!(size_of::<Control>(), 8);
         assert_eq!(size_of::<StreamParm>(), 204);
-        // `v4l2_pix_format_mplane` (192) e `v4l2_plane_pix_format` (20) são acessadas por deslocamento:
-        // 20 + 8 * 20 = 180 bytes até `num_planes`, e 192 no total.
         assert_eq!(PIX_NUM_PLANES, 20 + 8 * 20);
         assert_eq!(PIX_XFER_FUNC + 1 + 7, 192);
         assert_eq!(size_of::<Format>() - 8, 200);
@@ -725,7 +635,6 @@ mod tests {
 
     #[test]
     fn tamanho_minimo_do_buffer_de_entrada() {
-        // A última linha dispensa o preenchimento do passo.
         assert_eq!(min_input_len(640, 384, 2560), 2560 * 383 + 640 * 4);
         assert_eq!(min_input_len(640, 384, 2688), 2688 * 383 + 2560);
         assert_eq!(min_input_len(32, 1, 4096), 128);

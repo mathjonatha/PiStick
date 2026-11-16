@@ -1,28 +1,6 @@
-//! Codec PSA1: sem perdas, por pacote, sem estado entre pacotes (cada pacote decodifica sozinho).
-//!
-//! # Formato de bits
-//!
-//! ```text
-//! u16  n            quadros no pacote (1..=MAX_FRAMES), little-endian
-//! por canal (1 ou 2), nesta ordem (estéreo: 0 = meio, 1 = lado):
-//!   u8  ordem       0..=4, ordem do preditor fixo
-//!   u8  k           0..=15 = parâmetro de Rice; 255 = canal em PCM cru
-//!   fluxo de bits do canal, MSB primeiro, preenchido com zeros até o próximo byte:
-//!     `ordem` amostras de aquecimento, cruas, `largura` bits cada, complemento de dois
-//!     n - ordem resíduos (se k != 255), cada um em zigue-zague: u = (r << 1) ^ (r >> 63)
-//!       q = u >> k, q < 32:  q bits 1, um bit 0, depois os k bits baixos de u
-//!       q >= 32:             32 bits 1 (sem zero), depois u em 32 bits crus (escape)
-//!     canal cru (k = 255): ordem é 0 e as n amostras vêm cruas, `largura` bits cada
-//! ```
-//!
-//! `largura` é 16 para mono e para o canal meio; 17 só para o canal lado do estéreo.
-//! Estéreo: `m = (l + r) >> 1`, `s = l - r`; inverso: `m2 = (m << 1) | (s & 1)`, `l = (m2 + s) >> 1`,
-//! `r = (m2 - s) >> 1`. Preditores: ordem 0 `0`; 1 `x1`; 2 `2x1 - x2`; 3 `3x1 - 3x2 + x3`;
-//! 4 `4x1 - 6x2 + 4x3 - x4`; resíduo = `x - predição`.
 
 use std::fmt;
 
-/// Máximo de quadros por pacote (100 ms a 48 kHz).
 pub const MAX_FRAMES: usize = 4800;
 
 const ESCAPE_Q: u32 = 32;
@@ -30,9 +8,7 @@ const RAW_K: u8 = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
-    /// Canais diferentes de 1 ou 2.
     BadChannels,
-    /// Zero quadros, mais que [`MAX_FRAMES`], ou amostras que não fecham quadros inteiros.
     BadLength,
 }
 
@@ -47,21 +23,14 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// Erro de decodificação. Nunca há pânico com entrada inválida.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     BadChannels,
-    /// A carga acabou antes do esperado.
     Truncated,
-    /// Bytes sobrando depois do último canal, ou bits de preenchimento diferentes de zero.
     TrailingData,
-    /// `n` zero ou acima de [`MAX_FRAMES`].
     BadFrames,
-    /// Ordem do preditor acima de 4 ou maior que `n`.
     BadOrder,
-    /// Parâmetro de Rice inválido, ou cru com ordem diferente de zero.
     BadParam,
-    /// Uma amostra reconstruída saiu da faixa do canal (não decorre de um codificador correto).
     OutOfRange,
 }
 
@@ -93,7 +62,6 @@ impl<'a> BitWriter<'a> {
         BitWriter { out, acc: 0, nbits: 0 }
     }
 
-    /// Escreve os `n` bits baixos de `v` (n <= 32), MSB primeiro.
     fn put(&mut self, v: u64, n: u32) {
         debug_assert!(n <= 32);
         if n == 0 {
@@ -126,7 +94,6 @@ impl<'a> BitWriter<'a> {
 
 struct BitReader<'a> {
     data: &'a [u8],
-    /// Posição em bits.
     pos: usize,
 }
 
@@ -148,7 +115,6 @@ impl<'a> BitReader<'a> {
         Ok(b as u32)
     }
 
-    /// Lê `n` bits (n <= 32), MSB primeiro.
     fn get(&mut self, n: u32) -> Result<u64, DecodeError> {
         if (n as usize) > self.remaining() {
             return Err(DecodeError::Truncated);
@@ -160,7 +126,6 @@ impl<'a> BitReader<'a> {
         Ok(v)
     }
 
-    /// Descarta os bits até o próximo byte; exige que sejam zero.
     fn align(&mut self) -> Result<(), DecodeError> {
         while self.pos & 7 != 0 {
             if self.bit()? != 0 {
@@ -193,8 +158,6 @@ fn predict(order: usize, x: &[i32], i: usize) -> i64 {
     }
 }
 
-/// Soma dos resíduos em zigue-zague do canal com `order`. Em `i32` (as amostras têm até 17 bits e os
-/// coeficientes somam 16 em módulo no máximo, então nada estoura) e com um laço próprio por ordem.
 fn residual_sum(x: &[i32], order: usize) -> u64 {
     #[inline(always)]
     fn zz(r: i32) -> u64 {
@@ -211,8 +174,6 @@ fn residual_sum(x: &[i32], order: usize) -> u64 {
     sum
 }
 
-/// Melhor `k` e custo estimado em bits para `count` resíduos de soma `sum`: parte da média (como no FLAC) e
-/// escolhe entre os vizinhos pela estimativa `count * (k + 1) + (sum >> k)` (o quociente de Rice somado).
 fn pick_k(count: u64, sum: u64) -> (u64, u8) {
     let mean = (sum / count.max(1)).max(1);
     let k0 = (63 - mean.leading_zeros()).min(15) as i32;
@@ -228,9 +189,6 @@ fn pick_k(count: u64, sum: u64) -> (u64, u8) {
 
 fn encode_channel(x: &[i32], width: u32, out: &mut Vec<u8>) {
     let n = x.len();
-    // Para cada ordem, uma passada pelos resíduos dá a soma, de onde sai o `k` provável e o custo estimado em
-    // bits. Fica com a ordem de menor custo (para ao primeiro aumento) e, se nenhuma ganhar do cru, usa o cru.
-    // A estimativa só escolhe: o que sai é sempre sem perdas, e o decodificador não depende dela.
     let mut best_order = 0usize;
     let mut best_k = RAW_K;
     let mut best_bits = n as u64 * width as u64;
@@ -277,7 +235,6 @@ fn encode_channel(x: &[i32], width: u32, out: &mut Vec<u8>) {
     w.finish();
 }
 
-/// Codifica `pcm` (amostras intercaladas, `channels` por quadro) e acrescenta o pacote em `out`.
 pub fn encode(pcm: &[i16], channels: usize, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     if channels != 1 && channels != 2 {
         return Err(EncodeError::BadChannels);
@@ -351,8 +308,6 @@ fn decode_channel(r: &mut BitReader<'_>, n: usize, width: u32, hdr: (u8, u8), x:
     r.align()
 }
 
-/// Decodifica um pacote, acrescentando as amostras intercaladas em `out`. Devolve o número de quadros.
-/// Em erro, `out` fica como estava.
 pub fn decode(data: &[u8], channels: usize, out: &mut Vec<i16>) -> Result<usize, DecodeError> {
     if channels != 1 && channels != 2 {
         return Err(DecodeError::BadChannels);

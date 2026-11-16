@@ -6,12 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-# `cdylib` é o que o Android carrega (`libps_android.so`); `rlib` deixa o `cargo test` do computador testar a lógica
-# pura. Fora do Android a biblioteca é vazia (todo o código de plataforma está sob `cfg(target_os = "android")`).
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# O núcleo sem a interface de desktop (docs/26, decisão 4).
 ps-client = { path = "../ps-client", default-features = false }
 ps-audio = { path = "../ps-audio" }
 ps-proto = { path = "../ps-proto" }
@@ -19,10 +16,8 @@ ps-secure = { path = "../ps-secure" }
 ps-transport = { path = "../ps-transport" }
 
 [dev-dependencies]
-# Os testes da sessão sobem um psd de verdade (serve_secure) no laço local.
 ps-server = { path = "../ps-server" }
 ps-codec = { path = "../ps-codec" }
 
-# Só as declarações da tabela de funções do JNI (docs/26, "Dependências aprovadas"); só no Android.
 [target.'cfg(target_os = "android")'.dependencies]
 jni-sys = "=0.3.0"

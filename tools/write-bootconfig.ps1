@@ -1,5 +1,3 @@
-# Escreve a configuração de primeiro boot (cloud-init) na partição "bootfs" do cartão.
-# Não precisa de administrador. Pode ser rodado de novo com segurança.
 param(
     [string]$Root = "C:\Users\math\Documents\Raspberry",
     [string]$HostName = "pi-stick",
@@ -64,7 +62,6 @@ network:
     "sem perfil Wi-Fi exportado: network-config mantido; use cabo de rede"
 }
 
-# Porta USB-C em modo periférico, para o gadget USB próprio do projeto
 $cfg = Get-Content "$b\config.txt" -Raw
 if ($cfg -notmatch 'dr_mode=peripheral') {
     WriteLf "$b\config.txt" ($cfg.TrimEnd() + "`n`n[all]`n# pistick: porta USB-C como dispositivo (gadget)`ndtoverlay=dwc2,dr_mode=peripheral`n")

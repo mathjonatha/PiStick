@@ -1,35 +1,27 @@
-//! Tradução de texto em teclas de um teclado ABNT2 (layout `br` no servidor). Usada pelo
-//! roteiro de teste (`type "echo ação\n"`, veja `crate::script` (só com a feature `desktop`)).
 
 const KEY_ENTER: u32 = 28;
 const KEY_SPACE: u32 = 57;
-/// Tecla da posição do apóstrofo no US: no ABNT2 é a do til (`~`) e, com Shift, do circunflexo (`^`).
 const KEY_TILDE: u32 = 40;
-/// Tecla da posição do colchete no US: no ABNT2 é a do acento agudo (`´`) e, com Shift, do grave.
 const KEY_ACUTE: u32 = 26;
 const KEY_CCEDILLA: u32 = 39;
 
-/// Uma batida de tecla: teclas mortas primeiro, depois a base, com Shift se preciso.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stroke {
     pub shift: bool,
     pub code: u32,
 }
 
-/// Código evdev de uma letra sem acento.
 fn letter(c: char) -> Option<u32> {
     const ROWS: [(&str, u32); 3] = [("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44)];
     let c = c.to_ascii_lowercase();
     ROWS.iter().find_map(|(row, base)| row.find(c).map(|i| base + i as u32))
 }
 
-/// Teclas necessárias para produzir `c` no layout ABNT2.
 pub fn strokes_for(c: char) -> Option<Vec<Stroke>> {
     let s = |shift, code| Stroke { shift, code };
     if let Some(code) = letter(c) {
         return Some(vec![s(c.is_ascii_uppercase(), code)]);
     }
-    // Letras acentuadas: tecla morta + vogal.
     let acentuadas: [(char, bool, u32, char); 12] = [
         ('ã', false, KEY_TILDE, 'a'),
         ('õ', false, KEY_TILDE, 'o'),
@@ -60,9 +52,9 @@ pub fn strokes_for(c: char) -> Option<Vec<Stroke>> {
         '.' => vec![s(false, 52)],
         ';' => vec![s(false, 53)],
         ':' => vec![s(true, 53)],
-        '/' => vec![s(false, 89)], // KEY_RO, a tecla extra do ABNT2
+        '/' => vec![s(false, 89)],
         '?' => vec![s(true, 89)],
-        '\\' => vec![s(false, 86)], // KEY_102ND
+        '\\' => vec![s(false, 86)],
         '|' => vec![s(true, 86)],
         '\'' => vec![s(false, 41)],
         '"' => vec![s(true, 41)],
@@ -87,7 +79,6 @@ pub fn strokes_for(c: char) -> Option<Vec<Stroke>> {
     })
 }
 
-/// Interpreta `\n` literal como Enter e devolve as batidas do texto inteiro.
 pub fn text_to_strokes(text: &str) -> Vec<Stroke> {
     let texto = text.replace("\\n", "\n");
     texto.chars().filter_map(strokes_for).flatten().collect()

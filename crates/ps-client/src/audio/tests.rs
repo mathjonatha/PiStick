@@ -5,12 +5,10 @@ use super::dump::{read_wav, WavDump};
 use super::*;
 
 const BLOCK: usize = 480;
-/// Alvo fixo de 40 ms e descarte 100 ms acima (os testes simples usam `QueueConfig::fixed_ms(40)`).
 const TARGET_FRAMES: usize = 40 * 48;
 const MAX_FRAMES: usize = 140 * 48;
 const ADJUST_ON_FRAMES: f64 = 10.0 * 48.0;
 
-/// Pacote de 480 quadros "com som": a amostra esquerda é um contador crescente (nunca zero), a direita o negativo.
 fn pkt(counter: &mut i32) -> Vec<i16> {
     let mut v = Vec::with_capacity(BLOCK * 2);
     for _ in 0..BLOCK {
@@ -21,8 +19,6 @@ fn pkt(counter: &mut i32) -> Vec<i16> {
     v
 }
 
-/// Simulação em tempo virtual: o consumidor puxa 10 ms a cada 10 ms; o produtor entrega 480 quadros a cada
-/// `480 / prod_hz` segundos (produtor mais rápido ou mais lento que o consumidor = desvio de relógio).
 fn simula(q: &mut JitterQueue, prod_hz: f64, segundos: f64, mut a_cada_tick: impl FnMut(&JitterQueue)) {
     let mut counter = 0;
     let mut t_prod = 0.0f64;
@@ -45,14 +41,12 @@ fn espera_encher_ate_o_alvo_antes_de_tocar() {
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     let mut c = 0;
     let mut out = vec![1i16; BLOCK * 2];
-    // 3 pacotes = 30 ms < 40 ms: ainda em formação, saída em silêncio.
     for _ in 0..3 {
         q.push(&pkt(&mut c), false);
     }
     q.pull(&mut out);
     assert!(out.iter().all(|&s| s == 0));
     assert!(!q.is_playing());
-    // O quarto pacote fecha 40 ms: passa a tocar, e a saída é o primeiro pacote, sem perda.
     q.push(&pkt(&mut c), false);
     assert!(q.is_playing());
     q.pull(&mut out);
@@ -81,7 +75,6 @@ fn regime_estavel_mantem_o_nivel_no_alvo_sem_esvaziar() {
 
 #[test]
 fn passagem_sem_perdas_quando_nao_ha_desvio() {
-    // O que sai é exatamente o que entrou, a partir do primeiro pacote.
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     let mut c = 0;
     let mut entrada = Vec::new();
@@ -111,7 +104,6 @@ fn falta_de_dados_conta_esvaziamento_e_refaz_o_alvo() {
     for _ in 0..6 {
         q.push(&pkt(&mut c), false);
     }
-    // 6 pacotes na fila e nada mais chega: toca 6, no sétimo puxão a fila está vazia.
     for _ in 0..6 {
         q.pull(&mut out);
         assert!(out.iter().any(|&s| s != 0));
@@ -121,7 +113,6 @@ fn falta_de_dados_conta_esvaziamento_e_refaz_o_alvo() {
     assert!(out.iter().all(|&s| s == 0));
     assert_eq!(q.stats().underruns, 1);
     assert!(!q.is_playing());
-    // Um pacote não basta (10 ms < alvo): silêncio. Quatro pacotes fecham o alvo.
     q.push(&pkt(&mut c), false);
     q.pull(&mut out);
     assert!(out.iter().all(|&s| s == 0));
@@ -141,7 +132,6 @@ fn esvaziamento_no_meio_do_bloco_completa_com_silencio() {
     }
     let mut out = vec![0i16; BLOCK * 2 * 6];
     q.pull(&mut out);
-    // 4 pacotes de som seguidos de 2 de silêncio.
     assert!(out[..BLOCK * 2 * 4].iter().all(|&s| s != 0));
     assert!(out[BLOCK * 2 * 4..].iter().all(|&s| s == 0));
     assert_eq!(q.stats().underruns, 1);
@@ -155,17 +145,14 @@ fn fim_de_trecho_de_silencio_nao_e_esvaziamento() {
     for _ in 0..5 {
         q.push(&pkt(&mut c), false);
     }
-    // O servidor manda 200 ms de zeros antes de parar.
     for _ in 0..20 {
         q.push(&vec![0i16; BLOCK * 2], false);
     }
-    // Depois disso nada chega por um bom tempo: a fila toca tudo e esvazia.
     for _ in 0..200 {
         q.pull(&mut out);
     }
     assert_eq!(q.stats().underruns, 0);
     assert!(!q.is_playing());
-    // O som volta com a marca de descontinuidade: recomeça e espera o alvo.
     for k in 0..4 {
         q.push(&pkt(&mut c), k == 0);
     }
@@ -176,18 +163,15 @@ fn fim_de_trecho_de_silencio_nao_e_esvaziamento() {
 fn rajada_acima_do_maximo_descarta_o_excesso_de_uma_vez() {
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     let mut c = 0;
-    // 30 pacotes (300 ms) de uma vez.
     q.push(&(0..30).flat_map(|_| pkt(&mut c)).collect::<Vec<_>>(), false);
     let s = q.stats();
     assert_eq!(s.overflows, 1);
     assert_eq!(q.level_frames(), TARGET_FRAMES);
     assert_eq!(s.overflow_frames as usize, 30 * BLOCK - TARGET_FRAMES);
     assert!(q.is_playing());
-    // O que ficou é o fim da rajada (os mais velhos saíram).
     let mut out = vec![0i16; 2];
     q.pull(&mut out);
     assert_ne!(out[0], 0);
-    // Rajadas dentro do máximo (100 ms) não descartam nada.
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     q.push(&(0..10).flat_map(|_| pkt(&mut c)).collect::<Vec<_>>(), false);
     assert_eq!(q.stats().overflows, 0);
@@ -210,7 +194,6 @@ fn descontinuidade_recomeca_a_fila() {
 
 #[test]
 fn produtor_mais_rapido_que_o_consumidor_e_corrigido_sem_estourar() {
-    // +0,1%: 48 quadros por segundo a mais. Sem correção o nível passaria de 40 para mais de 120 ms em ~3 min.
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     let mut max = 0usize;
     simula(&mut q, 48_048.0, 600.0, |q| max = max.max(q.level_frames()));
@@ -241,7 +224,6 @@ fn produtor_mais_lento_que_o_consumidor_e_corrigido_sem_esvaziar() {
 
 #[test]
 fn desvio_pequeno_dentro_de_10_ms_nao_aciona_a_correcao() {
-    // 0,005%: em 60 s a diferença é de 144 quadros (3 ms), abaixo do limiar de 10 ms.
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     simula(&mut q, 48_002.4, 60.0, |_| {});
     let s = q.stats();
@@ -250,7 +232,6 @@ fn desvio_pequeno_dentro_de_10_ms_nao_aciona_a_correcao() {
 
 #[test]
 fn correcao_rapida_remove_no_maximo_um_quadro_a_cada_2_ms() {
-    // +1%: o nível sobe 480 quadros por segundo; a correção rápida (1 a cada 96) dá conta e fica limitada.
     let mut q = JitterQueue::new(QueueConfig::fixed_ms(40));
     simula(&mut q, 48_480.0, 30.0, |_| {});
     let s = q.stats();
@@ -259,7 +240,6 @@ fn correcao_rapida_remove_no_maximo_um_quadro_a_cada_2_ms() {
     assert_eq!((s.underruns, s.overflows), (0, 0));
 }
 
-/// Seno de 440 Hz e amplitude 8000 em estéreo (os dois canais iguais), `frames` quadros.
 fn seno(frames: usize) -> Vec<i16> {
     (0..frames)
         .flat_map(|i| {
@@ -275,8 +255,6 @@ fn maior_degrau(x: &[i16]) -> i32 {
 
 #[test]
 fn emenda_da_correcao_nao_faz_degrau() {
-    // O degrau natural do seno é 2*pi*440/48000*8000 = 461. Remover um quadro "no seco" dá 2x (922); a média
-    // com o vizinho dá 1,5x. O mesmo para repetir um quadro.
     let natural = maior_degrau(&seno(4800));
     assert!((440..=470).contains(&natural), "{natural}");
     for (hz, remocao) in [(48_072.0, true), (47_928.0, false)] {
@@ -305,29 +283,19 @@ fn emenda_da_correcao_nao_faz_degrau() {
     }
 }
 
-// ------------------------------- fila adaptativa, com relógio simulado -------------------------------
-
-/// Rede e relógios simulados. O emissor gera um pacote de 480 quadros a cada 10 ms do SEU relógio; o pacote chega
-/// em `emissor * (1 + ppm)` mais o atraso `atraso(t)` da rede, sempre em ordem (TCP). O consumidor puxa 480
-/// quadros a cada 10 ms do relógio local.
 struct Rede {
     ppm: f64,
-    /// Atraso extra (us) que um pacote gerado em `t` (us do emissor) sofre antes de chegar.
     atraso: Box<dyn Fn(u64) -> u64>,
 }
 
 struct Resultado {
     q: JitterQueue,
-    /// Números da fila na última puxada (depois dela o emissor ou o consumidor da simulação já pode ter acabado).
     stats: QueueStats,
-    /// (instante local us, esvaziamentos acumulados) a cada puxada.
     underruns_em: Vec<(u64, u64)>,
-    /// (instante local us, alvo ms, nível quadros)
     serie: Vec<(u64, f64, usize)>,
 }
 
 fn simula_rede(cfg: QueueConfig, rede: Rede, segundos: u64) -> Resultado {
-    // (instante, ordem de desempate, pts se for chegada, dados)
     let mut ev: Vec<(u64, u8, u64, Vec<i16>)> = Vec::new();
     let mut c = 0;
     let mut ultima_chegada = 0u64;
@@ -339,8 +307,6 @@ fn simula_rede(cfg: QueueConfig, rede: Rede, segundos: u64) -> Resultado {
         ultima_chegada = chegada;
         ev.push((chegada, 0, s, pkt(&mut c)));
     }
-    // O consumidor começa 100 ms depois do primeiro pacote.
-    // (e para junto com o último pacote, para a fila não esvaziar nem estourar só porque o emissor da simulação acabou).
     let mut j = 0;
     while 100_000 + j * 10_000 <= ultima_chegada {
         ev.push((100_000 + j * 10_000, 1, 0, Vec::new()));
@@ -371,7 +337,6 @@ fn esvaziamentos_apos(r: &Resultado, depois_de_us: u64) -> u64 {
     r.stats.underruns - antes
 }
 
-/// Pausa de 110 ms a cada 9 s (a partir do primeiro ciclo): os pacotes gerados nela só chegam no fim dela.
 fn pausa_110(s: u64) -> u64 {
     let ciclo = s % 9_000_000;
     if ciclo < 110_000 && s >= 9_000_000 {
@@ -403,7 +368,6 @@ fn adaptativa_pausas_de_110_ms_a_cada_9_s_estabilizam_o_alvo_sem_esvaziar() {
 
 #[test]
 fn adaptativa_jitter_some_e_o_alvo_volta_a_40_ms_em_ate_90_s() {
-    // 60 s com pausas de 110 ms a cada 9 s e depois rede perfeita.
     let r = simula_rede(QueueConfig::default(), Rede { ppm: 0.0, atraso: Box::new(|s| if s >= 60_000_000 { 0 } else { pausa_110(s) }) }, 200);
     let alto = r.serie.iter().filter(|(t, _, _)| *t < 60_000_000).map(|(_, a, _)| *a).fold(0.0f64, f64::max);
     assert!(alto > 120.0, "o alvo devia ter subido (máximo {alto})");
@@ -417,7 +381,6 @@ fn adaptativa_rajada_unica_de_250_ms_custa_no_maximo_um_esvaziamento() {
     let rajada = |s: u64| if (20_000_000..20_250_000).contains(&s) { 20_250_000 - s } else { 0 };
     let r = simula_rede(QueueConfig::default(), Rede { ppm: 0.0, atraso: Box::new(rajada) }, 90);
     assert!(r.stats.underruns <= 1, "esvaziamentos {}", r.stats.underruns);
-    // Até 15 s depois da rajada (que termina em ~20,25 s) o nível já voltou ao alvo (a menos de 25 ms).
     let ok = r.serie.iter().filter(|(t, _, _)| (35_000_000..60_000_000).contains(t)).all(|(_, alvo, nivel)| (*nivel as f64 / 48.0 - *alvo).abs() <= 25.0);
     assert!(ok, "o nível não voltou ao alvo em 15 s");
 }
@@ -445,7 +408,6 @@ fn esvaziamento_real_sobe_o_alvo_em_50_por_cento_por_30_s() {
     let mut q = JitterQueue::new(QueueConfig::default());
     let mut c = 0;
     let mut out = vec![0i16; BLOCK * 2];
-    // Enche com 4 pacotes, toca tudo e esvazia no quinto puxão.
     for _ in 0..4 {
         q.push_at(&pkt(&mut c), false, None, 0);
     }
@@ -454,14 +416,11 @@ fn esvaziamento_real_sobe_o_alvo_em_50_por_cento_por_30_s() {
     }
     assert_eq!(q.stats().underruns, 1);
     assert!((q.target_ms() - 60.0).abs() < 0.5, "alvo {}", q.target_ms());
-    // O piso vale por 30 s: sem jitter, o alvo cru é 40 ms, mas o efetivo continua em 60 ms.
     q.pull_at(&mut out, 20_000_000);
     assert!((q.target_ms() - 60.0).abs() < 0.5);
     q.pull_at(&mut out, 40_000_000);
     assert!(q.target_ms() < 60.0, "o piso devia ter acabado: {}", q.target_ms());
 }
-
-// ------------------------- motor: protocolo, decodificação, estatísticas -------------------------
 
 fn senoide(frames: usize, amp: f64) -> Vec<i16> {
     let mut v = Vec::new();
@@ -500,7 +459,6 @@ fn motor_decodifica_psa1_e_pcm_e_acompanha_a_sequencia() {
         assert_eq!(st.resumes, 1);
         assert_eq!(st.drops, 0);
         assert!(st.open);
-        // seq fora de ordem é erro de protocolo.
         assert!(e.on_data(0, 0, 7, 0, &data).is_err());
     }
 }
@@ -510,22 +468,18 @@ fn motor_recusa_violacoes_de_protocolo() {
     let e = AudioEngine::new(None);
     let s = senoide(480, 0.3);
     let d = psa1(&s);
-    // Dados sem início.
     assert!(e.on_data(0, 0, 0, 0, &d).is_err());
-    // Inícios inválidos.
     assert!(e.on_start(1, CODEC_PSA1, 2, 48000, 480).is_err(), "fluxo 1 é o microfone");
     assert!(e.on_start(0, CODEC_PSA1, 2, 44100, 480).is_err());
     assert!(e.on_start(0, 2, 2, 48000, 480).is_err(), "codec 2 é reservado");
     assert!(e.on_start(0, CODEC_PSA1, 3, 48000, 480).is_err());
     assert!(e.on_start(0, CODEC_PSA1, 2, 48000, 0).is_err());
     e.on_start(0, CODEC_PSA1, 2, 48000, 480).unwrap();
-    // PSA1 corrompido e PCM com tamanho torto.
     assert!(e.on_data(0, 0, 0, 0, &d[..d.len() - 3]).is_err());
     let e2 = AudioEngine::new(None);
     e2.on_start(0, CODEC_PCM, 2, 48000, 480).unwrap();
     assert!(e2.on_data(0, 0, 0, 0, &[1, 2, 3]).is_err());
     assert!(e2.on_data(0, 0, 0, 0, &[]).is_err());
-    // Depois de AUDIO_STOP, dados exigem novo AUDIO_START.
     let e3 = AudioEngine::new(None);
     e3.on_start(0, CODEC_PSA1, 2, 48000, 480).unwrap();
     e3.on_data(0, 0, 0, 0, &d).unwrap();
@@ -575,7 +529,6 @@ fn recent_sound_pega_o_trecho_contiguo_mais_recente() {
     for seq in 0..30u32 {
         e.on_data(0, if seq == 0 { AUDIO_FLAG_DISCONTINUITY } else { 0 }, seq, seq as u64 * 10_000, &d).unwrap();
     }
-    // 200 ms de silêncio enviados, depois a retomada 1 s depois, com mais 20 pacotes de som.
     for seq in 30..50u32 {
         e.on_data(0, 0, seq, seq as u64 * 10_000, &silencio).unwrap();
     }
@@ -587,8 +540,6 @@ fn recent_sound_pega_o_trecho_contiguo_mais_recente() {
     assert_eq!(samples.len(), 20 * 960);
 }
 
-// ----------------------------------- arquivo WAV -----------------------------------
-
 #[test]
 fn wav_tem_lacunas_de_silencio_nas_posicoes_certas() {
     let dir = std::env::temp_dir().join(format!("psc-wav-{}", std::process::id()));
@@ -597,7 +548,6 @@ fn wav_tem_lacunas_de_silencio_nas_posicoes_certas() {
     {
         let mut w = WavDump::create(&path).unwrap();
         let mut c = 0;
-        // 100 ms de som, 1 s de lacuna, mais 50 ms de som, com jitter pequeno nos instantes.
         for k in 0..10u64 {
             w.write(k * 10_000 + (k % 3) * 400, &pkt(&mut c));
         }
@@ -608,7 +558,6 @@ fn wav_tem_lacunas_de_silencio_nas_posicoes_certas() {
     }
     let x = read_wav(&path).unwrap();
     assert_eq!(x.len() / 2, 4800 + 48_000 + 2400);
-    // Verifica as regiões: som nos primeiros 100 ms, silêncio de 100 ms a 1100 ms, som depois.
     let frame = |i: usize| (x[i * 2], x[i * 2 + 1]);
     assert_ne!(frame(10), (0, 0));
     assert_ne!(frame(4799), (0, 0));
@@ -617,8 +566,6 @@ fn wav_tem_lacunas_de_silencio_nas_posicoes_certas() {
     assert_ne!(frame(4800 + 48_000), (0, 0));
     std::fs::remove_dir_all(&dir).ok();
 }
-
-// ---- marco 6: saída plugável, puxada sem espera e linha AUDIOSTATS ----
 
 struct SaidaFalsa(Arc<std::sync::atomic::AtomicU32>);
 
@@ -652,7 +599,6 @@ fn pull_nowait_funciona_como_pull_e_nao_espera_a_trava() {
     let mut out = vec![1i16; 480 * 2];
     assert!(e.pull_nowait(&mut out));
     assert!(out.iter().all(|&s| s == 0), "fila vazia: silêncio");
-    // Com a trava ocupada por outra thread, devolve silêncio na hora, sem esperar.
     let g = e.queue.lock().unwrap();
     let mut out = vec![5i16; 480 * 2];
     let t0 = Instant::now();
@@ -691,7 +637,6 @@ fn com_a_trava_da_rede_presa_o_pull_nowait_ainda_toca() {
     });
 }
 
-/// Uma rodada: a thread de rede chama `on_data` sem parar enquanto esta puxa blocos; devolve as faltas por 20 000 blocos.
 fn rodada_de_concorrencia() -> u32 {
     let e = AudioEngine::with_queue(QueueConfig::fixed_ms(40), None);
     e.on_start(0, CODEC_PCM, 2, 48000, 480).unwrap();
@@ -713,7 +658,6 @@ fn rodada_de_concorrencia() -> u32 {
     let mut out = vec![0i16; 480 * 2];
     let mut faltas = 0u32;
     let t0 = Instant::now();
-    // Pelo menos 20 000 blocos E 500 pacotes entregues pela outra thread (sob carga ela pode demorar a rodar).
     let mut n = 0u32;
     while (n < 20_000 || enviados.load(Ordering::Relaxed) < 500) && t0.elapsed() < Duration::from_secs(10) {
         if !e.pull_nowait(&mut out) {
@@ -729,8 +673,6 @@ fn rodada_de_concorrencia() -> u32 {
 
 #[test]
 fn on_data_em_sequencia_quase_nao_causa_faltas_no_pull_nowait() {
-    // Meta: menos de 0,1% de faltas. Sob carga da máquina (outros testes em paralelo) o sistema pode tirar a thread
-    // de rede da CPU com a trava da fila presa; para não ficar instável, vale a melhor de 5 rodadas.
     let todas: Vec<u32> = (0..5).map(|_| rodada_de_concorrencia()).collect();
     let melhor = *todas.iter().min().unwrap();
     assert!(melhor < 20, "faltas na melhor rodada: {melhor} de 20000");

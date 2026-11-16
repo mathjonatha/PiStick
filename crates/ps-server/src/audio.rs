@@ -1,13 +1,3 @@
-//! Áudio do servidor (marco 7): do PCM do PipeWire (ou do sintético) até os pacotes `AUDIO_DATA`.
-//!
-//! Estrutura:
-//! - [`AudioHub`]: recebe blocos de 10 ms (480 quadros estéreo), detecta silêncio, codifica e guarda
-//!   uma fila curta para a sessão atual. Sem sessão, o bloco é jogado fora.
-//! - [`Subscription`]: a sessão se inscreve, é acordada quando há pacote e o retira com
-//!   [`Subscription::drain`] (a numeração `seq` é da sessão, depois de qualquer descarte).
-//! - Fontes de blocos: [`spawn_synthetic`] (senoides, sem PipeWire) e [`spawn_pcm_reader`] (soquete de PCM
-//!   cru do módulo `protocol-simple` do PipeWire, com reconexão).
-//! - [`pipewire::PipewireProcs`]: sobe `pipewire`, `wireplumber` e `pipewire-pulse` com a configuração do projeto.
 
 use std::collections::VecDeque;
 use std::io::Read;
@@ -24,18 +14,12 @@ use crate::source::Waker;
 
 pub mod pipewire;
 
-/// Quadros por canal em cada pacote (10 ms a 48 kHz).
 pub const BLOCK_FRAMES: usize = 480;
-/// Canais do fluxo de saída.
 pub const CHANNELS: usize = 2;
-/// Blocos de silêncio ainda enviados antes de parar o fluxo (200 ms).
 pub const SILENCE_HANG_BLOCKS: u32 = 20;
-/// Máximo de pacotes esperando a sessão (200 ms); acima disso descarta os mais velhos.
 pub const MAX_QUEUED_PACKETS: usize = 20;
-/// Endereço padrão do soquete de PCM cru do PipeWire do projeto (`tools/pi/pipewire/pipewire.conf`).
 pub const PIPEWIRE_PCM_ADDR: &str = "127.0.0.1:4711";
 
-/// Codec dos pacotes enviados.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
     Pcm,
@@ -43,7 +27,6 @@ pub enum AudioCodec {
 }
 
 impl AudioCodec {
-    /// Valor do campo `codec` de `AUDIO_START`.
     pub fn wire(self) -> u8 {
         match self {
             AudioCodec::Pcm => CODEC_PCM,
@@ -52,7 +35,6 @@ impl AudioCodec {
     }
 }
 
-/// Um pacote pronto para virar `AUDIO_DATA` (sem `seq`, que a sessão atribui).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub flags: u8,
@@ -67,19 +49,14 @@ struct SubState {
 
 struct HubState {
     sub: Option<SubState>,
-    /// Blocos de silêncio seguidos.
     silent_blocks: u32,
-    /// O bloco anterior foi enviado (ou posto na fila).
     sending: bool,
-    /// Número da inscrição atual; as fontes o usam para recomeçar o sinal.
     epoch: u64,
-    /// Pacotes e bytes colocados na fila desde a inscrição.
     pushed_packets: u64,
     pushed_bytes: u64,
     dropped_packets: u64,
 }
 
-/// Ponto de encontro entre as fontes de PCM e a sessão do cliente.
 pub struct AudioHub {
     start: Instant,
     codec: AudioCodec,
@@ -103,7 +80,6 @@ impl AudioHub {
         self.codec
     }
 
-    /// Relógio do emissor: microssegundos desde a criação do hub.
     pub fn now_us(&self) -> u64 {
         self.start.elapsed().as_micros() as u64
     }
@@ -112,7 +88,6 @@ impl AudioHub {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Inscreve a sessão atual (a anterior, se houver, perde a fila). `waker` é chamado a cada pacote novo.
     pub fn subscribe(self: &Arc<Self>, waker: Waker) -> Subscription {
         let mut g = self.lock();
         g.sub = Some(SubState { queue: VecDeque::new(), waker });
@@ -126,17 +101,14 @@ impl AudioHub {
         Subscription { hub: self.clone(), epoch: g.epoch }
     }
 
-    /// Há sessão inscrita.
     pub fn has_subscriber(&self) -> bool {
         self.lock().sub.is_some()
     }
 
-    /// Número da inscrição atual (0 = nunca houve).
     pub fn epoch(&self) -> u64 {
         self.lock().epoch
     }
 
-    /// Espera até `timeout` por uma sessão inscrita; devolve `true` se há.
     pub fn wait_for_subscriber(&self, timeout: Duration) -> bool {
         let g = self.lock();
         if g.sub.is_some() {
@@ -146,7 +118,6 @@ impl AudioHub {
         g.sub.is_some()
     }
 
-    /// Pede às fontes que terminem.
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.changed.notify_all();
@@ -156,19 +127,15 @@ impl AudioHub {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    /// A fonte perdeu a continuidade (reconexão do PipeWire): o próximo pacote leva a marca de descontinuidade.
     pub fn mark_gap(&self) {
         self.lock().sending = false;
     }
 
-    /// Entrega um bloco de PCM estéreo intercalado (normalmente 480 quadros). `pts_us` é o instante do
-    /// primeiro quadro no relógio do hub ([`AudioHub::now_us`]).
     pub fn push_block(&self, samples: &[i16], pts_us: u64) {
         let mut g = self.lock();
         let silent = is_silent(samples);
         g.silent_blocks = if silent { g.silent_blocks.saturating_add(1) } else { 0 };
         if g.silent_blocks > SILENCE_HANG_BLOCKS {
-            // Silêncio com mais de 200 ms: o fluxo para; o próximo som leva a marca de descontinuidade.
             g.sending = false;
             return;
         }
@@ -210,14 +177,12 @@ impl AudioHub {
     }
 }
 
-/// A inscrição da sessão. Ao ser largada, o hub volta a jogar fora o que recebe.
 pub struct Subscription {
     hub: Arc<AudioHub>,
     epoch: u64,
 }
 
 impl Subscription {
-    /// Retira os pacotes que esperam, do mais velho ao mais novo.
     pub fn drain(&self, out: &mut Vec<Packet>) {
         let mut g = self.hub.lock();
         if g.epoch != self.epoch {
@@ -228,7 +193,6 @@ impl Subscription {
         }
     }
 
-    /// Pacotes descartados por atraso desde a inscrição.
     pub fn dropped(&self) -> u64 {
         self.hub.lock().dropped_packets
     }
@@ -251,8 +215,6 @@ impl Drop for Subscription {
     }
 }
 
-/// Fonte sintética: 440 Hz à esquerda, 880 Hz à direita, 1 s de som e 1 s de silêncio, em tempo real,
-/// recomeçando do zero a cada inscrição (os testes dependem disso).
 pub fn spawn_synthetic(hub: Arc<AudioHub>) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("psd-audio-sintetico".into())
@@ -284,12 +246,8 @@ pub fn spawn_synthetic(hub: Arc<AudioHub>) -> JoinHandle<()> {
         .expect("criar thread do áudio sintético")
 }
 
-/// Log das fontes de áudio.
 pub type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Lê PCM cru S16LE estéreo de 48 kHz do soquete `addr` e o entrega ao hub em blocos de 10 ms. Só mantém a
-/// conexão enquanto há sessão inscrita (sem ouvinte o PipeWire não gasta CPU com a captura) e reconecta
-/// se o PipeWire cair ou ainda não tiver subido.
 pub fn spawn_pcm_reader(hub: Arc<AudioHub>, addr: String, log: LogFn) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("psd-audio-pcm".into())
@@ -327,14 +285,11 @@ pub fn spawn_pcm_reader(hub: Arc<AudioHub>, addr: String, log: LogFn) -> JoinHan
         .expect("criar thread de leitura do PCM")
 }
 
-/// Lê blocos até a conexão cair, o hub parar ou a inscrição mudar.
 fn read_blocks<R: Read>(hub: &AudioHub, stream: &mut R, epoch: u64) {
     let block_bytes = BLOCK_FRAMES * CHANNELS * 2;
     let mut acc: Vec<u8> = Vec::with_capacity(block_bytes * 4);
     let mut buf = [0u8; 8192];
     let mut samples = vec![0i16; BLOCK_FRAMES * CHANNELS];
-    // Os instantes dos blocos seguem a contagem de amostras desde a conexão (grade de 10 ms): o PipeWire dá o
-    // ritmo, e o relógio do sistema na hora de ler tem jitter de alguns milissegundos.
     let base_us = hub.now_us();
     let mut blocks = 0u64;
     loop {
@@ -347,7 +302,6 @@ fn read_blocks<R: Read>(hub: &AudioHub, stream: &mut R, epoch: u64) {
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => continue,
             Err(_) => return,
         }
-        // O que sobra de um bloco fica em `acc` (os `recv` chegam com tamanho qualquer).
         while acc.len() >= block_bytes {
             for (s, c) in samples.iter_mut().zip(acc[..block_bytes].chunks_exact(2)) {
                 *s = i16::from_le_bytes([c[0], c[1]]);

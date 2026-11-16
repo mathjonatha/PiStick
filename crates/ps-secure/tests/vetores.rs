@@ -1,6 +1,3 @@
-//! Conferência da nossa máquina de estados contra os vetores de teste públicos do projeto `cacophony`
-//! (`tests/data/cacophony.txt`; origem em `tests/data/ORIGEM.txt`), entrada `Noise_XX_25519_ChaChaPoly_SHA256`.
-//! As chaves aqui são chaves de TESTE publicadas com os vetores.
 
 use ps_secure::noise::{HandshakeState, Keypair, Role};
 
@@ -15,7 +12,6 @@ fn hex32(s: &str) -> [u8; 32] {
     hex(s).try_into().unwrap()
 }
 
-/// Primeiro valor de `"chave": "VALOR"` dentro de `trecho`.
 fn campo<'a>(trecho: &'a str, chave: &str) -> &'a str {
     let padrao = format!("\"{chave}\": \"");
     let i = trecho.find(&padrao).unwrap_or_else(|| panic!("campo {chave} ausente")) + padrao.len();
@@ -23,7 +19,6 @@ fn campo<'a>(trecho: &'a str, chave: &str) -> &'a str {
     &trecho[i..i + f]
 }
 
-/// Todos os valores de `"chave": "VALOR"` do trecho, na ordem.
 fn campos<'a>(trecho: &'a str, chave: &str) -> Vec<&'a str> {
     let padrao = format!("\"{chave}\": \"");
     let mut out = Vec::new();
@@ -57,7 +52,6 @@ fn vetores_oficiais_do_noise_xx_25519_chachapoly_sha256() {
     assert_eq!(payloads.len(), 6);
     assert_eq!(cifrados.len(), 6);
 
-    // Três recados do aperto de mão: i, r, i.
     for n in 0..3 {
         let (escritor, leitor) = if n % 2 == 0 { (&mut i, &mut r) } else { (&mut r, &mut i) };
         let mut saida = Vec::new();
@@ -70,7 +64,6 @@ fn vetores_oficiais_do_noise_xx_25519_chachapoly_sha256() {
     assert_eq!(i.handshake_hash(), esperado, "hash do aperto de mão (iniciador)");
     assert_eq!(r.handshake_hash(), esperado, "hash do aperto de mão (respondedor)");
 
-    // Transporte: os recados 3, 4, 5 alternam a partir do respondedor (o iniciador falou no 2).
     let (mut ei, mut er) = (i.finish().unwrap(), r.finish().unwrap());
     for n in 3..6 {
         let (env, rec) = if n % 2 == 0 { (&mut ei, &mut er) } else { (&mut er, &mut ei) };

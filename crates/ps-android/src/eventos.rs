@@ -1,43 +1,13 @@
-//! Eventos do núcleo para a casca e o formato binário do `nativePoll()` (docs/26, decisão 17).
-//!
-//! O núcleo não chama Java: o que ele tem a dizer à casca entra numa fila ([`Fila`]) e a casca a esvazia a cada quadro
-//! de animação com `Nucleo.poll()`, que devolve um `byte[]` com **zero ou mais registros** colados:
-//!
-//! ```text
-//! registro = tipo: u8, tamanho: u32 (LE), carga: [u8; tamanho]
-//! texto    = tamanho: u32 (LE), bytes UTF-8
-//! ```
-//!
-//! | tipo | evento | carga |
-//! |---|---|---|
-//! | 1 | [`Evento::Estado`] | fase `u8`, texto |
-//! | 2 | [`Evento::Aparelho`] | nome (texto), seguro `u8`, pareamento aberto `u8` (0 não, 1 sim, 2 desconhecido, nos dois), n `u16`, n textos `endereço:porta` |
-//! | 3 | [`Evento::BuscaFim`] | achados `u32` |
-//! | 4 | [`Evento::Codigo`] | texto (o código de pareamento, `123 456`) |
-//! | 5 | [`Evento::ChaveNova`] | 32 bytes (a chave do cliente recém-criada: a casca a protege e grava) |
-//! | 6 | [`Evento::Erro`] | texto |
-//! | 7 | [`Evento::Janelas`] | foco `u32` (0 = nenhuma), n `u16`, n vezes (id `u32`, título texto) |
-//! | 8 | [`Evento::AreaDeTransferencia`] | texto |
-//! | 9 | [`Evento::Vibrar`] | milissegundos `u16` |
-//! | 10 | [`Evento::Aviso`] | texto |
-//! | 11 | [`Evento::Encerrada`] | motivo `u8` (`GOODBYE_*`: 1 = outro cliente assumiu, 2 = serviço parando), texto (nome de quem assumiu) |
-//! | 12 | [`Evento::EstadoDoAparelho`] | sinalizadores `u32` (bits `STATUS_*`), temperatura conhecida `u8` (0 não, 1 sim), temperatura em décimos de grau `i16` (0 se desconhecida) |
-//!
-//! Tipos desconhecidos são pulados pelo tamanho (a casca de uma versão mais velha ignora o que não conhece).
-//! [`decodificar`] é o leitor de referência (a casca Java faz o mesmo); ele nunca entra em pânico: entrada truncada,
-//! tamanho que passa do fim, texto que não é UTF-8 ou contagem absurda viram [`ErroFormato`].
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 
 use ps_secure::wipe;
 
-/// Fases do [`Evento::Estado`].
 pub mod fase {
     pub const OCIOSO: u8 = 0;
     pub const BUSCANDO: u8 = 1;
     pub const CONECTANDO: u8 = 2;
-    /// Esperando a aprovação do pareamento no aparelho (o código já foi mostrado).
     pub const PAREANDO: u8 = 3;
     pub const CONECTADO: u8 = 4;
     pub const DESCONECTADO: u8 = 5;
@@ -59,14 +29,11 @@ mod tipo {
     pub const ESTADO_DO_APARELHO: u8 = 12;
 }
 
-/// Limite de um texto de evento (o título de uma janela remota pode ser qualquer coisa).
 const MAX_TEXTO: usize = 64 * 1024;
 const MAX_ABAS: usize = 256;
 const MAX_ENDERECOS: usize = 32;
-/// Eventos pendentes além disto são descartados (a casca parou de esvaziar a fila).
 const MAX_FILA: usize = 4096;
 
-/// 32 bytes de segredo que se apagam ao sair da memória e nunca aparecem em `Debug`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Segredo(pub [u8; 32]);
 
@@ -82,38 +49,26 @@ impl std::fmt::Debug for Segredo {
     }
 }
 
-/// Algo que o núcleo diz à casca.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evento {
     Estado { fase: u8, texto: String },
-    /// Um aparelho achado na rede. `seguro` e `pareamento_aberto` vêm do anúncio mDNS (`None` = não anunciou).
     Aparelho { nome: String, enderecos: Vec<String>, seguro: Option<bool>, pareamento_aberto: Option<bool> },
     BuscaFim { achados: u32 },
     Codigo(String),
-    /// A chave vai numa caixa na memória dinâmica: mover o evento copia só o ponteiro, não deixa cópias da chave na
-    /// pilha, e o `Drop` do [`Segredo`] a apaga.
     ChaveNova(Box<Segredo>),
     Erro(String),
-    /// Janela em foco (0 = nenhuma) e as abas (janelas de nível superior, na ordem de criação).
     Janelas { foco: u32, abas: Vec<(u32, String)> },
     AreaDeTransferencia(String),
     Vibrar(u16),
     Aviso(String),
-    /// O aparelho se despediu (`GOODBYE`): a sessão acabou e o núcleo **não** reconecta sozinho com o motivo 1. A casca mostra
-    /// o texto (por exemplo, "O cliente X assumiu a sessão").
     Encerrada { motivo: u8, texto: String },
-    /// Estado do aparelho (`STATUS`): bits `STATUS_*` (subtensão, temperatura, descartável) e a temperatura em décimos de grau.
     EstadoDoAparelho { sinalizadores: u32, temperatura_dc: Option<i16> },
 }
 
-/// Por que um `byte[]` do `nativePoll` não pôde ser lido.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErroFormato {
-    /// Acabou no meio de um registro ou de um campo.
     Truncado,
-    /// Um texto que não é UTF-8.
     Utf8,
-    /// Um campo com valor impossível (contagem grande demais, carga com tamanho errado).
     Invalido(&'static str),
 }
 
@@ -127,10 +82,6 @@ impl std::fmt::Display for ErroFormato {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Escrita
-// ---------------------------------------------------------------------------------------------
-
 fn put_u16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -139,7 +90,6 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-/// Texto cortado em `MAX_TEXTO` bytes (em fronteira de caractere).
 fn put_texto(out: &mut Vec<u8>, t: &str) {
     let mut fim = t.len().min(MAX_TEXTO);
     while !t.is_char_boundary(fim) {
@@ -157,7 +107,6 @@ fn put_opt_bool(out: &mut Vec<u8>, v: Option<bool>) {
     });
 }
 
-/// Acrescenta o registro de `e` a `out`.
 pub fn codificar(e: &Evento, out: &mut Vec<u8>) {
     let mut carga = Vec::new();
     let t = match e {
@@ -230,13 +179,8 @@ pub fn codificar(e: &Evento, out: &mut Vec<u8>) {
     out.push(t);
     put_u32(out, carga.len() as u32);
     out.extend_from_slice(&carga);
-    // A carga de uma chave não fica solta na memória.
     wipe(&mut carga);
 }
-
-// ---------------------------------------------------------------------------------------------
-// Leitura
-// ---------------------------------------------------------------------------------------------
 
 struct Leitor<'a> {
     b: &'a [u8],
@@ -349,13 +293,12 @@ fn decodificar_carga(t: u8, carga: &[u8]) -> Result<Option<Evento>, ErroFormato>
             };
             Evento::EstadoDoAparelho { sinalizadores, temperatura_dc }
         }
-        _ => return Ok(None), // tipo desconhecido: pulado
+        _ => return Ok(None),
     };
     r.vazio()?;
     Ok(Some(e))
 }
 
-/// Lê todos os registros de `bytes`. Tipos desconhecidos são pulados.
 pub fn decodificar(bytes: &[u8]) -> Result<Vec<Evento>, ErroFormato> {
     let mut r = Leitor { b: bytes };
     let mut eventos = Vec::new();
@@ -370,11 +313,6 @@ pub fn decodificar(bytes: &[u8]) -> Result<Vec<Evento>, ErroFormato> {
     Ok(eventos)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Fila
-// ---------------------------------------------------------------------------------------------
-
-/// A fila de eventos entre as threads do núcleo e o `nativePoll`.
 #[derive(Default)]
 pub struct Fila {
     inner: Mutex<VecDeque<Evento>>,
@@ -389,8 +327,6 @@ impl Fila {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Entra um evento. `Janelas` pendente é substituído pelo mais novo (só o último estado importa); com a fila
-    /// cheia o evento novo é descartado.
     pub fn empurrar(&self, e: Evento) {
         let mut q = self.lock();
         if matches!(e, Evento::Janelas { .. }) {
@@ -412,12 +348,8 @@ impl Fila {
         self.lock().is_empty()
     }
 
-    /// Tira todos os eventos pendentes, na ordem, no formato do `nativePoll` (vazio se não há nenhum).
     pub fn drenar_bytes(&self) -> Vec<u8> {
         let eventos: Vec<Evento> = self.lock().drain(..).collect();
-        // Cada registro é codificado à parte, com capacidade que cabe o registro da chave (37 bytes) sem realocar, e
-        // depois copiado para a saída com o tamanho exato: nenhuma realocação deixa cópia solta de uma chave na
-        // memória dinâmica. Os registros parciais são apagados.
         let mut partes: Vec<Vec<u8>> = eventos
             .iter()
             .map(|e| {
@@ -434,7 +366,6 @@ impl Fila {
         out
     }
 
-    /// Tira todos os eventos pendentes sem codificar (testes).
     pub fn drenar(&self) -> Vec<Evento> {
         self.lock().drain(..).collect()
     }
@@ -502,7 +433,6 @@ mod tests {
         let mut b = Vec::new();
         codificar(&Evento::EstadoDoAparelho { sinalizadores: 0, temperatura_dc: None }, &mut b);
         assert_eq!(b, [12, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        // Indicador de temperatura fora de 0 e 1: inválido.
         assert!(decodificar(&[12, 7, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0]).is_err());
     }
 
@@ -526,20 +456,14 @@ mod tests {
 
     #[test]
     fn entradas_invalidas_dao_erro_sem_panico() {
-        // Tamanho que passa do fim.
         assert_eq!(decodificar(&[1, 255, 255, 255, 255]), Err(ErroFormato::Truncado));
-        // Texto que não é UTF-8.
         assert_eq!(decodificar(&[6, 5, 0, 0, 0, 1, 0, 0, 0, 0xFF]), Err(ErroFormato::Utf8));
-        // Texto gigante declarado.
         let mut b = vec![6, 9, 0, 0, 0];
         b.extend_from_slice(&u32::MAX.to_le_bytes());
         b.extend_from_slice(&[0; 5]);
         assert!(matches!(decodificar(&b), Err(ErroFormato::Invalido(_))));
-        // Carga com sobra.
         assert!(matches!(decodificar(&[9, 3, 0, 0, 0, 1, 0, 9]), Err(ErroFormato::Invalido(_))));
-        // Chave com tamanho errado.
         assert_eq!(decodificar(&[5, 3, 0, 0, 0, 1, 2, 3]), Err(ErroFormato::Truncado));
-        // Booleano impossível e contagens absurdas.
         let mut b = Vec::new();
         codificar(&Evento::Aparelho { nome: "x".into(), enderecos: vec![], seguro: None, pareamento_aberto: None }, &mut b);
         b[5 + 4 + 1] = 9;
@@ -553,7 +477,6 @@ mod tests {
 
     #[test]
     fn nenhuma_sequencia_de_bytes_faz_o_leitor_entrar_em_panico() {
-        // Varredura determinística (um gerador congruente): bytes aleatórios nunca derrubam o leitor.
         let mut x = 0x1234_5678u32;
         for _ in 0..3000 {
             let n = (x % 64) as usize;
@@ -569,7 +492,7 @@ mod tests {
 
     #[test]
     fn texto_grande_e_cortado_em_fronteira_de_caractere() {
-        let longo = "ç".repeat(MAX_TEXTO); // 2 bytes cada: passa do limite
+        let longo = "ç".repeat(MAX_TEXTO);
         let mut b = Vec::new();
         codificar(&Evento::Erro(longo), &mut b);
         let Evento::Erro(t) = decodificar(&b).unwrap().remove(0) else { panic!() };

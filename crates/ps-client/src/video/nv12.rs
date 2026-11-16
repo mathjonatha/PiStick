@@ -1,26 +1,16 @@
-//! Conversão NV12 → BGRX, pura e própria (sem GPU, sem dependências).
-//!
-//! NV12: plano Y (um byte por pixel) e depois um plano UV intercalado com metade da largura e da altura
-//! (U, V, U, V, ...). A cor de cada par UV vale para o bloco de 2×2 pixels (replicação, sem filtro).
-//! Matriz BT.601 ou BT.709, faixa limitada (Y 16..235, UV 16..240) ou completa, em ponto fixo de 16 bits.
 
-/// Matriz de cor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Matrix {
     Bt601,
     Bt709,
 }
 
-/// Faixa de valores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Range {
-    /// Y de 16 a 235, UV de 16 a 240 (TV).
     Limited,
-    /// 0 a 255.
     Full,
 }
 
-/// Parâmetros de cor de um fluxo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorSpec {
     pub matrix: Matrix,
@@ -28,14 +18,11 @@ pub struct ColorSpec {
 }
 
 impl ColorSpec {
-    /// Na dúvida (o decodificador não disse): BT.709 limitada para altura de 720 ou mais, e BT.601
-    /// limitada abaixo disso. É o que o codificador do Pi sinaliza no VUI.
     pub fn guess(height: u32) -> ColorSpec {
         ColorSpec { matrix: if height >= 720 { Matrix::Bt709 } else { Matrix::Bt601 }, range: Range::Limited }
     }
 }
 
-/// Coeficientes em ponto fixo Q16: (escala de Y, R de V, G de U, G de V, B de U).
 fn coefficients(c: ColorSpec) -> (i32, i32, i32, i32, i32) {
     let q = |x: f64| (x * 65536.0).round() as i32;
     let (rv, gu, gv, bu) = match c.matrix {
@@ -44,7 +31,6 @@ fn coefficients(c: ColorSpec) -> (i32, i32, i32, i32, i32) {
     };
     match c.range {
         Range::Full => (q(1.0), q(rv), q(gu), q(gv), q(bu)),
-        // Y' = (Y - 16) * 255 / 219 e UV' = (UV - 128) * 255 / 224.
         Range::Limited => (q(255.0 / 219.0), q(rv * 255.0 / 224.0), q(gu * 255.0 / 224.0), q(gv * 255.0 / 224.0), q(bu * 255.0 / 224.0)),
     }
 }
@@ -54,11 +40,6 @@ fn clamp8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// Converte um quadro NV12 de `width`×`height` (pares) para BGRX (X = 0xFF).
-///
-/// `y_plane`: linhas de `y_stride` bytes. `uv_plane`: `height / 2` linhas de `uv_stride` bytes.
-/// `out`: `width * height * 4` bytes, linhas contíguas. Devolve `false` sem escrever se algum
-/// tamanho não cabe.
 #[allow(clippy::too_many_arguments)]
 pub fn nv12_to_bgrx(y_plane: &[u8], y_stride: usize, uv_plane: &[u8], uv_stride: usize, width: usize, height: usize, color: ColorSpec, out: &mut [u8]) -> bool {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) || y_stride < width || uv_stride < width {
@@ -89,9 +70,6 @@ pub fn nv12_to_bgrx(y_plane: &[u8], y_stride: usize, uv_plane: &[u8], uv_stride:
     true
 }
 
-/// Converte um quadro I420 (planar: Y, depois U, depois V, os dois últimos com metade da largura e da altura) de
-/// `width`×`height` (pares) para BGRX (X = 0xFF). `u_plane` e `v_plane` têm `height / 2` linhas de `u_stride` e
-/// `v_stride` bytes (cada um pelo menos `width / 2`). Devolve `false` sem escrever se algum tamanho não cabe.
 #[allow(clippy::too_many_arguments)]
 pub fn i420_to_bgrx(y_plane: &[u8], y_stride: usize, u_plane: &[u8], u_stride: usize, v_plane: &[u8], v_stride: usize, width: usize, height: usize, color: ColorSpec, out: &mut [u8]) -> bool {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) || y_stride < width || u_stride < width / 2 || v_stride < width / 2 {
@@ -128,7 +106,6 @@ pub fn i420_to_bgrx(y_plane: &[u8], y_stride: usize, u_plane: &[u8], u_stride: u
 mod tests {
     use super::*;
 
-    /// BGRX -> NV12 (só para os testes): cada par UV é a média do bloco 2×2.
     fn bgrx_to_nv12(bgrx: &[u8], w: usize, h: usize, c: ColorSpec) -> (Vec<u8>, Vec<u8>) {
         let (kr, kb) = match c.matrix {
             Matrix::Bt601 => (0.299, 0.114),
@@ -199,15 +176,12 @@ mod tests {
     fn valores_conhecidos_da_faixa_limitada() {
         let c = ColorSpec { matrix: Matrix::Bt709, range: Range::Limited };
         let mut out = vec![0u8; 2 * 2 * 4];
-        // Preto (Y 16), branco (Y 235), neutro (UV 128).
         for (y, esperado) in [(16u8, 0u8), (235, 255), (126, 128)] {
             assert!(nv12_to_bgrx(&[y; 4], 2, &[128, 128], 2, 2, 2, c, &mut out));
             assert!((i32::from(out[0]) - i32::from(esperado)).abs() <= 1, "Y {y}: {out:?}");
         }
-        // Vermelho BT.709 limitado: Y 63, U 102, V 240.
         assert!(nv12_to_bgrx(&[63; 4], 2, &[102, 240], 2, 2, 2, c, &mut out));
         assert!(out[2] >= 250 && out[1] <= 6 && out[0] <= 6, "{out:?}");
-        // A mesma entrada em BT.601 dá outro resultado (a matriz errada aparece como erro grande).
         let c601 = ColorSpec { matrix: Matrix::Bt601, range: Range::Limited };
         let mut out601 = vec![0u8; 16];
         assert!(nv12_to_bgrx(&[63; 4], 2, &[102, 240], 2, 2, 2, c601, &mut out601));
@@ -233,7 +207,6 @@ mod tests {
         let (w, h) = (6usize, 4usize);
         let src = cor_chapada(10, 200, 30, w, h);
         let (y, uv) = bgrx_to_nv12(&src, w, h, c);
-        // Mesmo conteúdo com 10 bytes de preenchimento por linha.
         let (ystr, uvstr) = (w + 10, w + 10);
         let mut yp = vec![0xAAu8; ystr * h];
         let mut uvp = vec![0xAAu8; uvstr * h / 2];
@@ -261,7 +234,6 @@ mod tests {
         assert!(out.iter().all(|&b| b == 7));
     }
 
-    /// I420 com os mesmos pixels do NV12: o resultado é idêntico, com passos maiores que a largura.
     #[test]
     fn i420_da_o_mesmo_resultado_que_nv12_e_respeita_os_passos() {
         let (w, h) = (8usize, 4usize);
@@ -273,7 +245,6 @@ mod tests {
         let (y, uv) = bgrx_to_nv12(&bgrx, w, h, c);
         let mut esperado = vec![0u8; w * h * 4];
         assert!(nv12_to_bgrx(&y, w, &uv, w, w, h, c, &mut esperado));
-        // Separa U e V e os coloca em planos com passo maior (e lixo no resto de cada linha).
         let (cw, ch) = (w / 2, h / 2);
         let (us, vs) = (cw + 3, cw + 5);
         let mut u = vec![0xEEu8; us * ch];
@@ -291,7 +262,6 @@ mod tests {
         let mut out = vec![0u8; w * h * 4];
         assert!(i420_to_bgrx(&ys, w + 6, &u, us, &v, vs, w, h, c, &mut out));
         assert_eq!(out, esperado);
-        // Tamanhos que não cabem ou passos curtos: falso, sem escrever nem entrar em pânico.
         let mut nada = vec![7u8; w * h * 4];
         assert!(!i420_to_bgrx(&ys[..10], w + 6, &u, us, &v, vs, w, h, c, &mut nada));
         assert!(!i420_to_bgrx(&ys, w + 6, &u[..3], us, &v, vs, w, h, c, &mut nada));

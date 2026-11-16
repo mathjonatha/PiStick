@@ -1,12 +1,5 @@
-# Marco 7, aceite 2: áudio sintético (440 Hz à esquerda, 880 Hz à direita, 1 s de som e 1 s de silêncio).
-# Nada toca neste computador: o cliente roda com --audio-dump e descarta a saída.
-# Uso:
-#   no Pi (ou aqui, com 127.0.0.1):  psd --synthetic --synthetic-audio --listen 127.0.0.1:7700
-#   target\release\psc.exe 127.0.0.1:7700 --audio-dump .cache\audio-sintetico.wav --script tools\roteiros\70-audio-sintetico.txt
-#   cargo run -p ps-audio --example verificar_wav -- .cache\audio-sintetico.wav
 waitaudio 5000
 wait 700
-# O som dura 1 s: com 700 ms já há mais de 200 ms seguidos para a verificação.
 verify-audio 440 880
 wait 500
 audiostats reset

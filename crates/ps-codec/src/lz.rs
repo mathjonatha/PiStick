@@ -1,34 +1,19 @@
-//! Compressor e descompressor LZ próprios, no formato de bloco do LZ4.
-//!
-//! O compressor segue as restrições do formato LZ4 (a última cópia começa pelo
-//! menos 12 bytes antes do fim e os últimos 5 bytes são literais), então a saída
-//! também é lida por um descompressor LZ4 de bloco qualquer.
 
-/// Tamanho mínimo de uma cópia.
 const MIN_MATCH: usize = 4;
-/// A última cópia deve começar ao menos 12 bytes antes do fim da entrada.
 const MF_LIMIT: usize = 12;
-/// Os últimos 5 bytes da entrada são sempre literais.
 const LAST_LITERALS: usize = 5;
 
 const HASH_BITS: u32 = 12;
-/// Tamanho da tabela hash (entradas de `u16`).
 pub const HASH_SIZE: usize = 1 << HASH_BITS;
 const EMPTY: u16 = u16::MAX;
 
-/// Maior entrada aceita pelo compressor: posições cabem em `u16` (EMPTY reservado).
 pub const MAX_INPUT: usize = (u16::MAX as usize) - 1;
 
-/// Erro do descompressor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LzError {
-    /// A entrada comprimida acabou antes do esperado.
     Truncated,
-    /// Offset zero ou apontando para antes do início da saída.
     BadOffset,
-    /// A saída passaria do tamanho esperado.
     Overrun,
-    /// A saída terminou menor que o tamanho esperado.
     Underrun,
 }
 
@@ -59,9 +44,6 @@ fn emit_literals_only(out: &mut Vec<u8>, lits: &[u8]) {
     out.extend_from_slice(lits);
 }
 
-/// Comprime `src` acrescentando a `out`. `table` é um buffer reutilizável de
-/// [`HASH_SIZE`] entradas (reinicializado aqui). Devolve o número de bytes
-/// acrescentados. Pânico se `src.len() > MAX_INPUT`.
 pub fn compress(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) -> usize {
     assert!(src.len() <= MAX_INPUT, "entrada grande demais para o compressor");
     assert!(table.len() >= HASH_SIZE);
@@ -73,8 +55,8 @@ pub fn compress(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) -> usize {
     }
     table[..HASH_SIZE].fill(EMPTY);
 
-    let match_end_limit = n - LAST_LITERALS; // uma cópia não pode terminar depois daqui
-    let last_start = n - MF_LIMIT; // última posição onde uma cópia pode começar
+    let match_end_limit = n - LAST_LITERALS;
+    let last_start = n - MF_LIMIT;
     let mut anchor = 0usize;
     let mut ip = 0usize;
     let mut misses = 0usize;
@@ -86,7 +68,6 @@ pub fn compress(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) -> usize {
         table[h] = ip as u16;
         if cand != EMPTY {
             let cand = cand as usize;
-            // Posições estão em [0, 65534], então o offset sempre cabe em u16.
             if read_u32(src, cand) == seq {
                 let mut mlen = MIN_MATCH;
                 while ip + mlen < match_end_limit && src[cand + mlen] == src[ip + mlen] {
@@ -111,15 +92,12 @@ pub fn compress(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) -> usize {
             }
         }
         misses += 1;
-        // Em dados incompressíveis, acelera o passo (como o LZ4).
         ip += 1 + (misses >> 6);
     }
     emit_literals_only(out, &src[anchor..]);
     out.len() - start_len
 }
 
-/// Descomprime `src` para `dst`, que deve ficar exatamente cheio.
-/// Nunca entra em pânico nem acessa fora dos limites, qualquer que seja a entrada.
 pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<(), LzError> {
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -127,7 +105,6 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<(), LzError> {
         let token = *src.get(ip).ok_or(LzError::Truncated)?;
         ip += 1;
 
-        // Literais
         let mut lit_len = (token >> 4) as usize;
         if lit_len == 15 {
             lit_len = read_ext(src, &mut ip, lit_len)?;
@@ -144,12 +121,10 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<(), LzError> {
         ip = lit_end;
         op = out_end;
 
-        // A última sequência tem só literais: termina quando a entrada acaba.
         if ip == src.len() {
             return if op == dst.len() { Ok(()) } else { Err(LzError::Underrun) };
         }
 
-        // Cópia
         if ip + 2 > src.len() {
             return Err(LzError::Truncated);
         }
@@ -171,7 +146,6 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<(), LzError> {
         if offset >= match_len {
             dst.copy_within(from..from + match_len, op);
         } else {
-            // Regiões sobrepostas: cópia byte a byte, repetindo o padrão.
             for i in 0..match_len {
                 dst[op + i] = dst[from + i];
             }
@@ -180,7 +154,6 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<(), LzError> {
     }
 }
 
-/// Lê bytes de extensão de tamanho: soma até um byte diferente de 255.
 fn read_ext(src: &[u8], ip: &mut usize, mut total: usize) -> Result<usize, LzError> {
     loop {
         let b = *src.get(*ip).ok_or(LzError::Truncated)?;
@@ -239,7 +212,6 @@ mod tests {
         for _ in 0..200 {
             let n = 1 + rng.below(12288) as usize;
             let mut v = vec![0u8; n];
-            // Alterna trechos aleatórios com trechos repetidos.
             let mut i = 0;
             while i < n {
                 let run = 1 + rng.below(300) as usize;
@@ -258,8 +230,6 @@ mod tests {
 
     #[test]
     fn descompressor_conhecido_lz4() {
-        // Vetor escrito à mão no formato LZ4: literais "abcd", cópia offset 4 comprimento 8,
-        // depois literais finais "12345".
         let c = [0x44u8, b'a', b'b', b'c', b'd', 4, 0, 0x50, b'1', b'2', b'3', b'4', b'5'];
         let mut d = vec![0u8; 4 + 8 + 5];
         decompress(&c, &mut d).unwrap();
@@ -301,9 +271,8 @@ mod tests {
                 x[pos] = rng.next_u64() as u8;
             }
             let mut d = vec![0u8; v.len()];
-            let _ = decompress(&x, &mut d); // qualquer resultado serve; só não pode dar pânico
+            let _ = decompress(&x, &mut d);
         }
-        // Lixo puro, de vários tamanhos e tamanhos de saída
         for _ in 0..5_000 {
             let n = rng.below(200) as usize;
             let mut x = vec![0u8; n];
@@ -315,7 +284,6 @@ mod tests {
 
     #[test]
     fn extensoes_gigantes_nao_estouram() {
-        // Literais com extensão de 255 repetida: soma enorme, mas entrada curta.
         let mut x = vec![0xF0u8];
         x.extend(std::iter::repeat_n(255, 10_000));
         let mut d = vec![0u8; 100];
@@ -327,11 +295,9 @@ mod tests {
 
     #[test]
     fn offset_invalido() {
-        // 1 literal, depois cópia com offset 2 (> 1 byte produzido)
         let c = [0x10u8, b'a', 2, 0, 0x00];
         let mut d = vec![0u8; 16];
         assert_eq!(decompress(&c, &mut d), Err(LzError::BadOffset));
-        // offset 0
         let c = [0x10u8, b'a', 0, 0, 0x00];
         assert_eq!(decompress(&c, &mut d), Err(LzError::BadOffset));
     }

@@ -1,26 +1,16 @@
-//! Tabela das janelas remotas conhecidas pelo cliente, na ordem de criação.
-//!
-//! Quem a mantém é a thread de rede (ao receber `WIN_CREATE`, `POPUP_CREATE`, `WIN_DESTROY`...);
-//! quem a consulta é o roteiro de teste (`--script`), que seleciona janelas por número ou título
-//! e lê os pixels já decodificados sem passar pela interface.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::net::SharedWindow;
 
-/// Uma janela (ou popup) remota.
 #[derive(Clone)]
 pub struct WinInfo {
-    /// Número de ordem de criação, a partir de 1. Nunca é reaproveitado.
     pub num: usize,
-    /// Id remoto (o mesmo do protocolo).
     pub id: u32,
-    /// Janela mãe (0 = nenhuma). Para popups é o pai da cadeia.
     pub parent: u32,
     pub popup: bool,
     pub grab: bool,
-    /// Posição do popup relativa ao conteúdo do pai.
     pub x: i32,
     pub y: i32,
     pub title: String,
@@ -49,7 +39,6 @@ impl Registry {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Registra uma janela nova e devolve o número de ordem dela.
     pub fn add(&self, mut info: WinInfo) -> usize {
         let mut g = self.lock();
         g.created += 1;
@@ -90,7 +79,6 @@ impl Registry {
         }
     }
 
-    /// Todas as janelas já criadas (vivas ou não), na ordem de criação.
     pub fn snapshot(&self) -> Vec<WinInfo> {
         self.lock().wins.clone()
     }
@@ -103,13 +91,11 @@ impl Registry {
         self.lock().wins.iter().rev().find(|w| w.id == id && w.alive).cloned()
     }
 
-    /// Primeira janela viva cujo título contém `texto` (sem diferenciar maiúsculas).
     pub fn by_title(&self, texto: &str) -> Option<WinInfo> {
         let t = texto.to_lowercase();
         self.lock().wins.iter().find(|w| w.alive && w.title.to_lowercase().contains(&t)).cloned()
     }
 
-    /// Janela raiz (a que não é popup) da cadeia de `id`.
     pub fn root_of(&self, id: u32) -> u32 {
         let g = self.lock();
         let mut cur = id;
@@ -122,7 +108,6 @@ impl Registry {
         cur
     }
 
-    /// Espera até `cond` ser verdadeira para a lista de janelas ou o prazo acabar.
     pub fn wait_until(&self, timeout: Duration, mut cond: impl FnMut(&[WinInfo]) -> bool) -> bool {
         let fim = Instant::now() + timeout;
         let mut g = self.lock();
@@ -155,7 +140,6 @@ mod tests {
         assert_eq!(r.add(info(12, true, 11, "")), 3);
         assert_eq!(r.root_of(12), 10);
         r.destroy(11);
-        // O número 2 não é reaproveitado.
         assert_eq!(r.add(info(13, false, 0, "Salvar como")), 4);
         assert!(r.by_num(2).is_some_and(|w| !w.alive));
         assert_eq!(r.by_title("salvar").map(|w| w.id), Some(13));

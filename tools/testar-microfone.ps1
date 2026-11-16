@@ -1,25 +1,10 @@
-# Marco 7B: roda os testes do microfone contra o psd do Pi (docs/24, "Aceite"). O psc usa --mic-file (um tom em laço):
-# nenhum dispositivo de captura do computador é aberto, exceto em `-Teste real`, que só confere que o microfone abre e
-# que chegam amostras (o gravador do Pi descarta em /dev/null; nada é gravado nem guardado).
-#
-# Pré-requisitos: psc em release (cargo build --release -p ps-client), o psd compilado no Pi (sync-pi.ps1 e cargo build
-# --release -p ps-server lá), a configuração nova do PipeWire instalada (sh ~/pistick/tools/pi/provisionar.sh no Pi) e o
-# aparelho já pareado com este computador. O script reinicia o psd (iniciar-psd.sh) e, ao fim, deixa o psd rodando:
-# `pkill -x psd` e `sudo systemctl start pistick` devolvem o Pi ao normal.
-#
-# Uso:  tools\testar-microfone.ps1 -Teste aceite2-3     tom, gravação de 5 s verificada, 10 s sem gravador, desligamento
-#       tools\testar-microfone.ps1 -Teste aceite4       sem --mic: nada é anunciado nem pedido, o gravador recebe silêncio
-#       tools\testar-microfone.ps1 -Teste aceite6       som do mpv e microfone ao mesmo tempo (roteiro 74)
-#       tools\testar-microfone.ps1 -Teste latencia      atraso do microfone (pulsos; relógios acertados por ssh)
-#       tools\testar-microfone.ps1 -Teste deriva        5 minutos de gravação contínua (-Segundos 300)
-#       tools\testar-microfone.ps1 -Teste real          microfone de verdade: só abre e conta amostras
 param(
     [Parameter(Mandatory = $true)][ValidateSet('aceite2-3', 'aceite4', 'aceite6', 'latencia', 'deriva', 'real')][string]$Teste,
     [string]$Address = '192.168.0.13:7700',
-    [string]$Psc = '',      # padrão: target\release\psc.exe (preenchido abaixo: no PowerShell 5.1 $PSScriptRoot ainda é vazio nos padrões do param)
-    [string]$OutDir = '',   # padrão: .cache\mic
+    [string]$Psc = '',
+    [string]$OutDir = '',
     [int]$Segundos = 5,
-    [string]$PsdArgs = '',   # argumentos extras do psd. Sem ele, os testes de qualidade (aceite2-3, aceite6, deriva) usam --mic-max-ms 150 e o de atraso o padrão (100)
+    [string]$PsdArgs = '',
     [switch]$NaoIniciarPsd
 )
 $ErrorActionPreference = 'Stop'
@@ -40,14 +25,13 @@ try {
 function Agora-Ms { [int64]([DateTime]::UtcNow - [DateTime]::UtcNow.Date).TotalMilliseconds }
 function Hora-Ms($hhmmss) { $p = $hhmmss -split '[:.]'; [int64]$p[0] * 3600000 + [int64]$p[1] * 60000 + [int64]$p[2] * 1000 + [int64]$p[3] }
 
-# Um shell ssh de vida longa: os comandos saem na hora (sem o custo de abrir uma conexão a cada um).
 $psi = New-Object Diagnostics.ProcessStartInfo 'ssh'
 $psi.Arguments = '-T -o ServerAliveInterval=5 pi-stick sh'
 $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
 $shell = [Diagnostics.Process]::Start($psi)
 $entrada = New-Object IO.StreamWriter($shell.StandardInput.BaseStream, (New-Object Text.UTF8Encoding($false)))
 $entrada.NewLine = "`n"; $entrada.AutoFlush = $true
-$entrada.WriteLine('')   # o BOM que o .NET manda no começo vira um comando vazio (erro só no stderr)
+$entrada.WriteLine('')
 function Sh([string]$cmd, [int]$seg = 60) {
     $m = 'FIM' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     $entrada.WriteLine($cmd); $entrada.WriteLine("echo $m")
@@ -161,7 +145,6 @@ switch ($Teste) {
         if ((Linhas $log 'FALHOU').Count -gt 0) { $script:ok = $false }
     }
     'latencia' {
-        # Relógios: o ssh devolve a hora do Pi; vale a amostra de menor ida e volta (erro de metade dela).
         $melhor = $null
         1..40 | ForEach-Object {
             $t0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
@@ -182,7 +165,6 @@ switch ($Teste) {
         if (-not $c.WaitForExit(90000)) { Stop-Process -Id $c.Id -Force; 'psc não terminou (o gravador saiu; ele desliga em 0,5 s)' }
         $traces = Linhas $log 'trace' | ForEach-Object { if ($_ -match '(\d\d:\d\d:\d\d\.\d{3})Z') { (Hora-Ms $Matches[1]) } }
         $ons = Sh 'cat ~/mic-teste/onsets.txt'
-        # Hora do Pi (segundos desde 1970) -> ms do dia UTC no relógio do Windows.
         $pis = $ons | Where-Object { $_ -match '^ONSET ([\d.]+)' } | ForEach-Object { [void]($_ -match '^ONSET ([\d.]+)'); $s = [double]::Parse($Matches[1], $inv) * 1000 - $melhor.off; [int64]($s % 86400000) }
         "pulsos enviados pelo psc: $(@($traces).Count); vistos no Pi: $(@($pis).Count)"
         $lat = @()
@@ -237,7 +219,6 @@ switch ($Teste) {
         $c = Inicia-Psc @($Address, '--mic', '--audio-null', '--script', "$rot\75-microfone-real.txt") $log
         [void](Espera-Linha $log '^MICSTATS start' 90)
         Start-Sleep -Seconds 1
-        # O gravador descarta em /dev/null: nada do microfone fica em arquivo.
         $pid_ = @(Sh "$gravar /dev/null 2>/dev/null & echo `$!")[-1]
         Start-Sleep -Seconds 8
         [void](Sh "kill -INT $pid_; sleep 1")

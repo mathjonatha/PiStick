@@ -1,8 +1,3 @@
-//! Cliente de teste de subsuperfícies e do viewport (marco 5, fase 2): abre uma janela cuja imagem é a
-//! composição da raiz com subsuperfícies, segundo um [`Cenario`] com passos separados por `passo`.
-//!
-//! Cada marco do roteiro é registrado no arquivo de registro (`log`) depois de um `roundtrip`, quando o
-//! compositor já processou tudo o que o cliente mandou: o teste espera a linha e então confere os pixels.
 
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
@@ -32,62 +27,37 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
 use crate::dmabuf::{Dmabuf, FormatoDmabuf};
 use crate::pattern;
 
-/// Cor 0x00RRGGBB da raiz.
 pub const COR_RAIZ: u32 = 0x2060A0;
-/// Cor da subsuperfície (primeira) e a que a substitui no dano parcial.
 pub const COR_SUB_A: u32 = 0xE0C020;
 pub const COR_SUB_B: u32 = 0x20C040;
-/// Raiz esticada: metade esquerda e direita do buffer de 2×1.
 pub const COR_ESQUERDA: u32 = 0xFF0000;
 pub const COR_DIREITA: u32 = 0x0000FF;
-/// A raiz do cenário [`Cenario::Fantasma`] depois de repintada.
 pub const COR_RAIZ_2: u32 = 0x80A040;
 
-/// Tamanho da raiz e posição/tamanho da subsuperfície dos cenários com buffers `wl_shm`.
 pub const RAIZ: (u32, u32) = (200, 120);
 pub const SUB_POS: (i32, i32) = (50, 30);
 pub const SUB_TAM: (u32, u32) = (60, 40);
-/// No cenário [`Cenario::Ordem`]: as duas subsuperfícies (posição e tamanho) e as cores.
 pub const ORDEM_A: ((i32, i32), (u32, u32)) = ((20, 20), (100, 60));
 pub const ORDEM_B: ((i32, i32), (u32, u32)) = ((60, 40), (100, 60));
-/// No cenário [`Cenario::Dmabuf1x1`]: tamanho da janela (destino do viewport) e do DMABUF.
 pub const DMABUF_TAM: (u32, u32) = (320, 200);
-/// Commits da rajada no fim do cenário [`Cenario::Dmabuf1x1`]; o padrão final é o do quadro com este número.
 pub const DMABUF_RAJADA: u32 = 40;
-/// No cenário [`Cenario::RaizEsticada`]: destino do viewport.
 pub const ESTICADA_TAM: (u32, u32) = (100, 50);
 
-/// O roteiro do cliente. Marcos do registro entre aspas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cenario {
-    /// Subsuperfície desincronizada de 60×40 em (50, 30) sobre a raiz de 200×120; "pronto". Depois ela troca
-    /// de cor declarando dano só em (10, 10, 20, 20): "dano".
     Dessincronizada,
-    /// Raiz sozinha: "raiz". Subsuperfície sincronizada com commit só dela (fica em cache): "sub-commit".
-    /// Commit da raiz sem buffer novo: "pai-commit".
     Sincronizada,
-    /// Duas subsuperfícies sobrepostas (B por cima): "ordem0"; `A.place_above(B)`: "ordem1";
-    /// `A.place_below(B)`: "ordem2".
     Ordem,
-    /// Como [`Cenario::Dessincronizada`] ("pronto"), depois a subsuperfície é destruída e a raiz commita: "removida".
     Remover,
-    /// O caso do Waydroid: raiz `wl_shm` de 1×1 esticada para 320×200 por `set_destination` e, numa
-    /// subsuperfície desincronizada, um DMABUF ABGR8888 de 320×200 com o padrão de teste: "pronto". Depois, uma
-    /// rajada de [`DMABUF_RAJADA`] commits com padrões diferentes: "rajada".
     Dmabuf1x1,
-    /// Raiz de 2×1 (vermelho e azul) esticada para 100×50: "pronto". Depois o destino vira 50×25 sem buffer
-    /// novo: "menor".
     RaizEsticada,
-    /// Janela de 1×1: "1x1"; ganha 200×120: "real"; volta a 1×1: "1x1-de-novo"; repinta 200×120: "real-2".
     Fantasma,
 }
 
 pub struct SubOptions {
     pub socket: PathBuf,
     pub cenario: Cenario,
-    /// Intervalo entre os passos.
     pub passo: Duration,
-    /// Onde registrar os marcos.
     pub log: Option<PathBuf>,
 }
 
@@ -113,7 +83,6 @@ struct Cliente {
     viewporter: Option<WpViewporter>,
     dmabuf: Option<ZwpLinuxDmabufV1>,
     raiz: WlSurface,
-    // Mantidos vivos até o fim (o compositor lê os buffers depois do commit).
     buffers: Vec<WlBuffer>,
     dmabufs: Vec<(Dmabuf, WlBuffer)>,
     log: Option<std::fs::File>,
@@ -162,12 +131,10 @@ impl Cliente {
         self._conn.flush().map_err(|e| e.to_string())
     }
 
-    /// Espera o compositor processar tudo o que foi enviado.
     fn sincroniza(&mut self) -> Result<(), String> {
         self.queue.roundtrip(&mut self.st).map(|_| ()).map_err(|e| format!("erro do compositor: {e}"))
     }
 
-    /// Registra um marco depois de sincronizar.
     fn nota(&mut self, linha: &str) -> Result<(), String> {
         self.sincroniza()?;
         if let Some(f) = &mut self.log {
@@ -186,7 +153,6 @@ impl Cliente {
         Ok(())
     }
 
-    /// Buffer `wl_shm` de `w`×`h`; `cor(x, y)` devolve 0xAARRGGBB.
     fn shm_buffer(&mut self, w: u32, h: u32, fmt: wl_shm::Format, cor: impl Fn(u32, u32) -> u32) -> Result<WlBuffer, String> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let file = tempfile::tempfile_in(dir).map_err(|e| e.to_string())?;
@@ -209,7 +175,6 @@ impl Cliente {
         self.shm_buffer(w, h, wl_shm::Format::Xrgb8888, move |_, _| 0xFF00_0000 | rgb)
     }
 
-    /// Aloca um DMABUF de `w`×`h` no `formato` e devolve o índice dele.
     fn dmabuf_novo(&mut self, w: u32, h: u32, formato: FormatoDmabuf) -> Result<usize, String> {
         let d = Dmabuf::aloca((w * h * 4) as usize)?;
         let dmabuf = self.dmabuf.as_ref().ok_or("sem zwp_linux_dmabuf_v1")?;
@@ -221,7 +186,6 @@ impl Cliente {
         Ok(self.dmabufs.len() - 1)
     }
 
-    /// Pinta o quadro-base `n` do padrão de teste no DMABUF `i`.
     fn dmabuf_pinta(&mut self, i: usize, (w, h): (u32, u32), formato: FormatoDmabuf, n: u32) {
         let mut canvas = vec![0u32; (w * h) as usize];
         pattern::paint_full(&mut canvas, w, h, n);
@@ -265,7 +229,6 @@ pub fn run_sub(o: SubOptions) -> Result<(), String> {
             c.nota("pronto")?;
             c.dorme(passo)?;
             if o.cenario == Cenario::Dessincronizada {
-                // Buffer inteiro na cor nova, mas o dano declarado é só um pedaço: o resto não pode mudar.
                 let b2 = c.cor_solida(SUB_TAM.0, SUB_TAM.1, COR_SUB_B)?;
                 Cliente::pinta(&sub, &b2, Some((10, 10, 20, 20)), SUB_TAM);
                 c.nota("dano")?;
@@ -327,7 +290,6 @@ pub fn run_sub(o: SubOptions) -> Result<(), String> {
             Cliente::pinta(&sub, &b0, None, DMABUF_TAM);
             c.nota("pronto")?;
             c.dorme(passo * 2)?;
-            // Rajada de commits (a maioria cai dentro do intervalo mínimo entre leituras de DMABUF): o último é o que fica.
             for n in 1..=DMABUF_RAJADA {
                 let i = ids[n as usize % 3];
                 c.dmabuf_pinta(i, DMABUF_TAM, formato, n);
@@ -346,7 +308,6 @@ pub fn run_sub(o: SubOptions) -> Result<(), String> {
             Cliente::pinta(&raiz, &a, None, (2, 1));
             c.nota("pronto")?;
             c.dorme(passo * 2)?;
-            // Só o destino muda, sem buffer novo: o compositor refaz a escala.
             v.set_destination(ESTICADA_TAM.0 as i32 / 2, ESTICADA_TAM.1 as i32 / 2);
             c.raiz.commit();
             c.nota("menor")?;

@@ -1,5 +1,3 @@
-//! Teste de integração sem interface gráfica: sobe o servidor sintético numa porta livre
-//! e conecta um cliente "sem janela" (só protocolo + Decoder).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -57,7 +55,6 @@ impl Harness {
     }
 
     fn finish(mut self) {
-        // Todas as sessões já terminaram quando o chamador soltou os clientes.
         self.server.take().unwrap().join().unwrap();
     }
 }
@@ -70,7 +67,6 @@ struct TestClient {
     decoders: HashMap<u32, Decoder>,
     titles: HashMap<u32, String>,
     last_seq: HashMap<u32, u32>,
-    /// quadros decodificados e verificados, por janela
     frames: HashMap<u32, Vec<FrameInfo>>,
     auto_ack: bool,
 }
@@ -78,7 +74,6 @@ struct TestClient {
 #[derive(Clone, Copy)]
 struct FrameInfo {
     seq: u32,
-    /// faixas de blocos que o quadro cobre (0..n = inteiro)
     strips: (usize, usize),
     n_strips: usize,
     bytes: usize,
@@ -118,7 +113,6 @@ impl TestClient {
         write_message(&mut self.writer, &m).unwrap();
     }
 
-    /// Próxima mensagem já processada (quadros decodificados e conferidos), ou `None` no tempo limite.
     fn next(&mut self, dur: Duration) -> Option<Message> {
         match self.rx.recv_timeout(dur) {
             Ok(Ok(m)) => {
@@ -153,7 +147,6 @@ impl TestClient {
                 let (esperado, strips) = self.pixels.lock().unwrap().get(&(*win, *seq)).cloned().expect("servidor registrou o quadro");
                 let mut esperado = esperado;
                 normalize_x(&mut esperado);
-                // Um quadro fatiado só atualiza as faixas que cobre: compara só essas linhas.
                 let n_strips = (*height as usize).div_ceil(64);
                 let (y0, y1) = (strips.start * 64, (strips.end * 64).min(*height as usize));
                 let row = *width as usize * 4;
@@ -171,7 +164,6 @@ impl TestClient {
         }
     }
 
-    /// Processa mensagens até `cond` ser verdadeira ou estourar o tempo.
     fn until(&mut self, secs: u64, mut cond: impl FnMut(&TestClient) -> bool) {
         let limite = Instant::now() + Duration::from_secs(secs);
         while !cond(self) {
@@ -200,11 +192,9 @@ fn quadros_decodificados_batem_com_o_que_o_servidor_gerou() {
     assert!(c.titles[&2].contains("degradê"));
     assert_eq!(c.decoders[&1].width(), 640);
 
-    // O primeiro quadro é inteiro; os da interface seguintes devem ser muito menores (dano parcial).
     let ui = &c.frames[&1];
     let menor = ui.iter().skip(1).map(|f| f.bytes).min().unwrap();
     assert!(menor * 10 < ui[0].bytes, "quadro de interface com pouco dano deveria ser <10% do inteiro ({menor} vs {})", ui[0].bytes);
-    // O degradê muda tudo a cada quadro: quadros grandes.
     let gr = &c.frames[&2];
     assert!(gr.iter().skip(1).all(|f| f.bytes > 1000));
 
@@ -214,7 +204,6 @@ fn quadros_decodificados_batem_com_o_que_o_servidor_gerou() {
 
 #[test]
 fn controle_de_fluxo_dois_quadros_sem_confirmacao_e_dano_acumulado() {
-    // Orçamento de bytes enorme e fixo: aqui só vale o limite de 2 quadros por janela.
     let h = Harness::start_with(1, |o| {
         o.flow_initial_throughput = 1e10;
         o.flow_adaptive = false;
@@ -222,7 +211,6 @@ fn controle_de_fluxo_dois_quadros_sem_confirmacao_e_dano_acumulado() {
     let mut c = h.client();
     c.auto_ack = false;
 
-    // Sem confirmar nada: exatamente 2 quadros por janela e depois silêncio.
     c.until(10, |c| c.n_frames(1) >= 2 && c.n_frames(2) >= 2);
     let t_fim = Instant::now() + Duration::from_millis(600);
     while Instant::now() < t_fim {
@@ -231,7 +219,6 @@ fn controle_de_fluxo_dois_quadros_sem_confirmacao_e_dano_acumulado() {
     assert_eq!(c.n_frames(1), 2, "janela 1 não pode passar de 2 quadros sem confirmação");
     assert_eq!(c.n_frames(2), 2, "janela 2 não pode passar de 2 quadros sem confirmação");
 
-    // Uma confirmação libera exatamente mais um quadro, com o dano acumulado e o conteúdo mais recente.
     c.send(Message::FrameAck { win: 1, seq: 0 });
     c.until(5, |c| c.n_frames(1) == 3);
     let t_fim = Instant::now() + Duration::from_millis(400);
@@ -240,7 +227,6 @@ fn controle_de_fluxo_dois_quadros_sem_confirmacao_e_dano_acumulado() {
     }
     assert_eq!(c.n_frames(1), 3, "uma confirmação libera um único quadro");
     assert_eq!(c.n_frames(2), 2, "a janela 2 continua bloqueada");
-    // `process` já comparou os pixels do 3º quadro com o que o servidor tinha naquele instante.
 
     c.drop_connection();
     h.finish();
@@ -250,7 +236,6 @@ fn controle_de_fluxo_dois_quadros_sem_confirmacao_e_dano_acumulado() {
 fn ping_pong_e_kind_desconhecido_pulado() {
     let h = Harness::start(1);
     let mut c = h.client();
-    // Mensagem de kind desconhecido enviada pelo cliente: o servidor deve pulá-la.
     let mut cru = Vec::new();
     cru.extend_from_slice(&5u32.to_le_bytes());
     cru.extend_from_slice(&999u16.to_le_bytes());
@@ -288,15 +273,11 @@ fn redimensionar_muda_o_tamanho_do_conteudo() {
     assert!(visto, "WIN_RESIZE não chegou");
     let antes = c.n_frames(1);
     c.until(10, |c| c.n_frames(1) >= antes + 3);
-    // Depois do WIN_RESIZE todos os quadros têm o novo tamanho (o `process` já exige que
-    // combine com o decodificador) e o primeiro não tem SKIP: decodificou num Decoder zerado.
     let novos = &c.frames[&1][antes..];
     assert!(novos.iter().all(|f| (f.width, f.height) == (320, 240)));
-    // A primeira FRAME depois do WIN_RESIZE cobre o quadro inteiro (nunca é fatiada).
     assert_eq!(novos[0].strips, (0, novos[0].n_strips));
     assert_eq!(c.decoders[&1].pixels().len(), 320 * 240 * 4);
 
-    // Tamanho absurdamente pequeno é limitado ao mínimo.
     c.send(Message::ResizeReq { win: 1, width: 10, height: 10 });
     let mut minimo = false;
     let limite = Instant::now() + Duration::from_secs(5);
@@ -326,7 +307,6 @@ fn fechar_janela_envia_win_destroy_e_para_os_quadros() {
         }
     }
     assert!(destruida, "WIN_DESTROY não chegou");
-    // Depois do WIN_DESTROY nenhum quadro da janela 2 (o `process` falharia com "janela desconhecida").
     let n1 = c.n_frames(1);
     c.until(10, |c| c.n_frames(1) >= n1 + 3);
     c.drop_connection();
@@ -367,20 +347,16 @@ fn eventos_de_entrada_chegam_ao_servidor() {
 fn reconexao_volta_a_escutar_com_quadro_inteiro_novo() {
     let h = Harness::start(3);
 
-    // Sessão 1: cai abruptamente no meio do fluxo.
     let mut c1 = h.client();
     c1.until(10, |c| c.n_frames(1) >= 3 && c.n_frames(2) >= 3);
     c1.drop_connection();
 
-    // Sessão 2: HELLO com versão errada é recusado e o servidor continua escutando.
     {
         let Split { mut reader, mut writer, .. } = TcpTransport::connect(h.addr).unwrap().split().unwrap();
         write_message(&mut writer, &Message::Hello { version: 99, caps: 0, name: "ruim".into() }).unwrap();
-        // O servidor fecha: a leitura termina com Closed ou erro de E/S.
         assert!(read_message(&mut reader).is_err());
     }
 
-    // Sessão 3: tudo recomeça do zero (seq 0, quadro inteiro) e os pixels conferem.
     let mut c2 = h.client();
     c2.until(10, |c| c.n_frames(1) >= 3 && c.n_frames(2) >= 3);
     assert_eq!(c2.frames[&1][0].seq, 0);
@@ -392,10 +368,8 @@ fn reconexao_volta_a_escutar_com_quadro_inteiro_novo() {
 #[test]
 fn cliente_mudo_nao_impede_o_proximo_depois_do_prazo() {
     let h = Harness::start(2);
-    // Conecta e não diz nada.
     let mudo = std::net::TcpStream::connect(h.addr).unwrap();
     let t0 = Instant::now();
-    // O segundo cliente entra na fila do accept e só é atendido depois do prazo (400 ms).
     let mut c = h.client();
     assert!(t0.elapsed() >= Duration::from_millis(300), "atendido cedo demais: {:?}", t0.elapsed());
     c.until(10, |c| c.n_frames(1) >= 2);
@@ -406,7 +380,6 @@ fn cliente_mudo_nao_impede_o_proximo_depois_do_prazo() {
 
 #[test]
 fn quadro_grande_e_fatiado_e_cada_fatia_confere() {
-    // Vazão fixa e baixa: orçamento de 64 KiB; o degradê 1280x800 (centenas de KiB) tem de sair em fatias.
     let h = Harness::start_with(1, |o| {
         o.flow_initial_throughput = 100.0 * 1024.0;
         o.flow_adaptive = false;
@@ -415,11 +388,9 @@ fn quadro_grande_e_fatiado_e_cada_fatia_confere() {
     let mut c = h.client();
     c.until(20, |c| c.n_frames(2) >= 30 && c.n_frames(1) >= 5);
     let g = &c.frames[&2];
-    // A primeira nunca é fatiada; depois aparecem fatias (menos que o quadro inteiro).
     assert_eq!(g[0].strips, (0, g[0].n_strips));
     let fatias = g.iter().skip(1).filter(|f| f.strips != (0, f.n_strips)).count();
     assert!(fatias >= 10, "esperava fatias, vi {fatias} de {}", g.len());
-    // Todas as faixas acabam recebendo vez (nenhuma morre de fome).
     let mut cobertas = vec![false; g[0].n_strips];
     for f in g.iter().skip(1) {
         cobertas[f.strips.0..f.strips.1].fill(true);
@@ -432,7 +403,7 @@ fn quadro_grande_e_fatiado_e_cada_fatia_confere() {
 #[test]
 fn bytes_em_voo_respeitam_o_orcamento_sem_confirmacoes() {
     let h = Harness::start_with(1, |o| {
-        o.flow_initial_throughput = 100.0 * 1024.0; // orçamento mínimo: 64 KiB
+        o.flow_initial_throughput = 100.0 * 1024.0;
         o.flow_adaptive = false;
         o.gradient_size = (1280, 800);
     });
@@ -448,7 +419,6 @@ fn bytes_em_voo_respeitam_o_orcamento_sem_confirmacoes() {
         total += f.bytes;
         maior = maior.max(f.bytes);
     }
-    // Sem confirmação nada sai além do orçamento, salvo a exceção de progresso de UM quadro.
     assert!(total <= orcamento + maior, "em voo {total} B > orçamento {orcamento} + maior quadro {maior}");
     assert!(c.n_frames(1) + c.n_frames(2) >= 1);
     c.drop_connection();
@@ -457,8 +427,6 @@ fn bytes_em_voo_respeitam_o_orcamento_sem_confirmacoes() {
 
 #[test]
 fn janela_com_foco_e_atendida_primeiro() {
-    // Orçamento minúsculo e fixo; a janela de interface recebe o foco e continua fluindo
-    // enquanto o degradê pesado divide a conexão.
     let h = Harness::start_with(1, |o| {
         o.flow_initial_throughput = 100.0 * 1024.0;
         o.flow_adaptive = false;
@@ -476,18 +444,11 @@ fn janela_com_foco_e_atendida_primeiro() {
     h.finish();
 }
 
-// ---------------------------------------------------------------- apresentação atômica (docs/20)
-
-/// Resultado de ler `quadros` quadros fatiados da janela de listras.
 struct Listras {
-    /// (fatias do quadro, número do quadro nos marcadores ao fim, imagem igual ao gerador para esse número)
     grupos: Vec<(usize, u32, bool)>,
-    /// Alguma fatia com `MORE` apareceu.
     viu_more: bool,
 }
 
-/// Conecta como cliente (`atomic` = anuncia `CAP_ATOMIC`), confirma cada `FRAME` na hora e agrupa as fatias
-/// pelo bit `MORE`. Sem `MORE` (cliente sem a capacidade) cada `FRAME` é um grupo de uma fatia.
 fn le_listras(h: &Harness, atomic: bool, quadros: usize) -> Listras {
     use ps_codec::testutil::stripes;
     let Split { mut reader, mut writer, closer } = TcpTransport::connect(h.addr).unwrap().split().unwrap();
@@ -534,7 +495,6 @@ fn le_listras(h: &Harness, atomic: bool, quadros: usize) -> Listras {
 }
 
 fn servidor_de_listras(max_sessions: usize) -> Harness {
-    // Orçamento fixo de 64 KiB: o quadro de ruído (1,7 MB) sai em dezenas de fatias de 32 KiB.
     Harness::start_with(max_sessions, |o| {
         o.synthetic_stripes = true;
         o.flow_initial_throughput = 100.0 * 1024.0;
@@ -547,13 +507,9 @@ fn quadro_fatiado_chega_com_more_e_todas_as_fatias_vem_do_mesmo_instante() {
     let h = servidor_de_listras(1);
     let r = le_listras(&h, true, 6);
     assert!(r.viu_more, "o quadro de ruído tem de ser fatiado e as fatias levam MORE");
-    // O primeiro quadro (inteiro, sem SKIP) não é fatiado; os demais têm várias fatias.
     assert_eq!(r.grupos[0].0, 1, "o primeiro quadro não pode ser fatiado");
     assert!(r.grupos.iter().skip(1).all(|g| g.0 > 5), "esperava dezenas de fatias por quadro: {:?}", r.grupos);
-    // Ao fim de cada quadro (a última fatia, sem MORE) a imagem é exatamente o quadro do gerador de um só instante:
-    // todos os marcadores iguais e os pixels de ruído idênticos ao que o gerador desenha para esse número.
     assert!(r.grupos.iter().all(|g| g.2), "algum quadro fatiado saiu de instantes diferentes: {:?}", r.grupos);
-    // Os quadros avançam (o dano novo vira o quadro seguinte), nunca voltam.
     assert!(r.grupos.windows(2).all(|p| p[1].1 > p[0].1), "números de quadro: {:?}", r.grupos);
     h.finish();
 }
@@ -561,12 +517,8 @@ fn quadro_fatiado_chega_com_more_e_todas_as_fatias_vem_do_mesmo_instante() {
 #[test]
 fn sem_cap_atomic_nada_muda_no_fio_mas_o_quadro_ainda_sai_de_um_instante() {
     let h = servidor_de_listras(1);
-    // O cliente sem a capacidade nunca vê MORE (a asserção está em `le_listras`); cada FRAME é um grupo.
     let r = le_listras(&h, false, 12);
     assert!(!r.viu_more);
-    // Cada fatia, isolada, vem do instantâneo do seu quadro: depois de aplicadas todas as fatias de um quadro
-    // a imagem é um quadro inteiro; como o cliente sem a capacidade não sabe onde o quadro acaba, aqui só
-    // conferimos que o fio é idêntico ao de antes (FRAME sem flags) e que há fatias.
     assert!(r.grupos.len() >= 12);
     h.finish();
 }

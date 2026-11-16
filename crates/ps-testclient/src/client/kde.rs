@@ -1,4 +1,3 @@
-//! Decoração pelo protocolo do KDE (`org_kde_kwin_server_decoration`), a única que o GTK 3 entende.
 
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_surface::WlSurface;
@@ -8,12 +7,10 @@ use wayland_protocols_misc::server_decoration::client::org_kde_kwin_server_decor
 
 use super::State;
 
-/// Faz o bind do global, cria a decoração da superfície e pede o modo "servidor".
 pub(super) fn request_server_mode(globals: &GlobalList, qh: &QueueHandle<State>, surface: &WlSurface) {
     let Ok(mgr) = globals.bind::<OrgKdeKwinServerDecorationManager, _, _>(qh, 1..=1, ()) else { return };
     let deco = mgr.create(surface, qh, ());
     deco.request_mode(Mode::Server);
-    // Os objetos ficam vivos até o fim do processo.
     std::mem::forget(deco);
     std::mem::forget(mgr);
 }
@@ -21,7 +18,6 @@ pub(super) fn request_server_mode(globals: &GlobalList, qh: &QueueHandle<State>,
 impl Dispatch<OrgKdeKwinServerDecorationManager, ()> for State {
     fn event(st: &mut Self, _: &OrgKdeKwinServerDecorationManager, ev: org_kde_kwin_server_decoration_manager::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let org_kde_kwin_server_decoration_manager::Event::DefaultMode { mode } = ev {
-            // O modo do gerenciador é outro enum (mesmos valores); o nome sai do `Debug`.
             let nome = format!("{mode:?}");
             st.log(format!("kde-default-mode {}", nome.trim_start_matches("Value(").trim_end_matches(')')));
         }

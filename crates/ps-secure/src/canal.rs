@@ -1,33 +1,18 @@
-//! Canal cifrado sobre qualquer `Read + Write`: abertura, aperto de mão e registros de transporte
-//! (formato no fio em `docs/21` e `docs/05`).
-//!
-//! ```text
-//! Abertura (cliente -> servidor, em claro): "PSN1"
-//! Aperto de mão: três recados, cada um  u16 len (big-endian) + recado Noise
-//! Transporte: registros  u16 len (big-endian, 16..=65535) + texto cifrado (dados + 16 bytes de etiqueta)
-//! ```
 
 use std::io::{self, Read, Write};
 
 use crate::noise::{CipherState, Established, HandshakeState, Keypair, NoiseError, Role, MAX_MESSAGE, TAG_LEN};
 
-/// Os 4 bytes de abertura, também usados como prólogo do Noise.
 pub const MAGIC: &[u8; 4] = b"PSN1";
-/// Recado de aperto de mão maior que isto: fecha a conexão.
 pub const MAX_HANDSHAKE_MSG: usize = 1024;
-/// Nome (de aparelho ou cliente) na carga do aperto de mão.
 pub const MAX_NAME: usize = 63;
-/// Dados em claro por registro: 65535 menos a etiqueta.
 pub const MAX_PLAIN: usize = MAX_MESSAGE - TAG_LEN;
 
-/// Falha do canal.
 #[derive(Debug)]
 pub enum ChannelError {
     Io(io::Error),
     Noise(NoiseError),
-    /// A outra ponta violou o formato (tamanho fora do limite, nome inválido...).
     Protocol(&'static str),
-    /// O chamador recusou a outra ponta (por exemplo, chave de aparelho diferente da conhecida).
     Rejected(String),
 }
 
@@ -56,7 +41,6 @@ impl From<NoiseError> for ChannelError {
     }
 }
 
-/// O que o aperto de mão revela da outra ponta.
 pub struct PeerInfo {
     pub static_key: [u8; 32],
     pub name: String,
@@ -95,9 +79,6 @@ fn read_hs<R: Read>(r: &mut R) -> Result<Vec<u8>, ChannelError> {
     Ok(b)
 }
 
-/// Aperto de mão do **cliente** (iniciador). Escreve `"PSN1"` e o primeiro recado, lê o segundo e chama
-/// `verify(chave_do_aparelho, nome_do_aparelho)`; se ela recusar, **não** envia o terceiro recado (o cliente
-/// não revela a identidade dele a um aparelho que não reconhece). Depois envia o terceiro.
 pub fn client_handshake<R: Read, W: Write>(
     r: &mut R,
     w: &mut W,
@@ -108,7 +89,6 @@ pub fn client_handshake<R: Read, W: Write>(
     run_client(r, w, HandshakeState::new(Role::Initiator, MAGIC, key.clone()), my_name, verify)
 }
 
-/// Como [`client_handshake`], com a efêmera fixa (**só testes**).
 #[doc(hidden)]
 pub fn client_handshake_with_ephemeral<R: Read, W: Write>(
     r: &mut R,
@@ -146,13 +126,10 @@ fn run_client<R: Read, W: Write>(
     Ok((est, PeerInfo { static_key: device_key, name: device_name, handshake_hash: hash }))
 }
 
-/// Aperto de mão do **servidor** (respondedor). Os 4 bytes `"PSN1"` já foram consumidos por quem decidiu
-/// entre Noise e texto claro.
 pub fn server_handshake<R: Read, W: Write>(r: &mut R, w: &mut W, key: &Keypair, my_name: &str) -> Result<(Established, PeerInfo), ChannelError> {
     run_server(r, w, HandshakeState::new(Role::Responder, MAGIC, key.clone()), my_name)
 }
 
-/// Como [`server_handshake`], com a efêmera fixa (**só testes**).
 #[doc(hidden)]
 pub fn server_handshake_with_ephemeral<R: Read, W: Write>(r: &mut R, w: &mut W, key: &Keypair, ephemeral: [u8; 32], my_name: &str) -> Result<(Established, PeerInfo), ChannelError> {
     run_server(r, w, HandshakeState::new(Role::Responder, MAGIC, key.clone()).with_ephemeral_for_test(ephemeral), my_name)
@@ -175,16 +152,10 @@ fn run_server<R: Read, W: Write>(r: &mut R, w: &mut W, mut hs: HandshakeState, m
     Ok((est, PeerInfo { static_key: client_key, name: client_name, handshake_hash: hash }))
 }
 
-// ---------------------------------------------------------------------------------------------
-// Registros de transporte
-// ---------------------------------------------------------------------------------------------
-
 fn dead_err(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// Metade de leitura: junta os registros e entrega o fluxo de bytes decifrado. Um registro que não
-/// autentica encerra o fluxo com erro, sem resposta, e todas as leituras seguintes também falham.
 pub struct SecureReader<R> {
     inner: R,
     cs: CipherState,
@@ -202,8 +173,6 @@ impl<R: Read> SecureReader<R> {
         SecureReader { inner, cs: recv, hdr: [0; 2], hdr_have: 0, body: Vec::new(), body_have: 0, plain: Vec::new(), pos: 0, dead: false }
     }
 
-    /// Lê (aos poucos, tolerando `WouldBlock`/`TimedOut` no meio sem perder o ponto) o próximo registro.
-    /// `Ok(false)` = fim limpo da conexão entre dois registros.
     fn next_record(&mut self) -> io::Result<bool> {
         while self.hdr_have < 2 {
             match self.inner.read(&mut self.hdr[self.hdr_have..]) {
@@ -266,9 +235,6 @@ impl<R: Read> Read for SecureReader<R> {
     }
 }
 
-/// Metade de escrita: cada `write` vira um ou mais registros (até [`MAX_PLAIN`] bytes cada), enviados na
-/// hora. `write_message` do protocolo escreve a mensagem inteira num `write_all`, então cada mensagem do
-/// protocolo vai num registro (ou em vários, se passar de 65519 bytes), sem atraso de agrupamento.
 pub struct SecureWriter<W> {
     inner: W,
     cs: CipherState,
@@ -281,7 +247,6 @@ impl<W: Write> SecureWriter<W> {
         SecureWriter { inner, cs: send, dead: false, out: Vec::new() }
     }
 
-    /// Devolve o escritor de baixo (para os testes recuperarem os bytes dos registros).
     pub fn into_inner(self) -> W {
         self.inner
     }

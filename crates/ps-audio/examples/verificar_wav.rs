@@ -1,13 +1,4 @@
-//! Confere o WAV gravado por `psc --audio-dump` contra o áudio sintético (1 s de som, 1 s de silêncio,
-//! 440 Hz à esquerda e 880 Hz à direita, amplitude 0,25).
-//!
-//! Uso: `cargo run -p ps-audio --example verificar_wav -- ARQ.wav`
-//!
-//! Imprime os trechos achados e termina com código 0 se: o arquivo começa por som; cada trecho de som, menos o
-//! último (que o fim da gravação pode ter cortado), dura 1 s ± 20 ms; cada silêncio entre dois sons dura
-//! 1 s ± 20 ms; e as frequências dos canais são as esperadas em todos os trechos de som completos.
 
-// Lint novo do clippy do Rust 1.100 (Pi); o Rust 1.95 do notebook não o conhece como erro.
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
 use ps_audio::synth::{goertzel, split_stereo, AMPLITUDE};
@@ -30,8 +21,7 @@ fn main() {
     let frames = x.len() / 2;
     println!("{path}: {frames} quadros, {:.3} s", frames as f64 / 48000.0);
 
-    // Trechos: silêncio = pelo menos 480 quadros zerados seguidos.
-    let mut segs: Vec<(bool, usize, usize)> = Vec::new(); // (som, início, fim exclusivo)
+    let mut segs: Vec<(bool, usize, usize)> = Vec::new();
     let mut i = 0;
     while i < frames {
         let zero = |k: usize| x[k * 2] == 0 && x[k * 2 + 1] == 0;
@@ -43,7 +33,6 @@ fn main() {
             if j - i >= 480 || j == frames {
                 segs.push((false, i, j));
             } else {
-                // Zeros isolados (cruzamento por zero da senoide): fazem parte do som.
                 match segs.last_mut() {
                     Some(last) if last.0 => last.2 = j,
                     _ => segs.push((true, i, j)),
@@ -60,7 +49,6 @@ fn main() {
         }
         i = j;
     }
-    // Junta trechos vizinhos do mesmo tipo.
     let mut m: Vec<(bool, usize, usize)> = Vec::new();
     for s in segs {
         match m.last_mut() {

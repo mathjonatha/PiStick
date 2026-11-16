@@ -1,5 +1,3 @@
-//! Marco 7B: o microfone pelo protocolo, com um PipeWire falso (monitor de ligações por canal, soquete de PCM por
-//! TCP local). O cliente de teste fala o protocolo direto.
 
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
@@ -71,7 +69,6 @@ fn conecta(c: &Cenario, caps: u32) -> (TcpStream, u32) {
     (s, caps_srv)
 }
 
-/// Lê mensagens por até `dur` (ou até haver `ate_n` pedidos em `resp`), confirmando os quadros de imagem.
 fn pedidos(s: &mut TcpStream, dur: Duration, ate_n: usize, resp: &mut Vec<(Instant, bool)>) {
     let t0 = Instant::now();
     while t0.elapsed() < dur && resp.len() < ate_n {
@@ -88,7 +85,6 @@ fn pedidos(s: &mut TcpStream, dur: Duration, ate_n: usize, resp: &mut Vec<(Insta
     }
 }
 
-/// Manda um `Ping` e espera o `Pong`: prova que a sessão continua viva.
 fn sessao_viva(s: &mut TcpStream, valor: u64) -> bool {
     write_message(s, &Message::Ping { value: valor }).unwrap();
     let t = Instant::now();
@@ -108,20 +104,17 @@ fn pedido_nasce_do_gravador_e_o_pcm_chega_ao_soquete() {
     let (mut s, caps_srv) = conecta(&c, CAP_BLOCK_CODEC | CAP_MIC);
     assert_ne!(caps_srv & CAP_MIC, 0);
     let mut ped = Vec::new();
-    // Sem gravador: nenhum pedido em 700 ms e ninguém conecta no soquete do PipeWire.
     pedidos(&mut s, Duration::from_millis(700), 1, &mut ped);
     assert!(ped.is_empty(), "sem gravador não há pedido: {ped:?}");
     c.pcm.set_nonblocking(true).unwrap();
     assert!(c.pcm.accept().is_err());
     c.pcm.set_nonblocking(false).unwrap();
 
-    // O gravador entra.
     c.monitor.send(Some(b"+ pistick-mic:capture_FL -> pw-record:input_FL\n+ pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     pedidos(&mut s, Duration::from_secs(2), 1, &mut ped);
     assert_eq!(ped.len(), 1);
     assert!(ped[0].1, "o pedido liga");
 
-    // O cliente responde e manda 1 s de tom em pacotes de 10 ms (grade absoluta: o sleep do Windows é grosso).
     write_message(&mut s, &Message::AudioStart { stream: AUDIO_STREAM_MIC, codec: CODEC_PSA1, channels: 2, rate: 48000, frames: 480 }).unwrap();
     let (mut pcm, _) = c.pcm.accept().unwrap();
     let t0 = Instant::now();
@@ -141,14 +134,12 @@ fn pedido_nasce_do_gravador_e_o_pcm_chega_ao_soquete() {
             write_message(&mut s, &Message::AudioData { stream: AUDIO_STREAM_MIC, flags: 0, seq, pts_us: u64::from(seq) * 10_000, data: carga }).unwrap();
             seq += 1;
         }
-        // Drena o PCM e as mensagens do servidor sem bloquear muito.
         pcm.set_read_timeout(Some(Duration::from_millis(2))).unwrap();
         if let Ok(n) = pcm.read(&mut buf) {
             recebido.extend_from_slice(&buf[..n]);
         }
         pedidos(&mut s, Duration::from_millis(1), 99, &mut ped);
     }
-    // A escrita no PipeWire não para sozinha: lê só mais 200 ms.
     let fim_leitura = Instant::now() + Duration::from_millis(200);
     while Instant::now() < fim_leitura {
         match pcm.read(&mut buf) {
@@ -162,7 +153,6 @@ fn pedido_nasce_do_gravador_e_o_pcm_chega_ao_soquete() {
     assert!((synth::goertzel(&l, 440.0) - 0.25).abs() < 0.02, "esq 440 = {}", synth::goertzel(&l, 440.0));
     assert!((synth::goertzel(&r, 880.0) - 0.25).abs() < 0.02, "dir 880 = {}", synth::goertzel(&r, 880.0));
 
-    // O gravador sai: o pedido de desligar chega depois da espera e em menos de 1 s.
     let saiu = Instant::now();
     c.monitor.send(Some(b"- pistick-mic:capture_FL -> pw-record:input_FL\n- pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     let mut desl = Vec::new();
@@ -171,7 +161,6 @@ fn pedido_nasce_do_gravador_e_o_pcm_chega_ao_soquete() {
     assert!(!desl[0].1, "o pedido desliga");
     let atraso = desl[0].0.duration_since(saiu);
     assert!(atraso >= OFF_DELAY - Duration::from_millis(60) && atraso < Duration::from_secs(1), "atraso do desligamento {atraso:?}");
-    // Pacotes que ainda estavam a caminho depois do pedido são descartados sem derrubar a sessão.
     write_message(&mut s, &Message::AudioData { stream: AUDIO_STREAM_MIC, flags: 0, seq, pts_us: 0, data: vec![0, 0, 0, 0] }).unwrap();
     write_message(&mut s, &Message::AudioStop { stream: AUDIO_STREAM_MIC }).unwrap();
     assert!(sessao_viva(&mut s, 77), "a sessão continua viva");
@@ -184,12 +173,10 @@ fn sem_o_bit_do_cliente_nao_ha_pedido_mesmo_com_gravador() {
     let c = monta(true);
     let (mut s, caps_srv) = conecta(&c, CAP_BLOCK_CODEC | CAP_AUDIO);
     assert_ne!(caps_srv & CAP_MIC, 0, "o servidor anuncia o bit");
-    // Mesmo com um gravador, o servidor não pede (e nem sobe o monitor de ligações: a origem falsa nem é aberta).
     let _ = c.monitor.send(Some(b"+ pistick-mic:capture_FL -> pw-record:input_FL\n".to_vec()));
     let mut ped = Vec::new();
     pedidos(&mut s, Duration::from_millis(1200), 1, &mut ped);
     assert!(ped.is_empty());
-    // Mensagem do microfone sem a capacidade: descartada, a sessão segue.
     write_message(&mut s, &Message::AudioData { stream: AUDIO_STREAM_MIC, flags: 0, seq: 0, pts_us: 0, data: vec![0; 8] }).unwrap();
     assert!(sessao_viva(&mut s, 5));
     c.pcm.set_nonblocking(true).unwrap();

@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- App de teste do PiStick (marco 5): toca 440 Hz à esquerda e 880 Hz à direita, amplitude 0,25, por 60 s.
-     Serve ao roteiro tools/roteiros/102-android-som.txt (verify-audio 440 880). Sem permissões. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="br.pistick.tom"
     android:versionCode="1"

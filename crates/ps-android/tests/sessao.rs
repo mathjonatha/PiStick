@@ -1,6 +1,3 @@
-//! A sessão do cliente Android, sem aparelho: primeiro com eventos de rede fabricados (janelas, foco, popups, entrada,
-//! área de transferência) e depois contra um `psd` de verdade no laço local (conexão cifrada, chave nova, pareamento).
-//! A superfície é uma tela falsa que guarda os quadros recebidos.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,7 +25,6 @@ const CELULAR: TelaInfo = TelaInfo { largura: 1080, altura: 2400, dpi: 440 };
 type Superficie = Arc<Mutex<Option<Box<dyn Tela>>>>;
 type Quadros = Arc<Mutex<Vec<(u32, u32, Vec<u8>)>>>;
 
-/// A tela falsa: guarda o tamanho e os pixels de cada quadro publicado.
 struct Falsa(Quadros);
 
 impl Tela for Falsa {
@@ -44,7 +40,6 @@ fn tela_falsa() -> (Superficie, Quadros) {
     (Arc::new(Mutex::new(Some(Box::new(Falsa(q.clone()))))), q)
 }
 
-/// Janela remota com o quadro todo da cor `v` (B = G = R = v) e um número de quadro pendente de confirmação.
 fn janela(w: u32, h: u32, v: u8, seq: u32) -> Arc<SharedWindow> {
     let sh = SharedWindow::new(w, h);
     pintar(&sh, w, h, v, seq);
@@ -69,7 +64,6 @@ struct Banco {
     quadros: Quadros,
 }
 
-/// Os testes de conta usam o fator 2 explícito (540x1200 no celular de teste); o padrão tem teste próprio.
 fn banco() -> Banco {
     banco_com_fator(2.0)
 }
@@ -91,7 +85,6 @@ impl Banco {
         self.out.try_iter().collect()
     }
 
-    /// As mensagens da fila de entrada (a thread `psa-entrada` as mandaria depois das pausas).
     fn entrada_msgs(&self) -> Vec<Message> {
         self.entrada
             .try_iter()
@@ -119,10 +112,6 @@ fn pixel(q: &(u32, u32, Vec<u8>), x: u32, y: u32) -> [u8; 4] {
     [q.2[i], q.2[i + 1], q.2[i + 2], q.2[i + 3]]
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Eventos de rede fabricados
-// ---------------------------------------------------------------------------------------------------------------
-
 #[test]
 fn janela_nova_ganha_foco_pede_tamanho_desenha_e_confirma_o_quadro() {
     let b = banco();
@@ -131,14 +120,11 @@ fn janela_nova_ganha_foco_pede_tamanho_desenha_e_confirma_o_quadro() {
     assert!(saida.contains(&Message::Focus { win: 1, focused: true }), "{saida:?}");
     assert!(saida.contains(&Message::ResizeReq { win: 1, width: 540, height: 1200 }), "o tamanho do celular de teste: {saida:?}");
     assert!(saida.contains(&Message::FrameAck { win: 1, seq: 101 }), "o quadro apresentado é confirmado: {saida:?}");
-    // A fila de eventos tem a lista de janelas com a aba e o foco.
     let ev = b.fila.drenar();
     assert!(ev.contains(&Evento::Janelas { foco: 1, abas: vec![(1, "foot".into())] }), "{ev:?}");
-    // O que foi desenhado: buffer do tamanho da região visível (540x1200), cinza onde a janela (960x600) não cobre.
     let q = b.quadros.lock().unwrap();
     let ultimo = q.last().expect("desenhou");
     assert_eq!((ultimo.0, ultimo.1), (540, 1200));
-    // A janela (960x600) é mais baixa que a região (540x1200): fica centrada na vertical (começa em y = 300).
     assert_eq!(pixel(ultimo, 10, 10), [48, 48, 48, 255], "acima da janela: fundo cinza");
     assert_eq!(pixel(ultimo, 10, 310), [90, 90, 90, 255], "o canto da janela");
 }
@@ -155,25 +141,21 @@ fn nova_janela_de_dialogo_ganha_o_foco_e_ao_fechar_o_foco_volta() {
     assert!(saida.contains(&Message::ResizeReq { win: 2, width: 540, height: 1200 }));
     let ev = b.fila.drenar();
     assert!(ev.contains(&Evento::Janelas { foco: 2, abas: vec![(1, "editor".into()), (2, "Salvar como".into())] }));
-    // A janela de fundo recebe quadro: é confirmado na hora, sem desenhar.
     let n = b.quadros.lock().unwrap().len();
     let fundo = b.entrada_vazia_da_janela(1);
     b.ev(UserEvent::Frame { win: 1, shared: fundo });
     assert_eq!(b.quadros.lock().unwrap().len(), n, "janela escondida não é desenhada");
     assert!(b.saida().contains(&Message::FrameAck { win: 1, seq: 555 }));
-    // Fechar o diálogo devolve o foco ao editor.
     b.ev(UserEvent::WinDestroy { win: 2 });
     let saida = b.saida();
     assert!(saida.contains(&Message::Focus { win: 2, focused: false }) && saida.contains(&Message::Focus { win: 1, focused: true }), "{saida:?}");
     let ev = b.fila.drenar();
     assert!(ev.contains(&Evento::Janelas { foco: 1, abas: vec![(1, "editor".into())] }), "{ev:?}");
-    // Esc depois de fechar vai para o editor.
     b.s.tecla_extra(1);
     assert!(b.entrada_msgs().iter().all(|m| matches!(m, Message::Key { win: 1, .. })));
 }
 
 impl Banco {
-    /// Uma janela cujo único quadro pendente tem `seq` 555.
     fn entrada_vazia_da_janela(&self, _win: u32) -> Arc<SharedWindow> {
         janela(8, 8, 1, 555)
     }
@@ -191,7 +173,6 @@ fn tocar_numa_aba_troca_a_janela_mostrada_e_avisa_o_servidor() {
     let q = b.quadros.lock().unwrap();
     assert_eq!(pixel(q.last().unwrap(), 100, 100), [40, 40, 40, 255], "agora a janela 1 aparece");
     drop(q);
-    // Aba que não existe: nada muda.
     b.fila.drenar();
     b.s.focar_aba(99);
     assert!(b.saida().is_empty() && b.fila.is_empty());
@@ -212,15 +193,12 @@ fn popup_e_composto_sobre_a_janela_na_posicao_certa_e_recebe_os_toques() {
         assert_eq!(pixel(u, 40, 80), [250, 250, 250, 255], "dentro do popup (20..120 x 30..230, em pixels remotos)");
         assert_eq!(pixel(u, 10, 10), [50, 50, 50, 255], "fora do popup");
     }
-    // Toque curto sobre o popup: vai ao popup, com coordenadas locais (remoto = tela / 2).
-    // Tela (100, 140) = remoto (50, 70) = popup local (30, 40).
     b.s.toque(&toque(Acao::Baixo, 0, &[(0, 100.0, 140.0)], 0));
     b.s.toque(&toque(Acao::Cima, 0, &[(0, 100.0, 140.0)], 60));
     let m = b.entrada_msgs();
     assert_eq!(m[0], Message::PointerMove { win: 5, x: 30.0, y: 40.0 });
     assert!(matches!(m[1], Message::PointerButton { win: 5, pressed: true, .. }));
     assert!(matches!(m[2], Message::PointerButton { win: 5, pressed: false, .. }));
-    // O popup some: o desenho volta a ser só a janela.
     b.ev(UserEvent::WinDestroy { win: 5 });
     let q = b.quadros.lock().unwrap();
     assert_eq!(pixel(q.last().unwrap(), 40, 80), [50, 50, 50, 255]);
@@ -234,7 +212,6 @@ fn rotacao_pede_o_tamanho_novo_sem_derrubar_nada() {
     b.s.definir_tela(TelaInfo { largura: 2400, altura: 1080, dpi: 440 });
     let saida = b.saida();
     assert!(saida.contains(&Message::ResizeReq { win: 1, width: 1200, height: 540 }), "{saida:?}");
-    // O mesmo tamanho de novo não repete o pedido.
     b.s.definir_tela(TelaInfo { largura: 2400, altura: 1080, dpi: 440 });
     assert!(b.saida().is_empty());
     let q = b.quadros.lock().unwrap();
@@ -263,7 +240,6 @@ fn mudar_o_fator_refaz_o_pedido_de_todas_as_janelas_sem_derrubar_nada() {
     assert!(saida.contains(&Message::ResizeReq { win: 1, width: 360, height: 800 }), "{saida:?}");
     assert!(saida.contains(&Message::ResizeReq { win: 2, width: 360, height: 800 }), "{saida:?}");
     assert!(!b.s.parada());
-    // O mesmo fator de novo não repete nada; valor fora do passo é levado ao passo (2,8 vira 3,0).
     b.s.definir_fator(2.8);
     assert!(b.saida().is_empty());
     b.s.definir_fator(2.0);
@@ -297,7 +273,6 @@ fn pinca_amplia_so_localmente_sem_novo_pedido_de_tamanho() {
     b.criar(1, 540, 1200, "a", 70);
     b.saida();
     let antes = b.quadros.lock().unwrap().len();
-    // Dois dedos se afastando.
     b.s.toque(&toque(Acao::Baixo, 0, &[(0, 400.0, 1000.0)], 0));
     b.s.toque(&toque(Acao::PonteiroBaixo, 1, &[(0, 400.0, 1000.0), (1, 600.0, 1000.0)], 10));
     b.s.toque(&toque(Acao::Mover, 0, &[(0, 300.0, 1000.0), (1, 700.0, 1000.0)], 30));
@@ -314,7 +289,6 @@ fn texto_do_teclado_virtual_e_ctrl_grudento_viram_teclas_na_janela_em_foco() {
     b.s.texto("ação");
     let m = b.entrada_msgs();
     assert!(!m.is_empty() && m.iter().all(|m| matches!(m, Message::Key { win: 3, .. })));
-    // Ctrl + C.
     assert!(b.s.alternar_modificador(Mod::Ctrl));
     assert_eq!(b.s.modificadores(), (true, false));
     b.s.texto("c");
@@ -322,11 +296,9 @@ fn texto_do_teclado_virtual_e_ctrl_grudento_viram_teclas_na_janela_em_foco() {
     assert_eq!(m.first(), Some(&Message::Key { win: 3, keycode: 29, pressed: true }));
     assert_eq!(m.last(), Some(&Message::Key { win: 3, keycode: 29, pressed: false }));
     assert_eq!(b.s.modificadores(), (false, false));
-    // Caractere sem tecla: aviso na fila.
     b.fila.drenar();
     b.s.texto("😀");
     assert!(matches!(b.fila.drenar().as_slice(), [Evento::Aviso(t)] if t.contains("descartado")));
-    // Backspace e teclado físico.
     b.s.apagar(2, 0);
     assert_eq!(b.entrada_msgs().len(), 4);
     b.s.tecla_fisica(30, true);
@@ -348,13 +320,10 @@ fn area_de_transferencia_nos_dois_sentidos_com_texto_acentuado() {
     let b = banco();
     b.criar(1, 540, 1200, "a", 70);
     b.saida();
-    // Do Pi para o celular: vira evento para a casca gravar no ClipboardManager.
     assert_eq!(b.s.clipboard().from_server("text/plain;charset=utf-8", "do Pi: ação ç".as_bytes()).as_deref(), Some("do Pi: ação ç"));
     assert!(b.fila.drenar().contains(&Evento::AreaDeTransferencia("do Pi: ação ç".into())));
-    // O texto que acabou de vir do Pi não volta como eco quando o app ganha o foco.
     b.s.foco_do_app(true, Some("do Pi: ação ç"));
     assert!(!b.saida().iter().any(|m| matches!(m, Message::ClipboardUp { .. })));
-    // Do celular para o Pi: ao voltar ao foco com texto novo.
     b.s.foco_do_app(true, Some("do celular ÃÇ"));
     let saida = b.saida();
     assert!(saida.iter().any(|m| matches!(m, Message::ClipboardUp { data, .. } if data.as_slice() == "do celular ÃÇ".as_bytes())), "{saida:?}");
@@ -396,10 +365,6 @@ fn eventos_do_poll_saem_no_formato_documentado() {
     let ev = decodificar(&bytes).unwrap();
     assert!(ev.iter().any(|e| matches!(e, Evento::Janelas { foco: 1, .. })));
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// Contra um psd de verdade
-// ---------------------------------------------------------------------------------------------------------------
 
 fn caixa(k: &Keypair) -> Box<Segredo> {
     Box::new(Segredo(*k.secret_bytes()))
@@ -449,7 +414,6 @@ fn controle(nome: &str) -> (Controle, Quadros, PathBuf) {
     (c, q, dir)
 }
 
-/// Esvazia a fila até `pronto` aceitar os eventos ou o prazo acabar; devolve tudo o que viu.
 fn esperar(c: &Controle, prazo: Duration, mut pronto: impl FnMut(&[Evento]) -> bool) -> Vec<Evento> {
     let fim = Instant::now() + prazo;
     let mut todos = Vec::new();
@@ -474,13 +438,11 @@ fn conecta_ao_psd_pelo_canal_cifrado_com_a_chave_entregue_pela_casca_e_desenha()
     let chave = Keypair::generate().unwrap();
     c.conectar(&p.addr.to_string(), Some(caixa(&chave)));
     let ev = esperar(&c, Duration::from_secs(15), |ev| conectou(ev) && ev.iter().any(|e| matches!(e, Evento::Janelas { foco, .. } if *foco != 0)));
-    // Aparelho registrado na lista de conhecidos (a pasta de dados do app), sem nenhum segredo nela.
     let conhecidos = std::fs::read_to_string(dir.join("aparelhos-conhecidos")).unwrap();
     assert!(conhecidos.contains("pi-teste"));
     assert!(!dir.join("chave-do-cliente").exists(), "a chave não é gravada pelo núcleo: quem guarda é a casca, no Keystore");
     assert_eq!(p.sec.list().len(), 1, "o aparelho pareou o celular no primeiro uso");
     let _ = ev;
-    // Chegam quadros: o núcleo desenhou na tela falsa, no tamanho da região visível.
     let fim = Instant::now() + Duration::from_secs(10);
     while quadros.lock().unwrap().is_empty() && Instant::now() < fim {
         std::thread::sleep(Duration::from_millis(20));
@@ -490,12 +452,10 @@ fn conecta_ao_psd_pelo_canal_cifrado_com_a_chave_entregue_pela_casca_e_desenha()
         let primeiro = q.first().expect("a tela recebeu quadros do psd");
         assert!(primeiro.0 > 0 && primeiro.1 > 0);
     }
-    // Entrada: um toque e texto não derrubam a sessão.
     c.toque(&toque(Acao::Baixo, 0, &[(0, 300.0, 400.0)], 0));
     c.toque(&toque(Acao::Cima, 0, &[(0, 300.0, 400.0)], 50));
     c.texto("ação");
     std::thread::sleep(Duration::from_millis(500));
-    // Desconectar: o psd vê a sessão acabar e a fila anuncia o estado.
     c.desconectar();
     assert!(decodificar(&c.poll(0)).unwrap().iter().all(|e| !matches!(e, Evento::Erro(_))));
 }
@@ -553,7 +513,6 @@ fn aparelho_com_outro_dono_mostra_o_codigo_de_pareamento_e_conecta_depois_da_apr
     }
     c.conectar(&p.addr.to_string(), Some(caixa(&chave)));
     let PairWait::Request(req) = esperando.join().unwrap() else { panic!("sem pedido de pareamento") };
-    // O celular mostra o mesmo código que o `psd pair` mostra ao operador.
     let ev = esperar(&c, Duration::from_secs(10), |ev| ev.iter().any(|e| matches!(e, Evento::Codigo(_))));
     let codigo = ev.iter().find_map(|e| if let Evento::Codigo(c) = e { Some(c.clone()) } else { None }).unwrap();
     assert_eq!(codigo, format_code(&req.code));
@@ -571,7 +530,6 @@ fn aparelho_que_recusa_da_erro_claro_que_ensina_a_parear() {
     let p = pi("recusa", &[(&dono, "dono")]);
     let (c, _q, _dir) = controle("recusa");
     let chave = Keypair::generate().unwrap();
-    // Ninguém abriu o `psd pair`: o aparelho recusa na hora.
     c.conectar(&p.addr.to_string(), Some(caixa(&chave)));
     let ev = esperar(&c, Duration::from_secs(15), |ev| ev.iter().any(|e| matches!(e, Evento::Erro(_))));
     assert!(ev.iter().any(|e| matches!(e, Evento::Erro(t) if t.contains("psd pair"))), "{ev:?}");
@@ -584,7 +542,6 @@ fn endereco_invalido_e_porta_fechada_dao_erro_sem_panico() {
     let chave = Keypair::generate().unwrap();
     c.conectar("", Some(caixa(&chave)));
     esperar(&c, Duration::from_secs(5), |ev| ev.iter().any(|e| matches!(e, Evento::Erro(_))));
-    // Porta onde ninguém escuta.
     let livre = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     c.conectar(&livre.to_string(), Some(caixa(&chave)));
     esperar(&c, Duration::from_secs(10), |ev| ev.iter().any(|e| matches!(e, Evento::Erro(t) if t.contains("conectar"))));
@@ -599,10 +556,6 @@ fn resolver_aceita_ip_com_e_sem_porta() {
     assert!(resolver("a\nb").is_err());
     assert!(resolver(&"x".repeat(300)).is_err());
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// Som e estatísticas
-// ---------------------------------------------------------------------------------------------------------------
 
 static SAIDAS_ABERTAS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static SAIDAS_PARADAS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -653,15 +606,11 @@ fn as_linhas_de_estatisticas_tem_os_campos_do_psc() {
     assert_eq!(l.len(), 2, "{l:?}");
     assert!(l[0].starts_with("VIDEOSTATS fps=") && l[0].contains("rtt_mediano=11.00ms") && l[0].contains("decod_media=") && l[0].contains("rtt_amostras=1"), "{}", l[0]);
     assert!(l[1].starts_with("AUDIOSTATS pacotes=") && l[1].contains("esvaziamentos=") && l[1].contains("jitter="), "{}", l[1]);
-    // Sem motor de áudio só sai a linha de vídeo; a janela seguinte já foi aberta.
     let l = ps_android::sessao::linhas_de_estatisticas(&stats, None);
     assert_eq!(l.len(), 1);
     assert!(l[0].contains("rtt_mediano=sem-amostras"));
 }
 
-/// Marco 8A: o `GOODBYE` do aparelho vira o evento `Encerrada` (com o texto) e o estado "desconectado", a sessão para, e o
-/// `STATUS` vira `EstadoDoAparelho` para a casca mostrar. Sem aparelho de verdade: o que a casca faz com o texto não foi
-/// verificado no celular.
 #[test]
 fn goodbye_e_status_viram_eventos_para_a_casca_e_a_sessao_para() {
     let b = banco();
@@ -676,8 +625,6 @@ fn goodbye_e_status_viram_eventos_para_a_casca_e_a_sessao_para() {
     assert!(b.s.parada());
 }
 
-/// Marco 8A, ponta a ponta com um `psd` de verdade: dois celulares pareados; o segundo assume a sessão. O primeiro recebe
-/// `Encerrada` (motivo 1) com o nome do segundo, a sessão dele para e **não reconecta sozinho**; o segundo desenha.
 #[test]
 fn outro_cliente_assume_a_sessao_e_o_primeiro_recebe_o_evento_e_nao_reconecta() {
     let (ka, kb) = (Keypair::generate().unwrap(), Keypair::generate().unwrap());
@@ -700,7 +647,6 @@ fn outro_cliente_assume_a_sessao_e_o_primeiro_recebe_o_evento_e_nao_reconecta() 
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!qb.lock().unwrap().is_empty(), "o segundo recebeu as janelas e desenhou");
-    // O primeiro não volta sozinho: nenhum evento de conexão nos próximos segundos.
     std::thread::sleep(Duration::from_secs(2));
     let depois = decodificar(&a.poll(0)).unwrap();
     assert!(!depois.iter().any(|e| matches!(e, Evento::Estado { fase: f, .. } if *f == fase::CONECTANDO || *f == fase::CONECTADO)), "{depois:?}");

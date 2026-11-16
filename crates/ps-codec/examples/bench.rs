@@ -1,9 +1,3 @@
-//! Benchmark do codec em 1920×1080.
-//!
-//! Rodar sempre em release: `cargo run --release -p ps-codec --example bench`
-//!
-//! Casos: quadro inteiro de interface, de degradê e de ruído, e quadros com 5% de dano
-//! (conteúdo de interface e de ruído).
 
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
@@ -26,7 +20,6 @@ fn fill(img: &mut [u8], r: Rect, bgr: [u8; 3]) {
     }
 }
 
-/// "Texto" sintético: traços curtos de 2 cores em linhas, como uma interface com texto.
 fn texto(img: &mut [u8], r: Rect, rng: &mut Rng, fg: [u8; 3], bg: [u8; 3]) {
     fill(img, r, bg);
     let mut y = r.y + 4;
@@ -43,8 +36,6 @@ fn texto(img: &mut [u8], r: Rect, rng: &mut Rng, fg: [u8; 3], bg: [u8; 3]) {
     }
 }
 
-/// Tela de interface: fundo sólido, barra, painel lateral, cartões com borda e blocos de "texto",
-/// e uma miniatura em degradê.
 fn interface(rng: &mut Rng) -> Vec<u8> {
     let mut img = vec![0u8; W * H * 4];
     fill(&mut img, Rect::new(0, 0, W as u32, H as u32), [0x30, 0x2B, 0x2B]);
@@ -59,7 +50,6 @@ fn interface(rng: &mut Rng) -> Vec<u8> {
             texto(&mut img, Rect::new(r.x + 12, r.y + 12, r.w - 24, r.h - 24), rng, [0xE0, 0xE0, 0xE0], [0x3A, 0x34, 0x34]);
         }
     }
-    // Miniatura com degradê 256×128
     for y in 0..128usize {
         for x in 0..256usize {
             let i = ((y + 100) * W + x + 1500) * 4;
@@ -72,7 +62,6 @@ fn interface(rng: &mut Rng) -> Vec<u8> {
     img
 }
 
-/// Mesmo degradê animado da fonte sintética do servidor, em tela cheia.
 fn degrade(phase: usize) -> Vec<u8> {
     let mut img = vec![0u8; W * H * 4];
     let blue: Vec<u8> = (0..W).map(|x| ((x * 255 / W + phase) & 0xFF) as u8).collect();
@@ -92,7 +81,6 @@ fn ruido(rng: &mut Rng) -> Vec<u8> {
     img
 }
 
-/// Conta os blocos por modo percorrendo o fluxo (mesma leitura do decodificador).
 fn histograma(data: &[u8]) -> [usize; 5] {
     let mut h = [0usize; 5];
     let mut pos = 0;
@@ -139,7 +127,6 @@ fn stats(v: &[f64]) -> (f64, f64, f64) {
     (s[0], s[s.len() / 2], s.iter().sum::<f64>() / s.len() as f64)
 }
 
-/// Quadro inteiro: o codificador começa sem referência a cada iteração.
 fn quadro_inteiro(threads: usize, nome: &'static str, mut gera: impl FnMut(usize) -> Vec<u8>) -> Medida {
     let mut enc = Encoder::with_threads(W as u32, H as u32, threads);
     let mut dec = Decoder::new(W as u32, H as u32);
@@ -167,7 +154,6 @@ fn quadro_inteiro(threads: usize, nome: &'static str, mut gera: impl FnMut(usize
     Medida { nome, enc_us: e, dec_us: d, bytes, hist }
 }
 
-/// 5% de dano: 8 retângulos de área total ~5% da tela, com conteúdo novo a cada iteração.
 fn com_dano(threads: usize, nome: &'static str, rng: &mut Rng, base: Vec<u8>, conteudo: impl Fn(&mut [u8], Rect, &mut Rng)) -> Medida {
     let mut enc = Encoder::with_threads(W as u32, H as u32, threads);
     let mut dec = Decoder::new(W as u32, H as u32);
@@ -175,7 +161,6 @@ fn com_dano(threads: usize, nome: &'static str, rng: &mut Rng, base: Vec<u8>, co
     let mut out = Vec::new();
     enc.encode(&img, W * 4, None, &mut out);
     dec.decode(&out).unwrap();
-    // 8 retângulos de 114×114 ≈ 5,0% de 1920×1080, em posições fixas e espalhadas.
     let rects: Vec<Rect> = (0..8).map(|i| Rect::new(40 + (i % 4) * 470, 90 + (i / 4) * 520, 114, 114)).collect();
     let area: u32 = rects.iter().map(|r| r.w * r.h).sum();
     assert!((area as f64 / (W * H) as f64 - 0.05).abs() < 0.002);
@@ -204,7 +189,6 @@ fn com_dano(threads: usize, nome: &'static str, rng: &mut Rng, base: Vec<u8>, co
 }
 
 fn main() {
-    // Uso: bench [N_THREADS...]  (padrão: 1 e o número de núcleos)
     let mut lista: Vec<usize> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
     if lista.is_empty() {
         let n = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -251,7 +235,6 @@ fn main() {
         println!();
     }
 
-    // Onde o tempo vai (uma thread, quadro inteiro).
     println!("### Tempo por fase, uma thread, quadro inteiro (ms por quadro; fases medidas separadas)
 ");
     println!("| caso | comparação (blocos iguais) | passada da paleta | pacote da paleta | BGRX→BGR (só LZ/RAW) | LZ | blocos sólido/paleta/LZ+RAW |");

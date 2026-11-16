@@ -1,25 +1,14 @@
-//! Área de transferência do sistema hospedeiro, atrás de um trait, e a sincronização com o servidor.
-//!
-//! Regras (docs/05-protocolo.md, "Área de transferência"):
-//! - Pi -> hospedeiro: o texto recebido em `CLIPBOARD` vai para a área de transferência do sistema;
-//! - hospedeiro -> Pi: quando uma janela ganha foco e o texto do sistema mudou desde o último
-//!   envio ou recebimento, o cliente envia `CLIPBOARD`;
-//! - nenhum lado reenvia um conteúdo idêntico ao último que recebeu.
 
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use ps_proto::{Message, MAX_CLIPBOARD, MIME_TEXT};
 
-/// Acesso ao texto da área de transferência do sistema.
 pub trait HostClipboard: Send + Sync {
-    /// Texto atual, ou `None` se vazia, ocupada ou sem texto.
     fn get_text(&self) -> Option<String>;
-    /// Substitui o conteúdo por `text`. Devolve se conseguiu.
     fn set_text(&self, text: &str) -> bool;
 }
 
-/// Implementação do sistema: `clipboard-win` no Windows; nos demais sistemas é vazia por enquanto.
 #[derive(Default)]
 pub struct SystemClipboard;
 
@@ -45,11 +34,9 @@ impl HostClipboard for SystemClipboard {
     }
 }
 
-/// Sincronização entre a área de transferência do sistema e o servidor.
 pub struct ClipboardSync {
     host: Arc<dyn HostClipboard>,
     out: Sender<Message>,
-    /// Último texto enviado ou recebido.
     last: Mutex<Option<String>>,
 }
 
@@ -69,7 +56,6 @@ impl ClipboardSync {
         let _ = self.out.send(Message::ClipboardUp { mime: MIME_TEXT.to_string(), data: text.as_bytes().to_vec() });
     }
 
-    /// Uma janela ganhou foco: envia o texto do sistema se mudou. Devolve se enviou.
     pub fn on_focus(&self) -> bool {
         let Some(text) = self.host.get_text() else { return false };
         let mut last = self.last();
@@ -82,7 +68,6 @@ impl ClipboardSync {
         !text.is_empty() && text.len() <= MAX_CLIPBOARD
     }
 
-    /// Chegou `CLIPBOARD` do servidor. Devolve se o conteúdo do sistema foi trocado.
     pub fn from_server(&self, mime: &str, data: &[u8]) -> Option<String> {
         if mime != MIME_TEXT {
             return None;
@@ -99,7 +84,6 @@ impl ClipboardSync {
         Some(text)
     }
 
-    /// Roteiro de teste (`clip "texto"`): define o texto do sistema e o envia na hora.
     pub fn force_set(&self, text: &str) -> bool {
         if !self.host.set_text(text) {
             return false;
@@ -109,7 +93,6 @@ impl ClipboardSync {
         true
     }
 
-    /// Texto atual do sistema (para conferência no roteiro).
     pub fn host_text(&self) -> Option<String> {
         self.host.get_text()
     }
@@ -170,9 +153,7 @@ mod tests {
         assert_eq!(host.get_text().as_deref(), Some("vindo do Pi ç"));
         assert!(!sync.on_focus(), "eco: o texto recebido não volta ao servidor");
         assert!(rx.try_recv().is_err());
-        // Repetição idêntica do servidor também não mexe no sistema.
         assert_eq!(sync.from_server(MIME_TEXT, "vindo do Pi ç".as_bytes()), None);
-        // Tipo MIME desconhecido é ignorado.
         assert_eq!(sync.from_server("image/png", b"x"), None);
     }
 

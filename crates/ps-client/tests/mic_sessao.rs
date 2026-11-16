@@ -1,7 +1,3 @@
-//! Marco 7B, os dois lados juntos: o `Mic` do cliente (com `--mic-file`, sem dispositivo nenhum) contra o servidor de
-//! verdade (`serve_loop` com `MicHub`), com um PipeWire falso (monitor de ligações por canal, soquete de PCM por TCP
-//! local). Prova de ponta a ponta, sem Pi: sem gravador nada sai do cliente; com gravador o tom chega ao soquete; ao
-//! sair o gravador a captura para em menos de 1 s e o servidor descarta o que ainda estiver a caminho.
 
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
@@ -37,7 +33,6 @@ impl Read for LeitorCanal {
     }
 }
 
-/// Dois segundos contínuos do tom do roteiro 73 (440 Hz à esquerda, 880 Hz à direita, amplitude 0,25); a emenda do laço é sem estalo.
 fn tom() -> WavLoop {
     let amostras: Vec<i16> = (0..96_000u64)
         .flat_map(|i| {
@@ -50,7 +45,6 @@ fn tom() -> WavLoop {
 
 #[test]
 fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
-    // --- servidor com PipeWire falso
     let pcm = TcpListener::bind("127.0.0.1:0").unwrap();
     let pcm_addr = pcm.local_addr().unwrap().to_string();
     let (monitor, rx_monitor) = mpsc::channel::<Option<Vec<u8>>>();
@@ -70,7 +64,6 @@ fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
     let opts = ServerOptions { quiet: true, mic: Some(hub), ..ServerOptions::default() };
     let server = std::thread::spawn(move || serve_loop(&acceptor, &opts, Some(1)).unwrap());
 
-    // --- cliente: o Mic de produção com a captura de arquivo
     let mut s = TcpStream::connect(addr).unwrap();
     write_message(&mut s, &Message::hello_with_caps("teste do microfone", CAP_BLOCK_CODEC | CAP_MIC)).unwrap();
     let (caps_srv, _) = read_hello(&mut s).unwrap();
@@ -106,7 +99,6 @@ fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
         }
     };
 
-    // 1. Sem gravador: nada sai do cliente, o dispositivo (aqui, o arquivo) nem abre, ninguém escreve no PipeWire.
     mic.reset_stats();
     vivo(&mut s, &mic, Duration::from_millis(1500));
     let r = mic.report();
@@ -116,7 +108,6 @@ fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
     assert!(pcm.accept().is_err(), "ninguém escreve no PipeWire sem gravador");
     pcm.set_nonblocking(false).unwrap();
 
-    // 2. O gravador entra: o pedido chega, a captura abre e o tom chega ao soquete.
     monitor.send(Some(b"+ pistick-mic:capture_FL -> pw-record:input_FL\n+ pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     let t_gravador = Instant::now();
     while !mic.is_open() && t_gravador.elapsed() < Duration::from_secs(3) {
@@ -144,7 +135,6 @@ fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
     assert_eq!(r.requests, 1);
     assert!(r.packets >= 100, "{}", r.line());
 
-    // 3. O gravador sai: a captura fecha em menos de 1 s e os pacotes param.
     let saiu = Instant::now();
     monitor.send(Some(b"- pistick-mic:capture_FL -> pw-record:input_FL\n- pistick-mic:capture_FR -> pw-record:input_FR\n".to_vec())).unwrap();
     while mic.is_open() && saiu.elapsed() < Duration::from_secs(3) {
@@ -158,7 +148,6 @@ fn cliente_e_servidor_juntos_so_capturam_com_gravador_e_o_tom_chega() {
     assert_eq!(mic.report().packets, p1, "nenhum pacote novo depois do desligamento");
     assert_eq!(mic.report().offs, 1);
 
-    // 4. A sessão continua viva.
     tx.send(Message::Ping { value: 42 }).unwrap();
     let t = Instant::now();
     let mut pong = false;

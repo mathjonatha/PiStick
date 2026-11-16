@@ -1,4 +1,3 @@
-//! Estado do compositor, tratadores dos protocolos e laço de eventos (thread do compositor).
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -70,15 +69,9 @@ use super::{dmabuf, lock, Cmd, Shared, SocketSpec, WinBuf, INITIAL_SIZE};
 use crate::source::SourceEvent;
 use crate::synthetic::{MAX_SIZE, MIN_SIZE};
 
-/// Sem cliente conectado, os retornos de `wl_surface.frame` saem a no máximo 30 por segundo.
 const IDLE_FRAME_PERIOD: Duration = Duration::from_millis(33);
-/// Com cliente, um retorno que a sessão não liberou em 1 s sai mesmo assim (rede parada,
-/// janela sem quadro enviado): o app nunca fica travado para sempre.
 const FRAME_WATCHDOG: Duration = Duration::from_secs(1);
-/// Um DMABUF por janela é lido no máximo a cada este intervalo; os commits intermediários de um app
-/// a 200 quadros por segundo não geram cópia (o último fica retido e é lido quando o prazo vence).
 const DMABUF_MIN_INTERVAL: Duration = Duration::from_millis(30);
-/// Tamanho do monitor virtual (o do `wl_output`); os popups são restringidos a ele.
 pub(crate) const MONITOR: (i32, i32) = (1920, 1080);
 
 pub(crate) fn bind(spec: SocketSpec) -> io::Result<(ListeningSocket, String, PathBuf)> {
@@ -111,7 +104,6 @@ impl ClientData for ClientState {
     fn disconnected(&self, _id: ClientId, _reason: DisconnectReason) {}
 }
 
-/// Papel da superfície: janela de nível superior ou popup.
 enum Role {
     Toplevel(ToplevelSurface),
     Popup(PopupData),
@@ -119,49 +111,31 @@ enum Role {
 
 struct PopupData {
     popup: PopupSurface,
-    /// Superfície pai (janela ou outro popup); `None` se o app não informou.
     parent: Option<WlSurface>,
-    /// Posição (x, y) relativa ao canto da geometria do pai, calculada a partir do positioner.
     rel: (i32, i32),
-    /// `xdg_popup.grab`: o popup captura o teclado e forma uma cadeia de menus.
     grab: bool,
 }
 
-/// Uma superfície com papel de janela (toplevel ou popup) conhecida do compositor.
 struct WinEntry {
     surface: WlSurface,
     role: Role,
-    /// `Some` enquanto mapeado (tem buffer); é o id usado no protocolo e no [`Store`](super::Store).
     id: Option<u32>,
     callbacks: Vec<WlCallback>,
-    /// A sessão ainda não enviou o quadro deste dano: os retornos esperam.
     waiting_send: bool,
     waiting_since: Instant,
-    /// Canto da área transmitida dentro do buffer (a geometria da janela, `set_window_geometry`).
     origin: (i32, i32),
-    /// Últimos tamanhos mínimo e máximo informados à sessão.
     limits: (u32, u32, u32, u32),
-    /// Popup já dispensado (`popup_done` enviado): ignora o que o app ainda fizer com ele.
     dismissed: bool,
-    /// Último buffer DMABUF da raiz cuja leitura foi adiada (limite de leituras por intervalo); fica sem `release`.
     pending_dmabuf: Option<PendingDmabuf>,
-    /// O mesmo para as subsuperfícies da janela (no máximo um por subsuperfície).
     pending_subs: Vec<PendingSub>,
-    /// Quando o último DMABUF desta janela foi lido.
     last_dmabuf_read: Instant,
-    /// Composição da raiz com as subsuperfícies; `Some` quando a janela tem subsuperfícies com conteúdo
-    /// ou a raiz é esticada pelo viewport (veja `tree.rs`).
     tree: Option<Tree<ObjectId>>,
-    /// O que as subsuperfícies mudaram desde a última composição.
     dirty: Dirty<ObjectId>,
-    /// Há subsuperfícies a recompor (feito depois do despacho, de uma vez só: `flush_trees`).
     needs_flush: bool,
-    /// Se a raiz tem alfa e o tamanho lógico dela (destino do viewport ou tamanho do buffer).
     root_alpha: bool,
     root_logical: (u32, u32),
 }
 
-/// Commit de DMABUF aguardando o fim do intervalo mínimo entre leituras.
 struct PendingDmabuf {
     buffer: WlBuffer,
     geom: Option<(i32, i32, i32, i32)>,
@@ -169,7 +143,6 @@ struct PendingDmabuf {
     dst: Option<(i32, i32)>,
 }
 
-/// Commit de DMABUF de uma subsuperfície aguardando o fim do intervalo mínimo.
 struct PendingSub {
     surface: WlSurface,
     buffer: WlBuffer,
@@ -182,7 +155,6 @@ impl WinEntry {
         WinEntry { surface, role, id: None, callbacks: Vec::new(), waiting_send: false, waiting_since: Instant::now(), origin: (0, 0), limits: (0, 0, 0, 0), dismissed: false, pending_dmabuf: None, pending_subs: Vec::new(), last_dmabuf_read: Instant::now() - DMABUF_MIN_INTERVAL, tree: None, dirty: Dirty::default(), needs_flush: false, root_alpha: false, root_logical: (0, 0) }
     }
 
-    /// Há leitura de DMABUF adiada (da raiz ou de uma subsuperfície)?
     fn has_pending(&self) -> bool {
         self.pending_dmabuf.is_some() || !self.pending_subs.is_empty()
     }
@@ -205,7 +177,6 @@ impl WinEntry {
         self.popup().is_some_and(|p| p.grab)
     }
 
-    /// Popup mapeado e ainda não dispensado.
     fn is_live_popup(&self) -> bool {
         self.popup().is_some() && self.id.is_some() && !self.dismissed
     }
@@ -223,55 +194,39 @@ pub(crate) struct App {
     xdg_shell_state: XdgShellState,
     shm_state: ShmState,
     dmabuf_state: DmabufState,
-    #[allow(dead_code)] // mantém o global `zwp_linux_dmabuf_v1` vivo (ausente se a máquina não tem GPU)
+    #[allow(dead_code)]
     dmabuf_global: Option<DmabufGlobal>,
     seat_state: SeatState<App>,
     data_device_state: DataDeviceState,
     primary_selection_state: PrimarySelectionState,
-    #[allow(dead_code)] // mantém o global `wp_cursor_shape_manager_v1` vivo
+    #[allow(dead_code)]
     cursor_shape_state: CursorShapeManagerState,
-    #[allow(dead_code)] // mantém o global `wp_viewporter` vivo (o `mpv --vo=wlshm` exige)
+    #[allow(dead_code)]
     viewporter_state: ViewporterState,
-    #[allow(dead_code)] // mantém o estado do global de saída vivo
+    #[allow(dead_code)]
     output_state: OutputManagerState,
-    #[allow(dead_code)] // idem para a decoração
+    #[allow(dead_code)]
     decoration_state: XdgDecorationState,
-    #[allow(dead_code)] // idem para a decoração do KDE (a que o GTK 3 entende)
+    #[allow(dead_code)]
     kde_decoration_state: KdeDecorationState,
     seat: Seat<App>,
     output: Output,
     windows: Vec<WinEntry>,
-    /// Última imagem de cada subsuperfície com buffer (veja `tree.rs`).
     layers: HashMap<ObjectId, Layer>,
-    /// Última posição do ponteiro informada em cada janela (por id), para focá-la no lugar certo se vier
-    /// botão ou rolagem antes de movimento. Sem posição conhecida, o canto (0, 0): nunca a de outra janela.
     pointer_pos: HashMap<u32, (f64, f64)>,
-    /// Janela (id) sobre a qual o ponteiro está, segundo o cliente.
     pointer_win: Option<u32>,
-    /// Janela de nível superior que o hospedeiro diz ter o foco (`FOCUS`).
     focus_root: Option<WlSurface>,
-    /// Botões cujo clique dispensou popups: o soltar correspondente não é entregue ao app.
     swallowed: Vec<u32>,
-    /// Última imagem (BGRA pré-multiplicado) de cada superfície pequena sem papel de janela: uma delas
-    /// vira o cursor quando o app chama `wl_pointer.set_cursor`, antes ou depois do commit.
     cursor_images: HashMap<ObjectId, CursorImage>,
-    /// Superfície que o app definiu como cursor.
     cursor_surface: Option<WlSurface>,
-    /// Último cursor enviado à sessão, para não repetir.
     last_cursor: Option<(u32, CursorShape)>,
-    /// Último `wl_pointer.set_cursor` que o app fez (e para qual janela): o mesmo pedido de novo é ignorado.
     last_cursor_req: Option<(u32, PedidoCursor)>,
-    /// Último texto trocado com o hospedeiro (enviado ou recebido): nenhum lado reenvia o mesmo conteúdo.
     clip_last: Option<String>,
-    /// Texto do hospedeiro que oferecemos aos apps como seleção.
     host_text: Option<String>,
-    /// Seleções novas de apps a ler, depois de o despacho gravá-las.
     pending_reads: Vec<(Seat<App>, String)>,
 }
 
-/// Tipos MIME de texto que lemos de uma seleção de app, em ordem de preferência.
 const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
-/// Prazo para o app escrever o texto da seleção no pipe.
 const SELECTION_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct CursorImage {
@@ -280,9 +235,7 @@ struct CursorImage {
     bgra: Vec<u8>,
 }
 
-/// Quantas imagens de superfícies pequenas guardar para o cursor.
 const MAX_CURSOR_IMAGES: usize = 64;
-/// Papel que o Smithay dá à superfície passada a `wl_pointer.set_cursor`.
 const CURSOR_ROLE: &str = "cursor_image";
 
 impl App {
@@ -298,7 +251,6 @@ impl App {
         self.windows.iter().position(|e| e.id == Some(id))
     }
 
-    /// Dispara os retornos de `wl_surface.frame` guardados de uma janela.
     fn fire_callbacks(entry: &mut WinEntry, time: u32) {
         for cb in entry.callbacks.drain(..) {
             cb.done(time);
@@ -306,7 +258,6 @@ impl App {
         entry.waiting_send = false;
     }
 
-    /// Garante que o temporizador dos retornos esteja armado.
     fn arm_timer(&mut self) {
         if self.timer_armed {
             return;
@@ -318,7 +269,6 @@ impl App {
         }
     }
 
-    /// Libera retornos sem sessão (30 por segundo), sem quadro esperado, ou após o vigia.
     fn timer_tick(&mut self) -> TimeoutAction {
         let session = lock(&self.shared).session_active();
         let time = self.now_ms();
@@ -347,13 +297,10 @@ impl App {
         }
     }
 
-    /// Lê os buffers DMABUF retidos da janela `idx` (o último commit dentro do intervalo mínimo, da raiz e
-    /// das subsuperfícies) e avisa a sessão.
     fn flush_pending_dmabuf(&mut self, idx: usize) {
         let subs = std::mem::take(&mut self.windows[idx].pending_subs);
         if !subs.is_empty() {
             for p in subs {
-                // Dano vazio: a imagem inteira (os commits intermediários foram descartados).
                 self.apply_sub_buffer(idx, &p.surface, p.buffer, &[], p.scale, p.dst);
             }
             self.flush_tree(idx);
@@ -374,7 +321,6 @@ impl App {
             return;
         };
         let old = (wb.width, wb.height);
-        // Dano vazio: a área inteira (os commits intermediários foram descartados).
         let result = blit_raiz(&self.layers, entry, &surface, Some(&p.buffer), wb, &[], p.scale, p.geom, p.dst, info, arvore);
         let new = (wb.width, wb.height);
         entry.last_dmabuf_read = Instant::now();
@@ -402,10 +348,6 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ subsuperfícies
-
-    /// Commit de uma subsuperfície de uma janela: guarda a imagem nova (ou o novo destino do viewport),
-    /// leva os retornos de `frame` para a raiz e marca a janela para recompor depois do despacho.
     fn commit_sub(&mut self, ridx: usize, surface: &WlSurface) {
         let (assign, mut damage, callbacks, scale) = with_states(surface, |states| {
             let mut guard = states.cached_state.get::<SurfaceAttributes>();
@@ -417,7 +359,6 @@ impl App {
         match assign {
             Some(BufferAssignment::NewBuffer(buffer)) => {
                 let entry = &mut self.windows[ridx];
-                // Um buffer retido de um commit anterior perde a vez; o dano dele some junto.
                 if let Some(pos) = entry.pending_subs.iter().position(|p| p.surface == *surface) {
                     entry.pending_subs.remove(pos).buffer.release();
                     damage.clear();
@@ -441,7 +382,6 @@ impl App {
                 }
             }
             None => {
-                // Só o estado mudou (o destino do viewport, por exemplo): ajusta o tamanho lógico.
                 if let Some(l) = self.layers.get_mut(&id) {
                     let lg = logical_size((l.w, l.h), dst, scale);
                     if (l.lw, l.lh) != lg {
@@ -454,13 +394,11 @@ impl App {
             }
         }
         if !callbacks.is_empty() {
-            // O retorno acompanha a janela raiz (e o ritmo dela).
             self.windows[ridx].callbacks.extend(callbacks);
             self.arm_timer();
         }
     }
 
-    /// Lê o buffer de uma subsuperfície para a imagem dela e marca o dano; libera o buffer.
     fn apply_sub_buffer(&mut self, ridx: usize, surface: &WlSurface, buffer: WlBuffer, damage: &[Damage], scale: i32, dst: Option<(i32, i32)>) {
         let is_dmabuf = get_dmabuf(&buffer).is_ok();
         let id = surface.id();
@@ -481,7 +419,6 @@ impl App {
         }
     }
 
-    /// Recompõe as janelas com subsuperfícies alteradas (depois do despacho dos clientes).
     fn flush_trees(&mut self) {
         for i in 0..self.windows.len() {
             if self.windows[i].needs_flush {
@@ -490,7 +427,6 @@ impl App {
         }
     }
 
-    /// Recompõe a janela `idx` (mudanças em subsuperfícies, ordem ou posição) e avisa a sessão do dano.
     fn flush_tree(&mut self, idx: usize) {
         self.windows[idx].needs_flush = false;
         let Some(id) = self.windows[idx].id else { return };
@@ -501,7 +437,7 @@ impl App {
         let (alpha, logical) = (entry.root_alpha, entry.root_logical);
         let tree = entry.tree.get_or_insert_with(|| Tree::de_janela(&wb.pixels, wb.width, wb.height, alpha, logical));
         if (wb.width, wb.height) != (tree.root_w, tree.root_h) {
-            return; // não deve ocorrer: a raiz e a janela têm o mesmo tamanho
+            return;
         }
         let items = arrangement(&surface, tree.root_logical, &self.layers);
         let dims = (tree.root_w, tree.root_h);
@@ -517,8 +453,6 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ árvore de janelas
-
     fn root_of(surface: &WlSurface) -> WlSurface {
         let mut s = surface.clone();
         while let Some(p) = get_parent(&s) {
@@ -527,7 +461,6 @@ impl App {
         s
     }
 
-    /// Superfície pai de uma entrada: a mãe do diálogo ou o pai do popup.
     fn parent_surface(&self, idx: usize) -> Option<WlSurface> {
         match &self.windows[idx].role {
             Role::Toplevel(t) => t.parent(),
@@ -535,13 +468,10 @@ impl App {
         }
     }
 
-    /// Id (no protocolo) do pai; 0 se não há ou se ele ainda não está mapeado.
     fn parent_id(&self, idx: usize) -> u32 {
         self.parent_surface(idx).and_then(|p| self.idx_by_surface(&p)).and_then(|i| self.windows[i].id).unwrap_or(0)
     }
 
-    /// Canto da geometria da entrada no monitor virtual, supondo cada janela de nível superior no
-    /// canto (0, 0); só serve para restringir popups ao monitor.
     fn abs_origin(&self, idx: usize) -> (i32, i32) {
         let mut pos = (0, 0);
         let mut cur = idx;
@@ -560,7 +490,6 @@ impl App {
         pos
     }
 
-    /// Janela de nível superior da cadeia de `idx`.
     fn root_idx(&self, idx: usize) -> usize {
         let mut cur = idx;
         for _ in 0..16 {
@@ -572,7 +501,6 @@ impl App {
         cur
     }
 
-    /// Popups (mapeados ou não) descendentes de `surface`.
     fn descendants(&self, surface: &WlSurface) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         let mut frontier = vec![surface.clone()];
@@ -587,14 +515,8 @@ impl App {
         out
     }
 
-    // ------------------------------------------------------------ da superfície ao protocolo
-
-    /// Processa o `commit` de uma janela (toplevel ou popup): copia os pixels da geometria, acumula
-    /// o dano e atualiza a sessão.
     fn commit_window(&mut self, idx: usize) {
         let surface = self.windows[idx].surface.clone();
-        // A configuração inicial sai no primeiro commit, quando a mãe (`set_parent`) já é conhecida:
-        // diálogos escolhem o próprio tamanho; as demais janelas recebem o tamanho inicial.
         if let Role::Toplevel(t) = &self.windows[idx].role {
             if !t.is_initial_configure_sent() {
                 if t.parent().is_some() {
@@ -615,7 +537,6 @@ impl App {
         });
         let now = self.now_ms();
         if self.windows[idx].dismissed {
-            // Popup que já recebeu `popup_done`: o app ainda pode desenhar até destruí-lo.
             if let Some(BufferAssignment::NewBuffer(b)) = assign {
                 b.release();
             }
@@ -637,7 +558,6 @@ impl App {
         let mut new_size: Option<(u32, u32)> = None;
 
         let dst = viewport_dst(&surface);
-        // Buffer novo a ler, ou (`Some(None)`) só o destino do viewport mudou numa raiz esticada.
         let mut novo: Option<Option<WlBuffer>> = None;
         match assign {
             Some(BufferAssignment::NewBuffer(b)) => novo = Some(Some(b)),
@@ -651,20 +571,16 @@ impl App {
         if let Some(buffer) = novo {
             let is_popup = self.windows[idx].popup().is_some();
             let info = buffer.as_ref().and_then(buffer_info);
-            // Tamanho lógico da raiz: o destino do viewport, ou o do buffer.
             let lsize = match (&buffer, info) {
                 (Some(_), Some((w, h, _))) => Some(dst.unwrap_or((w, h))),
                 (None, _) => dst,
                 _ => None,
             };
-            // Janela de 1x1 (ou menos) depois do recorte pela geometria: o Android cria uma por app aberto.
             let minuscula = !is_popup
                 && lsize.is_some_and(|l| {
                     let c = geom_rect.and_then(|g| intersect(g, (0, 0, l.0, l.1))).map_or(l, |g| (g.2, g.3));
                     c.0 <= 1 && c.1 <= 1
                 });
-            // Um buffer retido de um commit anterior perde a vez; o dano dele some junto, então o
-            // próximo copia a área inteira (dano vazio).
             if buffer.is_some() {
                 if let Some(velho) = self.windows[idx].pending_dmabuf.take() {
                     velho.buffer.release();
@@ -673,20 +589,15 @@ impl App {
             }
             let is_dmabuf = buffer.as_ref().is_some_and(|b| get_dmabuf(b).is_ok());
             if minuscula {
-                // Não é uma janela para mostrar: se ainda não foi anunciada, continua sem ser; se já foi,
-                // fica como está (sem `WIN_RESIZE` para 1x1).
                 if let Some(b) = buffer {
                     b.release();
                 }
             } else if is_dmabuf && self.windows[idx].id.is_some() && self.windows[idx].last_dmabuf_read.elapsed() < DMABUF_MIN_INTERVAL {
-                // Cedo demais para ler de novo: retém o buffer (sem `release`, o app não o reaproveita) e
-                // o timer o lê quando o intervalo vencer.
                 if let Some(b) = buffer {
                     self.windows[idx].pending_dmabuf = Some(PendingDmabuf { buffer: b, geom: geom_rect, scale, dst });
                     self.arm_timer();
                 }
             } else if is_popup && parent_id == 0 {
-                // Popup cujo pai não está na tela: não há onde mostrá-lo.
                 orphan_popup = true;
                 if let Some(b) = buffer {
                     b.release();
@@ -757,7 +668,6 @@ impl App {
                         }
                     }
                     None => {
-                        // Buffer inválido: cliente morto pelo Smithay ou formato não suportado.
                         if first {
                             st.windows.retain(|w| w.id != id);
                             entry.id = None;
@@ -778,13 +688,9 @@ impl App {
         if destroy {
             self.unmap(idx);
         }
-        // O tamanho que o app escolheu passa a ser o sugerido nas próximas configurações
-        // (ativação, por exemplo), para elas não desfazerem um redimensionamento do app.
         if let (Some((w, h)), Some(t)) = (new_size, self.windows[idx].toplevel()) {
             t.with_pending_state(|s| s.size = Some((w as i32, h as i32).into()));
         }
-        // A primeira janela a aparecer ganha o foco de teclado se nenhuma o tem (o cliente do
-        // protocolo ainda pode mudá-lo com FOCUS).
         if newly_mapped && self.windows[idx].id.is_some() {
             if self.windows[idx].popup().is_none() {
                 if self.focus_root.is_none() {
@@ -801,12 +707,10 @@ impl App {
         }
         let entry = &mut self.windows[idx];
         if entry.tree.is_some() && !had_damage {
-            // Commit da raiz sem imagem nova: subsuperfícies sincronizadas, ordem e posição podem ter mudado.
             entry.needs_flush = true;
         }
         if !callbacks.is_empty() {
             entry.callbacks.extend(callbacks);
-            // Sem dano novo, ou sem janela mapeada, não há quadro a esperar.
             if had_damage && entry.id.is_some() {
                 if !entry.waiting_send {
                     entry.waiting_since = Instant::now();
@@ -817,15 +721,12 @@ impl App {
         }
     }
 
-    /// Tira a janela do ar (buffer nulo, superfície destruída ou popup dispensado); a entrada continua
-    /// existindo. Os popups filhos saem antes, um `Destroyed` para cada.
     fn unmap(&mut self, idx: usize) {
         if self.windows[idx].id.is_none() {
             return;
         }
         let surface = self.windows[idx].surface.clone();
         let mut filhos = self.descendants(&surface);
-        // Os mais novos (índices maiores) são os mais fundos da cadeia.
         filhos.sort_unstable_by(|a, b| b.cmp(a));
         for c in filhos {
             self.unmap_one(c);
@@ -839,7 +740,6 @@ impl App {
             p.buffer.release();
         }
         let Some(id) = self.windows[idx].id.take() else { return };
-        // A composição recomeça do zero quando a janela voltar (as imagens das subsuperfícies ficam).
         self.windows[idx].tree = None;
         self.windows[idx].dirty = Dirty::default();
         self.windows[idx].needs_flush = false;
@@ -853,9 +753,6 @@ impl App {
         self.pointer_pos.remove(&id);
     }
 
-    // ------------------------------------------------------------ popups e foco
-
-    /// Dispensa o popup `idx` e os filhos dele: `popup_done` e saída do ar, do mais fundo para o mais raso.
     fn dismiss_popup(&mut self, idx: usize) {
         let surface = self.windows[idx].surface.clone();
         let mut alvo = self.descendants(&surface);
@@ -874,12 +771,10 @@ impl App {
         self.refresh_keyboard_focus();
     }
 
-    /// Dispensa todos os popups com captura (e o que pende deles).
     fn dismiss_all_grabs(&mut self) {
         let tops: Vec<usize> = (0..self.windows.len())
             .filter(|&i| self.windows[i].is_grab_popup() && self.windows[i].is_live_popup())
             .filter(|&i| {
-                // Só a raiz de cada cadeia; os filhos caem junto.
                 let pai = self.windows[i].popup().and_then(|p| p.parent.as_ref()).and_then(|s| self.idx_by_surface(s));
                 !pai.is_some_and(|p| self.windows[p].is_grab_popup() && self.windows[p].is_live_popup())
             })
@@ -889,7 +784,6 @@ impl App {
         }
     }
 
-    /// Dispensa todos os popups, com ou sem captura (a sessão acabou).
     fn dismiss_all_popups(&mut self) {
         for i in (0..self.windows.len()).rev() {
             if self.windows[i].popup().is_some() && !self.windows[i].dismissed {
@@ -899,7 +793,6 @@ impl App {
         self.swallowed.clear();
     }
 
-    /// Foco de teclado que vale agora: o popup com captura mais novo da janela em foco, senão a janela.
     fn desired_keyboard_focus(&self) -> Option<WlSurface> {
         let root = self.focus_root.clone()?;
         let root_idx = self.idx_by_surface(&root)?;
@@ -915,7 +808,6 @@ impl App {
         }
     }
 
-    /// Marca como "ativado" só a janela em foco e avisa os apps cujo estado mudou.
     fn update_activation(&mut self) {
         for e in &self.windows {
             let Some(t) = e.toplevel() else { continue };
@@ -927,12 +819,10 @@ impl App {
         }
     }
 
-    /// Um botão do mouse foi pressionado na janela `win`. Se há popups com captura e o clique é fora
-    /// da cadeia de popups, eles são dispensados e o clique é consumido. Devolve se foi consumido.
     fn click_dismisses(&mut self, win: u32) -> bool {
         let Some(idx) = self.idx_by_id(win) else { return false };
         if self.windows[idx].popup().is_some() {
-            return false; // clique dentro de um popup: pertence à cadeia
+            return false;
         }
         let alguma = self.windows.iter().any(|e| e.is_grab_popup() && e.is_live_popup());
         if alguma {
@@ -941,17 +831,12 @@ impl App {
         alguma
     }
 
-    // ------------------------------------------------------------ área de transferência
-
-    /// Lê as seleções que os apps definiram no último despacho.
     fn run_pending_reads(&mut self) {
         for (seat, mime) in std::mem::take(&mut self.pending_reads) {
             self.read_selection(&seat, mime);
         }
     }
 
-    /// Pede ao dono da seleção o texto em `mime`, por um pipe lido sem bloquear o laço de eventos
-    /// (`calloop`), com limite de 1 MiB e de tempo.
     fn read_selection(&mut self, seat: &Seat<App>, mime: String) {
         let Ok((leitura, escrita)) = std::io::pipe() else { return };
         if request_data_device_client_selection(seat, mime, OwnedFd::from(escrita)).is_err() {
@@ -959,7 +844,6 @@ impl App {
         }
         let arquivo = std::fs::File::from(OwnedFd::from(leitura));
         let mut texto: Vec<u8> = Vec::new();
-        // O `Generic` só chama quando há dado (ou fim); o `read` não bloqueia.
         let fonte = Generic::new(arquivo, Interest::READ, Mode::Level);
         let token = self.loop_handle.insert_source(fonte, move |_, f, app: &mut App| {
             let mut pedaco = [0u8; 16 * 1024];
@@ -970,7 +854,6 @@ impl App {
                 }
                 Ok(n) => {
                     texto.extend_from_slice(&pedaco[..n]);
-                    // Acima de 1 MiB a mensagem não é enviada: desiste.
                     Ok(if texto.len() > MAX_CLIPBOARD { PostAction::Remove } else { PostAction::Continue })
                 }
                 Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => Ok(PostAction::Continue),
@@ -978,7 +861,6 @@ impl App {
             }
         });
         if let Ok(token) = token {
-            // Tempo limite: o app que não escreve nem fecha o pipe é abandonado.
             let _ = self.loop_handle.insert_source(Timer::from_duration(SELECTION_READ_TIMEOUT), move |_, _, app| {
                 app.loop_handle.remove(token);
                 TimeoutAction::Drop
@@ -986,7 +868,6 @@ impl App {
         }
     }
 
-    /// O texto da seleção de um app chegou inteiro: vai para o hospedeiro, se mudou.
     fn selection_read(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() || bytes.len() > MAX_CLIPBOARD {
             return;
@@ -999,7 +880,6 @@ impl App {
         lock(&self.shared).push(SourceEvent::Clipboard { mime: MIME_TEXT.to_string(), data: texto.into_bytes() });
     }
 
-    /// O hospedeiro mudou a área de transferência: o compositor passa a oferecer o texto aos apps.
     fn host_clipboard(&mut self, mime: &str, data: &[u8]) {
         if mime != MIME_TEXT || data.len() > MAX_CLIPBOARD {
             return;
@@ -1014,9 +894,6 @@ impl App {
         set_data_device_selection(&dh, &seat, TEXT_MIMES.iter().map(|m| (*m).to_string()).collect(), ());
     }
 
-    // ------------------------------------------------------------ cursor
-
-    /// Envia o cursor à sessão, sem repetir o último.
     fn push_cursor(&mut self, win: u32, shape: CursorShape) {
         if self.last_cursor.as_ref().is_some_and(|(w, s)| *w == win && *s == shape) {
             return;
@@ -1030,7 +907,6 @@ impl App {
         self.last_cursor = Some((win, shape));
     }
 
-    /// Guarda a imagem de uma superfície pequena; se ela é o cursor atual, envia na hora.
     fn note_cursor_image(&mut self, surface: &WlSurface, img: CursorImage) {
         if self.cursor_images.len() >= MAX_CURSOR_IMAGES && !self.cursor_images.contains_key(&surface.id()) {
             self.cursor_images.clear();
@@ -1041,7 +917,6 @@ impl App {
         }
     }
 
-    /// Envia a imagem guardada de `surface` (com o ponto de ação atual) como cursor da janela sob o ponteiro.
     fn send_cursor_surface(&mut self, surface: &WlSurface) {
         let Some(win) = self.pointer_win else { return };
         let Some(img) = self.cursor_images.get(&surface.id()) else { return };
@@ -1056,7 +931,6 @@ impl App {
         self.push_cursor(win, shape);
     }
 
-    /// Posição de um popup a partir do positioner, restrita ao monitor virtual.
     fn popup_geometry(&self, parent: Option<&WlSurface>, positioner: PositionerState) -> Rectangle<i32, Logical> {
         let (ax, ay) = parent.and_then(|p| self.idx_by_surface(p)).map_or((0, 0), |i| self.abs_origin(i));
         let alvo = Rectangle::new((-ax, -ay).into(), MONITOR.into());
@@ -1064,21 +938,17 @@ impl App {
     }
 }
 
-/// O que o app pediu com `wl_pointer.set_cursor` (ou `wp_cursor_shape`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PedidoCursor {
     Oculto,
     Nome(String),
-    /// Superfície com a imagem e o ponto de ação.
     Superficie(ObjectId, (i32, i32)),
 }
 
-/// O pedido é igual ao anterior, para a mesma janela? O Android repete `set_cursor` (nulo) umas 60 vezes por segundo.
 fn pedido_repetido(anterior: &Option<(u32, PedidoCursor)>, win: u32, pedido: &PedidoCursor) -> bool {
     anterior.as_ref().is_some_and(|(w, p)| *w == win && p == pedido)
 }
 
-/// Ponto de ação (hotspot) que o app definiu para a superfície de cursor.
 fn cursor_hotspot(surface: &WlSurface) -> (i32, i32) {
     with_states(surface, |states| {
         states.data_map.get::<Mutex<CursorImageAttributes>>().map_or((0, 0), |m| {
@@ -1088,7 +958,6 @@ fn cursor_hotspot(surface: &WlSurface) -> (i32, i32) {
     })
 }
 
-/// Título e `app_id` atuais de um toplevel.
 fn toplevel_texts(surface: &WlSurface) -> (String, String) {
     with_states(surface, |states| {
         states
@@ -1102,10 +971,6 @@ fn toplevel_texts(surface: &WlSurface) -> (String, String) {
     })
 }
 
-/// Visão do pool `wl_shm` de um buffer, válida só dentro do callback de [`with_pool`].
-///
-/// A memória é compartilhada com o cliente, que pode escrevê-la a qualquer momento; por isso nunca se
-/// forma referência nem fatia para ela: só se copia para memória nossa, por [`PoolMap::copy`].
 struct PoolMap<'a> {
     ptr: *const u8,
     len: usize,
@@ -1113,17 +978,11 @@ struct PoolMap<'a> {
 }
 
 impl PoolMap<'_> {
-    /// Copia `dst.len()` bytes a partir do deslocamento `src` do pool. `false` se não cabe no pool.
     fn copy(&self, src: usize, dst: &mut [u8]) -> bool {
         match src.checked_add(dst.len()) {
             Some(fim) if fim <= self.len => {}
             _ => return false,
         }
-        // SAFETY: `src + dst.len() <= self.len` foi verificado logo acima; `ptr` e `len` vêm do Smithay e
-        // valem enquanto o callback de `with_pool` roda, e este `PoolMap` não escapa dele (o tempo de vida
-        // `'a` o prende ao callback). `dst` é nossa e não se sobrepõe ao pool. O cliente pode escrever
-        // na região ao mesmo tempo, o que não é comportamento indefinido porque `copy_nonoverlapping`
-        // lê pelo ponteiro cru, sem formar referência para a memória compartilhada.
         unsafe {
             std::ptr::copy_nonoverlapping(self.ptr.add(src), dst.as_mut_ptr(), dst.len());
         }
@@ -1131,24 +990,17 @@ impl PoolMap<'_> {
     }
 }
 
-/// Chama `f` com a visão do pool do buffer e os dados dele (formato, tamanho, passo, deslocamento).
 fn with_pool<T>(buffer: &WlBuffer, f: impl FnOnce(&PoolMap<'_>, BufferData) -> T) -> Option<T> {
     if let Ok(d) = get_dmabuf(buffer) {
-        // DMABUF: o mesmo formato de leitura de um pool (veja `dmabuf::com_pixels`).
         return dmabuf::com_pixels(d, |ptr, len, data| f(&PoolMap { ptr, len, _callback: PhantomData }, data));
     }
     with_buffer_contents(buffer, |ptr, len, data| f(&PoolMap { ptr, len, _callback: PhantomData }, data)).ok()
 }
 
-/// Copia o conteúdo de um buffer `wl_shm` ou DMABUF para a janela, recortando a geometria (`geom`, em
-/// coordenadas do buffer; `None` = buffer inteiro). Devolve os retângulos copiados, em coordenadas
-/// da área recortada, e o canto dela dentro do buffer (`None` se o buffer não pôde ser lido).
-/// Dano ausente, área nova ou geometria que se moveu = área inteira.
 fn blit(buffer: &WlBuffer, wb: &mut WinBuf, damage: &[Damage], scale: i32, geom: Option<Ret>, old_origin: (i32, i32)) -> Option<(Vec<Rect>, (i32, i32))> {
     blit_into(buffer, (&mut wb.width, &mut wb.height, &mut wb.pixels), damage, scale, geom, old_origin)
 }
 
-/// [`blit`] sobre uma imagem qualquer (largura, altura e pixels BGRA), não só a de uma janela.
 fn blit_into(buffer: &WlBuffer, (width, height, pixels): (&mut u32, &mut u32, &mut Vec<u8>), damage: &[Damage], scale: i32, geom: Option<Ret>, old_origin: (i32, i32)) -> Option<(Vec<Rect>, (i32, i32))> {
     with_pool(buffer, |map, data| {
         if !matches!(data.format, Format::Xrgb8888 | Format::Argb8888 | Format::Abgr8888 | Format::Xbgr8888) || data.width <= 0 || data.height <= 0 || data.stride < data.width * 4 || data.offset < 0 {
@@ -1160,11 +1012,9 @@ fn blit_into(buffer: &WlBuffer, (width, height, pixels): (&mut u32, &mut u32, &m
         if offset.checked_add(stride.checked_mul(bh)?)? > map.len {
             return None;
         }
-        // Área transmitida: a geometria da janela, restrita ao buffer (ou ele inteiro).
         let tudo = (0, 0, bw as i32, bh as i32);
         let (cx, cy, cw, ch) = geom.and_then(|g| intersect(g, tudo)).unwrap_or(tudo);
         let (cw_u, ch_u) = (cw as u32, ch as u32);
-        // Tamanho novo ou geometria deslocada: armazenamento novo e cópia inteira. Sem dano declarado: também inteira.
         let mut realloc = false;
         if (cw_u, ch_u) != (*width, *height) || (cx, cy) != old_origin {
             if (cw_u, ch_u) != (*width, *height) {
@@ -1206,7 +1056,6 @@ fn blit_into(buffer: &WlBuffer, (width, height, pixels): (&mut u32, &mut u32, &m
     .flatten()
 }
 
-/// Largura, altura e se tem alfa do buffer, sem ler os pixels.
 fn buffer_info(buffer: &WlBuffer) -> Option<(i32, i32, bool)> {
     if let Ok(d) = get_dmabuf(buffer) {
         let s = d.size();
@@ -1215,12 +1064,10 @@ fn buffer_info(buffer: &WlBuffer) -> Option<(i32, i32, bool)> {
     with_buffer_contents(buffer, |_, _, data| (data.width, data.height, matches!(data.format, Format::Argb8888 | Format::Abgr8888))).ok()
 }
 
-/// Destino do viewport (`wp_viewport.set_destination`) em vigor na superfície.
 fn viewport_dst(surface: &WlSurface) -> Option<(i32, i32)> {
     with_states(surface, |states| states.cached_state.get::<ViewportCachedState>().current().dst.map(|d| (d.w, d.h)))
 }
 
-/// Tamanho lógico de uma superfície: o destino do viewport ou o do buffer (dividido pela escala).
 fn logical_size(buffer: (u32, u32), dst: Option<(i32, i32)>, scale: i32) -> (u32, u32) {
     match dst {
         Some((w, h)) => (w.max(1) as u32, h.max(1) as u32),
@@ -1231,8 +1078,6 @@ fn logical_size(buffer: (u32, u32), dst: Option<(i32, i32)>, scale: i32) -> (u32
     }
 }
 
-/// Lê um buffer para a imagem de uma subsuperfície. Devolve `None` se não pôde ser lido; `Some(None)` se
-/// a imagem inteira mudou; `Some(Some(retângulos))` com o dano (coordenadas da própria subsuperfície).
 fn read_layer(buffer: &WlBuffer, layer: &mut Layer, damage: &[Damage], scale: i32, dst: Option<(i32, i32)>) -> Option<Option<Vec<Rect>>> {
     with_pool(buffer, |map, data| {
         if !matches!(data.format, Format::Xrgb8888 | Format::Argb8888 | Format::Abgr8888 | Format::Xbgr8888)
@@ -1293,7 +1138,6 @@ fn read_layer(buffer: &WlBuffer, layer: &mut Layer, damage: &[Damage], scale: i3
     .flatten()
 }
 
-/// Posição e ordem da raiz e das subsuperfícies com imagem, de baixo para cima, no espaço lógico da raiz.
 fn arrangement(root: &WlSurface, logical: (u32, u32), layers: &HashMap<ObjectId, Layer>) -> Vec<Item<ObjectId>> {
     let rid = root.id();
     let mut out = Vec::new();
@@ -1325,18 +1169,14 @@ fn arrangement(root: &WlSurface, logical: (u32, u32), layers: &HashMap<ObjectId,
     out
 }
 
-/// A raiz tem subsuperfícies com imagem?
 fn tem_subs(root: &WlSurface, layers: &HashMap<ObjectId, Layer>) -> bool {
     !layers.is_empty() && !get_children(root).is_empty() && arrangement(root, (0, 0), layers).len() > 1
 }
 
-/// A janela passa pela composição (`tree.rs`)? Já passa, tem subsuperfícies com imagem ou a raiz é
-/// esticada pelo viewport.
 fn precisa_arvore(layers: &HashMap<ObjectId, Layer>, entry: &WinEntry, root: &WlSurface, info: Option<(i32, i32, bool)>, dst: Option<(i32, i32)>) -> bool {
     entry.tree.is_some() || info.is_some_and(|(w, h, _)| dst.is_some_and(|d| d != (w, h))) || tem_subs(root, layers)
 }
 
-/// Copia a raiz para a janela: direto, ou pela composição com as subsuperfícies (`arvore`).
 #[allow(clippy::too_many_arguments)]
 fn blit_raiz(
     layers: &HashMap<ObjectId, Layer>,
@@ -1362,8 +1202,6 @@ fn blit_raiz(
     Some(r)
 }
 
-/// Imagem da raiz esticada pelo viewport (`dst`) a partir da cópia guardada, recortada pela geometria.
-/// Devolve o dano (a janela toda) e o canto do recorte.
 fn renderiza_escalada(t: &mut Tree<ObjectId>, dst: (i32, i32), geom: Option<Ret>) -> Option<(Vec<Rect>, (i32, i32))> {
     let Tree { root, root_w, root_h, root_logical, root_src, .. } = t;
     let src = root_src.as_ref()?;
@@ -1380,8 +1218,6 @@ fn renderiza_escalada(t: &mut Tree<ObjectId>, dst: (i32, i32), geom: Option<Ret>
     Some((vec![Rect::new(0, 0, cw as u32, ch as u32)], (cx, cy)))
 }
 
-/// A raiz pela composição: atualiza a imagem da raiz (esticada, se o viewport pede) e recompõe com as
-/// subsuperfícies o dano da raiz, o que as subsuperfícies já tinham pendente e as mudanças de arranjo.
 #[allow(clippy::too_many_arguments)]
 fn blit_tree(
     layers: &HashMap<ObjectId, Layer>,
@@ -1415,7 +1251,6 @@ fn blit_tree(
                 }
             }
         }
-        // Só o destino do viewport mudou: refaz a escala a partir da cópia da raiz.
         None => renderiza_escalada(tree, dst?, geom)?,
     };
     tree.root_dst = dst;
@@ -1435,8 +1270,6 @@ fn blit_tree(
     Some((rects, origin))
 }
 
-/// Lê a imagem de uma superfície pequena (no máximo 128x128, `ARGB8888` ou `XRGB8888`) como BGRA
-/// pré-multiplicado, o formato da mensagem `CURSOR`.
 fn read_cursor(buffer: &WlBuffer) -> Option<CursorImage> {
     with_pool(buffer, |map, data| {
         let side = i32::from(MAX_CURSOR_SIDE);
@@ -1461,8 +1294,6 @@ fn read_cursor(buffer: &WlBuffer) -> Option<CursorImage> {
     .flatten()
 }
 
-// ---------------------------------------------------------------- tratadores
-
 impl BufferHandler for App {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
 }
@@ -1481,7 +1312,6 @@ impl CompositorHandler for App {
             self.commit_window(idx);
             return;
         }
-        // Subsuperfície de uma janela: entra na composição da janela.
         let root = Self::root_of(surface);
         if root != *surface {
             if let Some(ridx) = self.idx_by_surface(&root) {
@@ -1489,14 +1319,12 @@ impl CompositorHandler for App {
                 return;
             }
         }
-        // Subsuperfície, cursor...: aceita, libera o buffer e não transmite.
         let (assign, callbacks) = with_states(surface, |states| {
             let mut guard = states.cached_state.get::<SurfaceAttributes>();
             let attrs = guard.current();
             (attrs.buffer.take(), std::mem::take(&mut attrs.frame_callbacks))
         });
         if let Some(BufferAssignment::NewBuffer(b)) = assign {
-            // Superfície pequena sem papel (ou já com o papel de cursor): pode virar o cursor.
             if matches!(get_role(surface), None | Some(CURSOR_ROLE)) {
                 if let Some(img) = read_cursor(&b) {
                     self.note_cursor_image(surface, img);
@@ -1510,7 +1338,6 @@ impl CompositorHandler for App {
         let root = Self::root_of(surface);
         let time = self.now_ms();
         if root != *surface {
-            // Subsuperfície: o retorno acompanha a janela raiz (e o ritmo dela).
             if let Some(i) = self.idx_by_surface(&root) {
                 self.windows[i].callbacks.extend(callbacks);
                 self.arm_timer();
@@ -1523,7 +1350,6 @@ impl CompositorHandler for App {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
-        // Subsuperfície destruída: some da composição (recomposta depois do despacho, `flush_trees`).
         let id = surface.id();
         if self.layers.remove(&id).is_some() {
             for e in &mut self.windows {
@@ -1560,22 +1386,18 @@ impl XdgShellHandler for App {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Ativada só se nenhuma outra janela tem o foco; depois o `FOCUS` do cliente decide.
         let ativa = self.focus_root.is_none();
         surface.with_pending_state(|s| {
             s.size = Some((INITIAL_SIZE.0 as i32, INITIAL_SIZE.1 as i32).into());
             if ativa {
                 s.states.set(xdg_toplevel::State::Activated);
             }
-            // A janela do hospedeiro ocupa o espaço todo: "ladrilhada" nas quatro bordas, o que faz
-            // os toolkits deixarem de desenhar sombra e cantos arredondados.
             s.states.set(xdg_toplevel::State::TiledLeft);
             s.states.set(xdg_toplevel::State::TiledRight);
             s.states.set(xdg_toplevel::State::TiledTop);
             s.states.set(xdg_toplevel::State::TiledBottom);
             s.decoration_mode = Some(DecoMode::ServerSide);
         });
-        // O `configure` inicial sai no primeiro commit (veja `commit_window`).
         self.output.enter(surface.wl_surface());
         self.windows.push(WinEntry::new(surface.wl_surface().clone(), Role::Toplevel(surface)));
     }
@@ -1593,7 +1415,6 @@ impl XdgShellHandler for App {
             }
             if let Some(i) = self.idx_by_surface(surface.wl_surface()) {
                 let mut e = self.windows.remove(i);
-                // Retornos pendentes de uma janela que morreu: simplesmente descartados.
                 e.callbacks.clear();
             }
         }
@@ -1609,7 +1430,6 @@ impl XdgShellHandler for App {
         let _ = surface.send_configure();
         let data = PopupData { popup: surface.clone(), parent, rel: (geo.loc.x, geo.loc.y), grab: false };
         let mut entry = WinEntry::new(surface.wl_surface().clone(), Role::Popup(data));
-        // Cliente sem a extensão de popups, ou popup sem pai: dispensado na hora, sem travar o app.
         let aceita = lock(&self.shared).has_cap(CAP_POPUPS) && entry.popup().is_some_and(|p| p.parent.is_some());
         if !aceita {
             entry.dismissed = true;
@@ -1624,7 +1444,6 @@ impl XdgShellHandler for App {
             p.grab = true;
         }
         if self.windows[idx].is_live_popup() {
-            // Captura pedida depois de o popup aparecer: o teclado vai para ele.
             self.refresh_keyboard_focus();
         }
     }
@@ -1671,7 +1490,6 @@ impl XdgShellHandler for App {
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
-        // Antes de a janela aparecer, a mãe vai junto com o `Created`.
         let Some(idx) = self.idx_by_surface(surface.wl_surface()) else { return };
         let Some(id) = self.windows[idx].id else { return };
         let parent = self.parent_id(idx);
@@ -1685,8 +1503,6 @@ impl XdgShellHandler for App {
 
 impl XdgDecorationHandler for App {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // A janela do sistema hospedeiro já tem barra de título: sempre decoração do servidor.
-        // Antes do primeiro commit nada é enviado: o `configure` inicial já leva o modo.
         toplevel.with_pending_state(|s| s.decoration_mode = Some(DecoMode::ServerSide));
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
@@ -1704,8 +1520,6 @@ impl XdgDecorationHandler for App {
     }
 }
 
-/// O GTK 3 não conhece `xdg-decoration`: só deixa de desenhar a própria barra de título quando o
-/// compositor anuncia o protocolo antigo do KDE e responde "servidor". A janela do hospedeiro já tem barra.
 impl KdeDecorationHandler for App {
     fn kde_decoration_state(&self) -> &KdeDecorationState {
         &self.kde_decoration_state
@@ -1725,7 +1539,6 @@ impl SeatHandler for App {
         &mut self.seat_state
     }
 
-    /// O foco de teclado mudou: a seleção atual passa a ser oferecida ao app que o recebeu.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = self.dh.clone();
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
@@ -1733,8 +1546,6 @@ impl SeatHandler for App {
         set_primary_focus(&dh, seat, client);
     }
 
-    /// O app (o dono do foco do ponteiro) pediu um cursor: oculto, nomeado (`cursor-shape-v1`) ou uma
-    /// superfície com a imagem. Vale para a janela sob o ponteiro.
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         let Some(win) = self.pointer_win else { return };
         let pedido = match &image {
@@ -1764,10 +1575,9 @@ impl OutputHandler for App {}
 impl SelectionHandler for App {
     type SelectionUserData = ();
 
-    /// Um app do Pi definiu a seleção: o texto é lido na hora e enviado ao hospedeiro.
     fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, seat: Seat<Self>) {
         if ty != SelectionTarget::Clipboard {
-            return; // a seleção primária fica só dentro do Pi
+            return;
         }
         let Some(source) = source else { return };
         if !lock(&self.shared).has_cap(CAP_CLIPBOARD) {
@@ -1775,12 +1585,9 @@ impl SelectionHandler for App {
         }
         let oferecidos = source.mime_types();
         let Some(mime) = TEXT_MIMES.iter().find(|m| oferecidos.iter().any(|o| o == **m)) else { return };
-        // O Smithay chama este método antes de gravar a seleção nova: a leitura espera o fim do despacho
-        // (veja `run_pending_reads`), senão pediria o texto da seleção anterior.
         self.pending_reads.push((seat, (*mime).to_string()));
     }
 
-    /// Um app pediu o texto que o hospedeiro nos deu: escreve no pipe dele, fora do laço de eventos.
     fn send_selection(&mut self, ty: SelectionTarget, mime_type: String, fd: OwnedFd, _seat: Seat<Self>, _user_data: &()) {
         if ty != SelectionTarget::Clipboard || !TEXT_MIMES.contains(&mime_type.as_str()) {
             return;
@@ -1822,7 +1629,6 @@ impl DmabufHandler for App {
     fn dmabuf_imported(&mut self, _global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
         match dmabuf::validar(&dmabuf) {
             Err(r) => dmabuf::recusar(notifier, r),
-            // Mapeamento que falha vira erro do cliente, não queda do `psd`.
             Ok(()) if !dmabuf::mapeavel(&dmabuf) => notifier.failed(),
             Ok(()) => {
                 let _ = notifier.successful::<App>();
@@ -1840,8 +1646,6 @@ delegate_output!(App);
 delegate_cursor_shape!(App);
 delegate_viewporter!(App);
 
-// ---------------------------------------------------------------- comandos da sessão
-
 impl App {
     fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
@@ -1854,8 +1658,6 @@ impl App {
             }
             Cmd::Input(msg) => self.handle_input(msg),
             Cmd::SessionEnded => {
-                // Rede de segurança da regra "tecla presa": a sessão já soltou o que o cliente apertou (pela janela em que
-                // apertou); aqui sai o que sobrou no teclado, por exemplo de uma janela que já foi destruída.
                 if let Some(kb) = self.seat.get_keyboard() {
                     let presas: Vec<Keycode> = kb.pressed_keys().into_iter().collect();
                     let time = self.now_ms();
@@ -1864,21 +1666,17 @@ impl App {
                     }
                 }
                 self.dismiss_all_popups();
-                // A próxima sessão não conhece o cursor atual: o app volta a ser ouvido.
                 self.last_cursor = None;
                 self.last_cursor_req = None;
             }
         }
     }
 
-    /// Superfície e deslocamento da geometria dentro dela, da janela (ou popup) `win`.
     fn target_of(&self, win: u32) -> Option<(WlSurface, (i32, i32))> {
         let e = self.windows.iter().find(|e| e.id == Some(win))?;
         Some((e.surface.clone(), e.origin))
     }
 
-    /// Garante o foco do ponteiro na janela. `(x, y)` são coordenadas da área transmitida; o
-    /// deslocamento da geometria é somado para o app ver as coordenadas da própria superfície.
     fn point_at(&mut self, x: f64, y: f64, surface: &WlSurface, origin: (i32, i32)) {
         let Some(ptr) = self.seat.get_pointer() else { return };
         ptr.motion(
@@ -1888,10 +1686,6 @@ impl App {
         );
     }
 
-    /// Botão ou rolagem numa janela que ainda não tem o foco do ponteiro (nenhum movimento antes dela): leva o
-    /// ponteiro para a última posição conhecida **dela** (sem ela, o canto) com `enter`, um `frame` e um
-    /// `motion` na mesma posição, para o app já ter a posição certa antes do evento. Um app que só atualiza o
-    /// ponteiro em `motion` (o Android) clicaria no lugar antigo se só houvesse o `enter`.
     fn refocus_pointer(&mut self, win: u32, surface: &WlSurface, origin: (i32, i32)) {
         let (x, y) = self.pointer_pos.get(&win).copied().unwrap_or((0.0, 0.0));
         self.pointer_win = Some(win);
@@ -1911,8 +1705,6 @@ impl App {
                 let entrando = self.seat.get_pointer().is_some_and(|p| p.current_focus().as_ref() != Some(&surface));
                 self.point_at(f64::from(x), f64::from(y), &surface, origin);
                 if entrando {
-                    // O `enter` leva a posição, mas o Android só atualiza o ponteiro em `motion`: um clique logo
-                    // depois cairia no lugar antigo. Fecha o grupo do `enter` e manda o `motion` na mesma posição.
                     if let Some(ptr) = self.seat.get_pointer() {
                         ptr.frame(self);
                     }
@@ -1926,8 +1718,6 @@ impl App {
                 let Some((surface, origin)) = self.target_of(win) else { return };
                 let Some(ptr) = self.seat.get_pointer() else { return };
                 if pressed {
-                    // Clique fora da cadeia de popups: dispensa os menus e consome o clique, para o
-                    // botão do menu que o abriu não reabri-lo.
                     if self.click_dismisses(win) {
                         self.swallowed.push(button);
                         return;
@@ -1949,7 +1739,6 @@ impl App {
                 if ptr.current_focus().as_ref() != Some(&surface) {
                     self.refocus_pointer(win, &surface, origin);
                 }
-                // Um passo de roda vale 15 px; o v120 informa o passo discreto aos clientes.
                 let mut frame = AxisFrame::new(self.now_ms()).source(AxisSource::Wheel);
                 for (axis, v) in [(Axis::Horizontal, dx), (Axis::Vertical, dy)] {
                     if v != 0.0 {
@@ -1964,8 +1753,6 @@ impl App {
                 if self.target_of(win).is_none() {
                     return;
                 }
-                // O xkb usa o código evdev + 8. O teclado vai para quem tem o foco do seat (o popup
-                // com captura, se houver), qualquer que seja o id que o cliente usou.
                 let state = if pressed { KeyState::Pressed } else { KeyState::Released };
                 let time = self.now_ms();
                 kb.input::<(), _>(self, Keycode::new(keycode + 8), state, SERIAL_COUNTER.next_serial(), time, |_, _, _| FilterResult::Forward);
@@ -1973,7 +1760,7 @@ impl App {
             Message::Focus { win, focused } => {
                 let Some(idx) = self.idx_by_id(win) else { return };
                 if self.windows[idx].popup().is_some() {
-                    return; // o foco é sempre da janela raiz
+                    return;
                 }
                 let surface = self.windows[idx].surface.clone();
                 if focused {
@@ -1981,7 +1768,6 @@ impl App {
                     self.update_activation();
                     self.refresh_keyboard_focus();
                 } else if self.focus_root.as_ref() == Some(&surface) {
-                    // A raiz perdeu o foco: os menus abertos somem.
                     self.dismiss_all_grabs();
                     self.focus_root = None;
                     self.update_activation();
@@ -1999,7 +1785,6 @@ impl App {
             Message::CloseReq { win } => {
                 let Some(idx) = self.idx_by_id(win) else { return };
                 if self.windows[idx].popup().is_some() {
-                    // Dispensa de popup pedida pelo cliente (clique fora da cadeia, perda de foco).
                     self.dismiss_popup(idx);
                 } else if let Some(t) = self.windows[idx].toplevel() {
                     t.send_close();
@@ -2010,32 +1795,19 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------- keymap
-
-/// Nome que o xkb dá ao layout `br` (ABNT2) e o que o `psd` anuncia no lugar dele.
 const NOME_LAYOUT_XKB: &str = "Portuguese (Brazil)";
 const NOME_LAYOUT_PSD: &str = "Brazilian (ABNT2)";
 
-/// Troca o nome do layout dentro do texto de um keymap xkb. Só o nome (uma informação para humanos): as
-/// teclas e os símbolos não mudam.
-///
-/// Por quê: o Android do Waydroid escolhe o layout do teclado pela primeira palavra do nome do layout do
-/// keymap do compositor (o hwcomposer dele publica `waydroid.keyboard_layout`). Com "Portuguese (Brazil)" o
-/// Android escolhia o layout de Portugal, em que a tecla do til e a do acento agudo dão `º`, `ª` e `+`;
-/// com "Brazilian (ABNT2)" ele escolhe o layout Brasileiro e "ação" sai certo. Veja docs/23.
 pub(crate) fn renomear_layout(keymap: &str) -> String {
     keymap.replace(&format!("\"{NOME_LAYOUT_XKB}\""), &format!("\"{NOME_LAYOUT_PSD}\""))
 }
 
-/// O keymap `br` do xkb, em texto, com o nome do layout trocado ([`renomear_layout`]).
 pub(crate) fn keymap_br_texto() -> Option<String> {
     use smithay::input::keyboard::xkb;
     let contexto = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
     let keymap = xkb::Keymap::new_from_names(&contexto, "", "", "br", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)?;
     Some(renomear_layout(&keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)))
 }
-
-// ---------------------------------------------------------------- laço de eventos
 
 pub(crate) fn run(listener: ListeningSocket, shared: Shared, rx: channel::Channel<Cmd>) -> io::Result<()> {
     let mut display: Display<App> = Display::new().map_err(io::Error::other)?;
@@ -2047,8 +1819,6 @@ pub(crate) fn run(listener: ListeningSocket, shared: Shared, rx: channel::Channe
     let mut seat = seat_state.new_wl_seat(&dh, "pistick");
     seat.add_pointer();
     let xkb = XkbConfig { layout: "br", ..XkbConfig::default() };
-    // No Wayland quem repete a tecla é o app, a partir deste `repeat_info`: 25 por segundo, depois de 600 ms.
-    // O keymap é o `br` (ABNT2) do xkb com o nome do layout trocado por `keymap_br_texto` (veja lá o motivo).
     seat.add_keyboard(xkb, 600, 25).map_err(|e| io::Error::other(format!("teclado (xkb layout br): {e:?}")))?;
 
     let output = Output::new(
@@ -2060,7 +1830,6 @@ pub(crate) fn run(listener: ListeningSocket, shared: Shared, rx: channel::Channe
     output.change_current_state(Some(mode), Some(smithay::utils::Transform::Normal), Some(Scale::Integer(1)), Some((0, 0).into()));
     output.set_preferred(mode);
 
-    // DMABUF: só XRGB8888/ARGB8888 lineares, que o `psd` lê direto (veja `dmabuf.rs`).
     let mut dmabuf_state = DmabufState::new();
     let dmabuf_global = dmabuf::dispositivo().and_then(|dev| DmabufFeedbackBuilder::new(dev, dmabuf::formatos()).build().ok()).map(|fb| dmabuf_state.create_global_with_default_feedback::<App>(&dh, &fb));
     if dmabuf_global.is_none() {
@@ -2110,7 +1879,6 @@ pub(crate) fn run(listener: ListeningSocket, shared: Shared, rx: channel::Channe
         }
     }
 
-    // Novas conexões de clientes Wayland.
     loop_handle
         .insert_source(Generic::new(listener, Interest::READ, Mode::Level), |_, listener, app: &mut App| {
             while let Some(stream) = listener.accept()? {
@@ -2122,13 +1890,11 @@ pub(crate) fn run(listener: ListeningSocket, shared: Shared, rx: channel::Channe
         })
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    // Dados dos clientes já conectados: o fd de poll do Display acorda o laço.
     let poll_fd = display.as_fd().try_clone_to_owned()?;
     loop_handle
         .insert_source(Generic::new(poll_fd, Interest::READ, Mode::Level), |_, _, _| Ok(PostAction::Continue))
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    // Comandos da sessão.
     loop_handle
         .insert_source(rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg(cmd) = ev {
@@ -2161,7 +1927,6 @@ mod tests {
         assert!(novo.contains("name[Group1]= \"Brazilian (ABNT2)\";"), "{novo}");
         assert!(!novo.contains("Portuguese"), "{novo}");
         assert!(novo.contains("key <AC10> { [ ccedilla, Ccedilla ] };"));
-        // Outro layout não muda.
         let us = "name[Group1]= \"English (US)\";";
         assert_eq!(renomear_layout(us), us);
     }
@@ -2173,7 +1938,6 @@ mod tests {
         let contexto = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let km = xkb::Keymap::new_from_string(&contexto, texto, xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS).expect("o keymap com o nome novo compila");
         assert_eq!(km.layout_get_name(0), NOME_LAYOUT_PSD);
-        // ABNT2: a tecla evdev 39 é o ç, a 89 é a "/ ?" e a 26 é o acento agudo morto.
         let sym = |evdev: u32| km.key_get_syms_by_level(xkb::Keycode::new(evdev + 8), 0, 0).first().map(|s| s.raw());
         assert_eq!(sym(39), Some(xkb::keysyms::KEY_ccedilla));
         assert_eq!(sym(89), Some(xkb::keysyms::KEY_slash));
@@ -2183,15 +1947,11 @@ mod tests {
     #[test]
     fn set_cursor_igual_ao_anterior_para_a_mesma_janela_e_ignorado() {
         let nome = PedidoCursor::Nome("text".into());
-        // Nada antes: não é repetição.
         assert!(!pedido_repetido(&None, 1, &PedidoCursor::Oculto));
         let anterior = Some((1, PedidoCursor::Oculto));
-        // O mesmo pedido para a mesma janela: ignorado.
         assert!(pedido_repetido(&anterior, 1, &PedidoCursor::Oculto));
-        // Outro pedido, ou a mesma coisa para outra janela: vale.
         assert!(!pedido_repetido(&anterior, 1, &nome));
         assert!(!pedido_repetido(&anterior, 2, &PedidoCursor::Oculto));
-        // Nomes diferentes são pedidos diferentes.
         let anterior = Some((3, nome.clone()));
         assert!(pedido_repetido(&anterior, 3, &PedidoCursor::Nome("text".into())));
         assert!(!pedido_repetido(&anterior, 3, &PedidoCursor::Nome("pointer".into())));

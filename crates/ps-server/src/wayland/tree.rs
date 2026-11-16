@@ -1,30 +1,11 @@
-//! Composição da árvore de subsuperfícies de uma janela (marco 5, fase 2).
-//!
-//! O `psd` não tem renderizador: a imagem de uma janela é a **superfície raiz** com as
-//! **subsuperfícies** por cima (ou por baixo, conforme `place_above`/`place_below`), desenhadas aqui, na
-//! CPU, só nos retângulos que mudaram. O Android (Waydroid), por exemplo, entrega um buffer `wl_shm` de
-//! 1×1 esticado por `wp_viewporter` na raiz e o conteúdo de verdade numa subsuperfície DMABUF.
-//!
-//! - Cada subsuperfície guarda a última imagem num [`Layer`] (BGRA, tamanho do buffer; pré-multiplicado
-//!   se tem alfa). A raiz guarda a sua já recortada pela geometria e esticada pelo viewport, no tamanho da
-//!   janela ([`Tree::root`]); com viewport que estica, também a imagem de origem ([`Tree::root_src`]), para
-//!   refazer a escala quando só o destino muda.
-//! - O espaço de coordenadas é o **lógico da raiz** (destino do viewport, ou o tamanho do buffer). A
-//!   janela é o recorte desse espaço pela geometria da janela (`origin` = canto do recorte).
-//! - Uma subsuperfície com viewport é esticada por vizinho mais próximo; o recorte de origem
-//!   (`set_source`) é ignorado.
-//!
-//! Tudo aqui é independente de Wayland (a chave da superfície é genérica), para ser testado sozinho.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
 use ps_codec::Rect;
 
-/// Retângulo (x, y, largura, altura) em coordenadas com sinal.
 pub(crate) type Ret = (i32, i32, i32, i32);
 
-/// Interseção de dois retângulos; `None` se vazia.
 pub(crate) fn intersecta(a: Ret, b: Ret) -> Option<Ret> {
     let x0 = a.0.max(b.0);
     let y0 = a.1.max(b.1);
@@ -33,20 +14,16 @@ pub(crate) fn intersecta(a: Ret, b: Ret) -> Option<Ret> {
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
-/// Última imagem de uma superfície: BGRA no tamanho do buffer.
 #[derive(Default)]
 pub(crate) struct Layer {
     pub w: u32,
     pub h: u32,
     pub px: Vec<u8>,
-    /// `ARGB8888`/`ABGR8888` (pré-multiplicado): compõe com transparência. Sem alfa, copia.
     pub alpha: bool,
-    /// Tamanho lógico (destino do viewport, ou o do buffer).
     pub lw: u32,
     pub lh: u32,
 }
 
-/// Uma superfície na ordem de empilhamento: posição e tamanho lógico no espaço da raiz.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Item<K> {
     pub key: K,
@@ -63,20 +40,14 @@ impl<K> Item<K> {
     }
 }
 
-/// Estado de composição de uma janela com subsuperfícies (ou com a raiz esticada pelo viewport).
 pub(crate) struct Tree<K> {
-    /// Raiz recortada e esticada, no tamanho da janela (BGRA).
     pub root: Vec<u8>,
     pub root_w: u32,
     pub root_h: u32,
     pub root_alpha: bool,
-    /// Tamanho lógico da raiz (destino do viewport ou tamanho do buffer).
     pub root_logical: (u32, u32),
-    /// Origem da raiz quando o viewport a estica (para refazer a escala sem buffer novo).
     pub root_src: Option<Layer>,
-    /// Destino do viewport com que `root` foi feita.
     pub root_dst: Option<(i32, i32)>,
-    /// Arranjo da última composição, de baixo para cima.
     pub sig: Vec<Item<K>>,
 }
 
@@ -85,18 +56,13 @@ impl<K> Tree<K> {
         Tree { root: Vec::new(), root_w: 0, root_h: 0, root_alpha: false, root_logical: (0, 0), root_src: None, root_dst: None, sig: Vec::new() }
     }
 
-    /// Árvore de uma janela que já tinha conteúdo sem subsuperfícies: a imagem atual é a da raiz.
     pub fn de_janela(pixels: &[u8], w: u32, h: u32, alpha: bool, logical: (u32, u32)) -> Tree<K> {
         Tree { root: pixels.to_vec(), root_w: w, root_h: h, root_alpha: alpha, root_logical: logical, root_src: None, root_dst: None, sig: Vec::new() }
     }
 }
 
-/// O que ficou por recompor desde a última composição.
 pub(crate) struct Dirty<K> {
-    /// Subsuperfícies com conteúdo novo: `None` = a imagem inteira; `Some` = estes retângulos (em
-    /// coordenadas lógicas da própria subsuperfície).
     pub subs: Vec<(K, Option<Vec<Rect>>)>,
-    /// Recompor a janela toda (subsuperfície destruída, por exemplo).
     pub all: bool,
 }
 
@@ -106,13 +72,10 @@ impl<K> Default for Dirty<K> {
     }
 }
 
-/// O que mudou entre dois arranjos.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mudanca {
     Igual,
-    /// Só estas áreas (lógicas) mudaram.
     Areas(Vec<Ret>),
-    /// A ordem relativa das que ficaram mudou: refaz tudo.
     Tudo,
 }
 
@@ -131,7 +94,6 @@ pub(crate) fn compara<K: PartialEq>(velho: &[Item<K>], novo: &[Item<K>]) -> Muda
     Mudanca::Areas(areas)
 }
 
-/// Mistura `s` sobre `d` (pré-multiplicado, fonte sobre destino), um pixel de 4 bytes.
 pub(crate) fn mistura(d: &mut [u8], s: &[u8]) {
     let a = u32::from(s[3]);
     match a {
@@ -145,7 +107,6 @@ pub(crate) fn mistura(d: &mut [u8], s: &[u8]) {
     }
 }
 
-/// Copia (sem alfa) ou mistura (com alfa) uma sequência de pixels.
 fn copia_ou_mistura(dst: &mut [u8], src: &[u8], alpha: bool) {
     if alpha {
         for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
@@ -156,7 +117,6 @@ fn copia_ou_mistura(dst: &mut [u8], src: &[u8], alpha: bool) {
     }
 }
 
-/// Desenha a parte de `l` (na posição `(ix, iy)` da janela, com tamanho lógico `iw`×`ih`) que cai em `r`.
 fn desenha_layer(l: &Layer, (ix, iy, iw, ih): Ret, r: Ret, stride: usize, pixels: &mut [u8]) {
     if iw <= 0 || ih <= 0 || l.w == 0 || l.h == 0 || l.px.len() != l.w as usize * l.h as usize * 4 {
         return;
@@ -182,8 +142,6 @@ fn desenha_layer(l: &Layer, (ix, iy, iw, ih): Ret, r: Ret, stride: usize, pixels
     }
 }
 
-/// Recompõe em `pixels` (a janela, `ww`×`wh`) os retângulos `rects` (coordenadas da janela): zera,
-/// desenha a raiz e as subsuperfícies na ordem de `tree.sig` e fixa o alfa em 0xFF.
 pub(crate) fn compoe<K: Eq + Hash>(tree: &Tree<K>, layers: &HashMap<K, Layer>, origin: (i32, i32), (ww, wh): (u32, u32), pixels: &mut [u8], rects: &[Rect]) {
     let stride = ww as usize * 4;
     if pixels.len() < stride * wh as usize {
@@ -209,7 +167,6 @@ pub(crate) fn compoe<K: Eq + Hash>(tree: &Tree<K>, layers: &HashMap<K, Layer>, o
                     copia_ou_mistura(&mut pixels[d..d + rw * 4], &tree.root[s..s + rw * 4], tree.root_alpha);
                 }
             } else if let Some(l) = layers.get(&it.key) {
-                // Posição do item na janela: a lógica menos o canto do recorte.
                 desenha_layer(l, (it.x - origin.0, it.y - origin.1, it.w as i32, it.h as i32), area, stride, pixels);
             }
         }
@@ -221,9 +178,6 @@ pub(crate) fn compoe<K: Eq + Hash>(tree: &Tree<K>, layers: &HashMap<K, Layer>, o
     }
 }
 
-/// Junta o que mudou e recompõe. `novo` é o arranjo atual; `extra` são retângulos já em coordenadas da
-/// janela (o que a raiz mudou); `tudo` força a janela inteira. Devolve os retângulos da janela que
-/// foram recompostos (o dano a enviar à sessão).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recompoe<K: Eq + Hash + Clone>(
     tree: &mut Tree<K>,
@@ -241,7 +195,6 @@ pub(crate) fn recompoe<K: Eq + Hash + Clone>(
     let mut tudo = tudo || dirty.all;
     dirty.all = false;
     let mut ret: Vec<Ret> = extra.iter().map(|r| (r.x as i32, r.y as i32, r.w as i32, r.h as i32)).collect();
-    // Área lógica -> janela.
     let para_janela = |l: Ret| (l.0 - origin.0, l.1 - origin.1, l.2, l.3);
     match compara(&tree.sig, &novo) {
         Mudanca::Igual => {}
@@ -269,8 +222,6 @@ pub(crate) fn recompoe<K: Eq + Hash + Clone>(
     rects
 }
 
-/// Estica `src` (do tamanho de buffer, vizinho mais próximo) para o espaço lógico `lw`×`lh` e grava em
-/// `dst` o recorte `crop` (largura × altura × 4 bytes).
 pub(crate) fn estica(src: &Layer, (lw, lh): (u32, u32), crop: Ret, dst: &mut [u8]) {
     let (cx, cy, cw, ch) = crop;
     if cw <= 0 || ch <= 0 || lw == 0 || lh == 0 || src.w == 0 || src.h == 0 || dst.len() < cw as usize * ch as usize * 4 || src.px.len() != src.w as usize * src.h as usize * 4 {
@@ -298,7 +249,7 @@ pub(crate) fn estica(src: &Layer, (lw, lh): (u32, u32), crop: Ret, dst: &mut [u8
 mod tests {
     use super::*;
 
-    const AZUL: [u8; 4] = [0xFF, 0, 0, 0xFF]; // B, G, R, A
+    const AZUL: [u8; 4] = [0xFF, 0, 0, 0xFF];
     const VERMELHO: [u8; 4] = [0, 0, 0xFF, 0xFF];
     const VERDE: [u8; 4] = [0, 0xFF, 0, 0xFF];
 
@@ -365,14 +316,12 @@ mod tests {
     fn alfa_pre_multiplicado_mistura_sobre_o_que_esta_embaixo() {
         let mut t = raiz(4, 1, [0, 0, 200, 0xFF]);
         t.sig.push(item(1, 0, 0, 4, 1));
-        // Metade do alfa, pré-multiplicado: B=0, G=0, R=100, A=128 sobre vermelho 200 -> 100 + 200*127/255 ~ 200.
         let layers = HashMap::from([(1, cor(4, 1, [0, 0, 100, 128], true))]);
         let mut p = vec![0; 16];
         compoe(&t, &layers, (0, 0), (4, 1), &mut p, &[Rect::new(0, 0, 4, 1)]);
         let r = px(&p, 4, 0, 0);
         assert_eq!(r[3], 0xFF);
         assert!((i32::from(r[2]) - 200).abs() <= 1, "{r:?}");
-        // Alfa 0: transparente, nada muda. Alfa 255: cobre.
         let layers = HashMap::from([(1, cor(4, 1, [0, 0, 0, 0], true))]);
         compoe(&t, &layers, (0, 0), (4, 1), &mut p, &[Rect::new(0, 0, 4, 1)]);
         assert_eq!(px(&p, 4, 1, 0), [0, 0, 200, 0xFF]);
@@ -384,7 +333,6 @@ mod tests {
     #[test]
     fn subsuperficie_com_viewport_e_esticada_por_vizinho_mais_proximo() {
         let mut t = raiz(6, 4, AZUL);
-        // Imagem 2x1 (vermelho, verde) esticada para 6x4.
         let mut l = cor(2, 1, VERMELHO, false);
         l.px[4..8].copy_from_slice(&VERDE);
         l.lw = 6;
@@ -401,7 +349,6 @@ mod tests {
 
     #[test]
     fn recorte_da_janela_desloca_as_subsuperficies() {
-        // Janela de 4x2 recortada do canto (10, 20) do espaço lógico; subsuperfície em (11, 20).
         let mut t = Tree::<u32>::de_janela(&cor(4, 2, AZUL, false).px, 4, 2, false, (30, 40));
         t.sig = vec![Item { key: 0, root: true, x: 0, y: 0, w: 30, h: 40 }, item(1, 11, 20, 2, 1)];
         let layers = HashMap::from([(1, cor(2, 1, VERMELHO, false))]);
@@ -418,15 +365,11 @@ mod tests {
     fn compara_arranjos() {
         let a = [Item { key: 0, root: true, x: 0, y: 0, w: 10, h: 10 }, item(1, 1, 1, 2, 2)];
         assert_eq!(compara(&a, &a), Mudanca::Igual);
-        // Subsuperfície nova: só a área dela.
         let b = [a[0].clone(), a[1].clone(), item(2, 5, 5, 3, 3)];
         assert_eq!(compara(&a, &b), Mudanca::Areas(vec![(5, 5, 3, 3)]));
-        // Removida: a área antiga.
         assert_eq!(compara(&b, &a), Mudanca::Areas(vec![(5, 5, 3, 3)]));
-        // Movida: a antiga e a nova.
         let c = [a[0].clone(), item(1, 4, 4, 2, 2)];
         assert_eq!(compara(&a, &c), Mudanca::Areas(vec![(1, 1, 2, 2), (4, 4, 2, 2)]));
-        // Ordem trocada entre as que ficaram: tudo.
         let d = [a[0].clone(), item(2, 5, 5, 3, 3), a[1].clone()];
         assert_eq!(compara(&b, &d), Mudanca::Tudo);
     }
@@ -438,12 +381,10 @@ mod tests {
         let arranjo = vec![t.sig[0].clone(), item(1, 10, 2, 6, 4)];
         let mut dirty = Dirty::<u32>::default();
         let mut p = vec![0xA5; 20 * 10 * 4];
-        // Primeira vez: a subsuperfície é nova, então a área dela é recomposta.
         let r = recompoe(&mut t, arranjo.clone(), &layers, &mut dirty, (0, 0), (20, 10), &mut p, vec![], false);
         assert_eq!(r, vec![Rect::new(10, 2, 6, 4)]);
         assert_eq!(px(&p, 20, 10, 2), VERMELHO);
         assert_eq!(px(&p, 20, 0, 0), [0xA5; 4]);
-        // Conteúdo novo só num pedaço (2,1,2,2) da subsuperfície.
         layers.get_mut(&1).unwrap().px = cor(6, 4, VERDE, false).px;
         dirty.subs.push((1, Some(vec![Rect::new(2, 1, 2, 2)])));
         let r = recompoe(&mut t, arranjo, &layers, &mut dirty, (0, 0), (20, 10), &mut p, vec![], false);
@@ -465,7 +406,6 @@ mod tests {
         estica(&dois, (4, 2), (0, 0, 4, 2), &mut d);
         assert_eq!(px(&d, 4, 1, 1), VERMELHO);
         assert_eq!(px(&d, 4, 2, 0), AZUL);
-        // Com recorte: a metade direita.
         let mut d = vec![0; 2 * 2 * 4];
         estica(&dois, (4, 2), (2, 0, 2, 2), &mut d);
         assert!(d.chunks_exact(4).all(|c| c == AZUL));

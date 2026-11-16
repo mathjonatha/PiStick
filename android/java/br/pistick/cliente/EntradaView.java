@@ -8,16 +8,9 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 
-/**
- * Visão invisível que recebe o texto do teclado virtual (docs/26, decisão 11). O campo é declarado sem sugestões e sem
- * correção (NO_SUGGESTIONS | VISIBLE_PASSWORD) para o texto sair letra a letra. O núcleo converte o texto em batidas
- * ABNT2; aqui só se repassa o que o método de entrada confirma.
- */
 final class EntradaView extends View {
-    /** O que já foi enviado do trecho em composição (as IMEs que compõem texto o reescrevem). */
     private String composicao = "";
 
-    /** Chamado depois de cada texto ou tecla enviados ao núcleo (que pode ter soltado Ctrl e Alt grudentos). */
     private Runnable aoEnviar;
 
     EntradaView(Context ctx) {
@@ -93,7 +86,6 @@ final class EntradaView extends View {
         };
     }
 
-    /** Troca o trecho já enviado pelo novo: apaga o que diverge e digita o resto. */
     private void aplicar(String novo) {
         int p = 0;
         int max = Math.min(composicao.length(), novo.length());

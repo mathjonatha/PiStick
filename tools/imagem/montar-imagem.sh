@@ -1,20 +1,4 @@
 #!/bin/sh
-# Constrói a imagem pronta para gravar (pistick-<versão>-rpi-arm64.img.xz) a partir da imagem oficial
-# do Raspberry Pi OS Lite arm64 e do pacote do PiStick. Roda NO PI (aarch64 nativo), com sudo:
-#
-#   sudo sh tools/imagem/montar-imagem.sh --pacote ~/pistick-saida/pistick-<versão>-aarch64.tar.xz [--saida PASTA]
-#
-# Veja docs/17-imagem-e-instalador.md. Passos: baixa e confere a base (cache/), descompacta, cresce o
-# arquivo e a partição raiz, monta por dispositivo de laço, aplica o instalador por chroot, limpa,
-# desmonta, zera o espaço livre e comprime.
-#
-# SEGURANÇA: este roteiro só escreve em ARQUIVOS e em dispositivos de laço que ele mesmo cria a
-# partir do arquivo de trabalho. Recusa caminho de dispositivo de bloco (argumentos e arquivos) e
-# confere, antes de cada comando destrutivo, que o alvo é um laço cujo arquivo de apoio é o de
-# trabalho. Nunca aponta para o cartão do Pi nem para qualquer disco.
-#
-# Um trap desmonta tudo e solta o laço em qualquer saída (erro, Ctrl+C, SIGTERM). Reexecuta-se sob
-# nice -n 19 e ionice -c3: o Pi pode estar em uso por outro trabalho.
 set -eu
 
 if [ -z "${PISTICK_NICE:-}" ]; then
@@ -63,7 +47,6 @@ falhou() {
     exit 1
 }
 
-# recusar_bloco ROTULO CAMINHO: recusa dispositivo de bloco, qualquer caminho em /dev, /proc, /sys.
 recusar_bloco() {
     case "$2" in
         /dev | /dev/* | /proc | /proc/* | /sys | /sys/*)
@@ -107,7 +90,6 @@ saida=$(cd "$saida" && pwd)
 pacote=$(cd "$(dirname "$pacote")" && pwd)/$(basename "$pacote")
 
 aqui=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=base.conf
 . "$aqui/base.conf"
 
 inicio=$(date +%s)
@@ -119,7 +101,6 @@ lock="$saida/trabalho/.lock"
 resolv_orig=""
 tmp=""
 
-# Um só construtor por pasta de saída.
 if ! mkdir "$lock" 2>/dev/null; then
     outro=$(cat "$lock/pid" 2>/dev/null || true)
     if [ -n "$outro" ] && kill -0 "$outro" 2>/dev/null; then
@@ -130,7 +111,6 @@ if ! mkdir "$lock" 2>/dev/null; then
 fi
 echo $$ > "$lock/pid"
 
-# matar_chroot: encerra o que roda com a raiz em $mnt (processos do chroot que sobraram).
 matar_chroot() {
     for sinal in TERM KILL; do
         achou=0
@@ -145,7 +125,6 @@ matar_chroot() {
     done
 }
 
-# Limpeza em qualquer saída: mata o que roda no chroot, desmonta em ordem inversa, solta o laço.
 limpar() {
     set +e
     trap '' INT TERM HUP
@@ -182,7 +161,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-# confere_laco: o alvo é um laço /dev/loopN cujo arquivo de apoio é exatamente o arquivo de trabalho.
 confere_laco() {
     case "$laco" in
         /dev/loop[0-9] | /dev/loop[0-9][0-9] | /dev/loop[0-9][0-9][0-9]) ;;
@@ -192,7 +170,6 @@ confere_laco() {
     [ "$apoio" = "$img" ] || falhou "o laço '$laco' não aponta para o arquivo de trabalho ('$apoio' != '$img')."
 }
 
-# alvo_particao N: imprime ${laco}pN depois de conferir o laço e esperar o nó aparecer.
 alvo_particao() {
     confere_laco
     n=0
@@ -209,7 +186,6 @@ passo() {
     echo "== $* =="
 }
 
-# ---- 0. Pacote ----
 passo "Pacote"
 tmp=$(mktemp -d)
 tar -xJf "$pacote" -C "$tmp" --no-same-owner || falhou "não consegui extrair o pacote."
@@ -231,7 +207,6 @@ rm -f "$img"
 cp "$pacote" "$tmp/pacote.tar.xz"
 if [ -f "$pacote.sha256" ]; then cp "$pacote.sha256" "$tmp/pacote.tar.xz.sha256"; fi
 
-# ---- 1. Imagem base ----
 passo "Imagem base $BASE_VERSAO"
 base="$saida/cache/$BASE_ARQUIVO"
 if [ ! -f "$base" ]; then
@@ -246,7 +221,6 @@ if [ "$real" != "$BASE_SHA256" ]; then
 fi
 echo "SHA-256 da base conferido: $BASE_SHA256"
 
-# ---- 2. Arquivo de trabalho e partição raiz ----
 passo "Arquivo de trabalho"
 xz -dc "$base" > "$img" || falhou "não consegui descompactar a base."
 tamanho_base=$(wc -c < "$img")
@@ -254,7 +228,6 @@ truncate -s "+${CRESCER_MIB}M" "$img"
 parted -s "$img" resizepart 2 100% || falhou "parted resizepart"
 parted -s "$img" unit B print | sed -n '/^Number/,$p'
 
-# ---- 3. Laço e montagem ----
 passo "Laço e montagem"
 laco=$(losetup --partscan --find --show "$img") || falhou "losetup"
 echo "laço: $laco -> $img"
@@ -274,12 +247,10 @@ mount -t sysfs sysfs "$mnt/sys"
 mount --bind /dev "$mnt/dev"
 mount --bind /dev/pts "$mnt/dev/pts"
 
-# Estado da base que não pode mudar.
 nm_antes=$(find "$mnt/etc/NetworkManager/system-connections" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
 np_antes=$(find "$mnt/etc/netplan" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
 mid_antes=$(cat "$mnt/etc/machine-id" 2>/dev/null || true)
 
-# resolv.conf provisório (o original volta depois) e política de não iniciar serviços no chroot.
 resolv_orig="$tmp/resolv.conf.orig"
 if [ -e "$mnt/etc/resolv.conf" ] || [ -L "$mnt/etc/resolv.conf" ]; then
     cp -a "$mnt/etc/resolv.conf" "$resolv_orig"
@@ -289,7 +260,6 @@ cp /etc/resolv.conf "$mnt/etc/resolv.conf"
 printf '#!/bin/sh\nexit 101\n' > "$mnt/usr/sbin/policy-rc.d"
 chmod 755 "$mnt/usr/sbin/policy-rc.d"
 
-# ---- 4. Instalação no chroot ----
 passo "Instalação no chroot"
 cp "$tmp/pacote.tar.xz" "$mnt/tmp/pacote.tar.xz"
 if [ -f "$tmp/pacote.tar.xz.sha256" ]; then cp "$tmp/pacote.tar.xz.sha256" "$mnt/tmp/pacote.tar.xz.sha256"; fi
@@ -301,7 +271,6 @@ set -eu
 export DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 apt-get update
 if [ "$REMOVER_COMPILADOR" = "1" ]; then
-    # A base oficial traz o compilador; a imagem do PiStick não deve ter.
     pacotes_cc=\$(dpkg-query -W -f='\${Package} \${Status}\n' | grep ' install ok installed\$' | cut -d' ' -f1 |
         grep -E '^(build-essential|gcc|g\+\+|cpp)(-[0-9]+)?(-aarch64-linux-gnu)?\$|^(gcc|g\+\+|cpp)-[0-9]+-(aarch64-linux-gnu|for-host)\$' || true)
     if [ -n "\$pacotes_cc" ]; then
@@ -315,7 +284,6 @@ systemctl enable pistick-primeiro-boot.service
 echo pistick > /etc/hostname
 sed -i 's/^\(127\.0\.1\.1[[:space:]]\{1,\}\).*/\1pistick/' /etc/hosts
 grep -q '^127\.0\.1\.1' /etc/hosts || printf '127.0.1.1\tpistick\n' >> /etc/hosts
-# Limpeza.
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 find /var/log -type f -exec rm -f {} +
@@ -328,12 +296,10 @@ for h in /home/*; do
 done
 CHROOT
 chmod 755 "$mnt/tmp/pistick-chroot.sh"
-# Em segundo plano e com wait: o trap de INT/TERM roda na hora, sem esperar o chroot terminar.
 chroot "$mnt" /bin/sh /tmp/pistick-chroot.sh &
 pid_chroot=$!
 wait "$pid_chroot" || falhou "a instalação no chroot falhou."
 
-# ---- 5. Limpeza e conferência da base ----
 passo "Limpeza"
 find "$mnt/tmp" "$mnt/var/tmp" -mindepth 1 -xdev -delete
 rm -f "$mnt/usr/sbin/policy-rc.d"
@@ -363,7 +329,6 @@ if [ "$livre_kib" -lt 204800 ]; then
     falhou "sobrou menos de 200 MiB livres na raiz; aumente CRESCER_MIB em base.conf."
 fi
 
-# ---- 6. Desmontar, zerar o espaço livre, soltar o laço ----
 passo "Desmontagem e zeragem do espaço livre"
 sync
 matar_chroot
@@ -380,7 +345,6 @@ confere_laco
 losetup -d "$laco" || falhou "losetup -d"
 laco=""
 
-# ---- 7. Compressão ----
 passo "Compressão (xz -T0 -6)"
 xz -T0 -6 -c "$img" > "$img.xz.parcial" || falhou "xz"
 mv -f "$img.xz.parcial" "$final"

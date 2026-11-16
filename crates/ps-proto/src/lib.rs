@@ -1,103 +1,56 @@
-//! Protocolo de fio do PiStick, versão 1 (veja `docs/05-protocolo.md`).
-//!
-//! Tudo é escrito e lido à mão em little-endian, sem dependências.
-//! O enquadramento é `u32 len, u16 kind, u16 flags, corpo`.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 
-/// "PSTK" lido como bytes P,S,T,K em little-endian.
 pub const MAGIC: u32 = 0x4B54_5350;
 pub const VERSION: u16 = 1;
-/// Tamanho máximo do corpo de uma mensagem: 64 MiB.
 pub const MAX_BODY_LEN: u32 = 64 * 1024 * 1024;
-/// Tamanho do cabeçalho de enquadramento.
 pub const HEADER_LEN: usize = 8;
 
-/// Bit 0 de `caps`: codec de blocos.
 pub const CAP_BLOCK_CODEC: u32 = 1 << 0;
-/// Bit 1 de `caps`: H.264 por região (marco 4: `VIDEO_START`, `VIDEO_FRAME`, `VIDEO_STOP`).
 pub const CAP_H264: u32 = 1 << 1;
 
-/// Bit 2 de `caps`: popups e relações entre janelas (`POPUP_CREATE`, `POPUP_MOVE`, `WIN_PARENT`, `WIN_LIMITS`).
 pub const CAP_POPUPS: u32 = 1 << 2;
-/// Bit 3 de `caps`: cursor (`CURSOR`).
 pub const CAP_CURSOR: u32 = 1 << 3;
-/// Bit 4 de `caps`: área de transferência (`CLIPBOARD`).
 pub const CAP_CLIPBOARD: u32 = 1 << 4;
-/// Bit 5 de `caps`: áudio (marco 7: `AUDIO_START`, `AUDIO_DATA`, `AUDIO_STOP`).
 pub const CAP_AUDIO: u32 = 1 << 5;
-/// Bit 6 de `caps`: apresentação atômica de quadros fatiados (`FRAME_FLAG_MORE` no cabeçalho do `FRAME`).
 pub const CAP_ATOMIC: u32 = 1 << 6;
-/// Bit 7 de `caps`: microfone do hospedeiro (marco 7B: `AUDIO_REQUEST`, e `AUDIO_START/DATA/STOP` do fluxo 1 do cliente
-/// para o servidor). Separado de [`CAP_AUDIO`]: dá para ter som sem microfone.
 pub const CAP_MIC: u32 = 1 << 7;
-/// Bit 8 de `caps`: sessão (marco 8A: `GOODBYE` nos dois sentidos e `STATUS` do aparelho). Vale se os dois lados o anunciaram;
-/// sem ele nada muda no fio (um cliente antigo é só desconectado numa troca de hospedeiro).
 pub const CAP_SESSION: u32 = 1 << 8;
-/// Todas as extensões do marco 3.
 pub const CAPS_MARCO3: u32 = CAP_POPUPS | CAP_CURSOR | CAP_CLIPBOARD;
 
-/// Tamanho máximo do texto de uma mensagem `CLIPBOARD`: 1 MiB.
 pub const MAX_CLIPBOARD: usize = 1024 * 1024;
-/// Lado máximo de uma imagem de cursor.
 pub const MAX_CURSOR_SIDE: u16 = 128;
-/// Único tipo MIME da área de transferência nesta versão.
 pub const MIME_TEXT: &str = "text/plain;charset=utf-8";
 
-/// Carga máxima de um `AUDIO_DATA`: 64 KiB.
 pub const MAX_AUDIO_PAYLOAD: usize = 64 * 1024;
-/// `AUDIO_START.stream`: saída do Pi (servidor para cliente).
 pub const AUDIO_STREAM_OUT: u8 = 0;
-/// `AUDIO_START.stream`: microfone do hospedeiro (marco 7B; o cliente o envia depois de um `AUDIO_REQUEST`).
 pub const AUDIO_STREAM_MIC: u8 = 1;
-/// Bit 0 de `AUDIO_DATA.flags`: descontinuidade (houve descarte ou silêncio antes deste pacote).
 pub const AUDIO_FLAG_DISCONTINUITY: u8 = 1;
-/// Bit 1 de `AUDIO_DATA.flags`: o servidor descartou pacotes por atraso (vem sempre junto com o bit 0).
 pub const AUDIO_FLAG_DROPPED: u8 = 2;
 
-/// Bit 0 do campo `flags` do cabeçalho de um `FRAME` (só com `CAP_ATOMIC` nos dois lados): este `FRAME` é
-/// uma fatia que **não** é a última do quadro; vêm mais fatias do mesmo quadro.
 pub const FRAME_FLAG_MORE: u16 = 1;
 
-/// Valor de `FRAME.codec` para o codec de blocos.
 pub const CODEC_BLOCKS: u8 = 1;
-/// Valor de `VIDEO_START.codec`: H.264 em Annex B.
 pub const CODEC_H264: u8 = 1;
-/// Bit 0 de `VIDEO_FRAME.flags`: quadro-chave (IDR, com SPS e PPS).
 pub const VIDEO_FLAG_KEY: u8 = 1;
 
-/// `AUTH_STATUS.state`: o cliente já era pareado; segue o `HELLO` normal.
 pub const AUTH_PAIRED: u8 = 0;
-/// `AUTH_STATUS.state`: pareado agora, pela janela do primeiro uso (ou aprovado no aparelho).
 pub const AUTH_PAIRED_NOW: u8 = 1;
-/// `AUTH_STATUS.state`: aguardando aprovação no aparelho (`psd pair`); a conexão fica aberta por até 120 s.
 pub const AUTH_PENDING: u8 = 2;
-/// `AUTH_STATUS.state`: recusado; o servidor fecha em seguida.
 pub const AUTH_REFUSED: u8 = 3;
 
-/// `GOODBYE.reason`, cliente para servidor: o cliente vai desconectar por vontade própria (o usuário fechou por software).
 pub const GOODBYE_CLIENT: u8 = 0;
-/// `GOODBYE.reason`, servidor para cliente: outro cliente pareado assumiu a sessão (`text` = nome dele). O cliente não
-/// reconecta sozinho.
 pub const GOODBYE_REPLACED: u8 = 1;
-/// `GOODBYE.reason`, servidor para cliente: o aparelho está desligando ou o serviço está parando.
 pub const GOODBYE_SHUTDOWN: u8 = 2;
-/// Maior texto de um `GOODBYE` (bytes); o resto é cortado na escrita, em fronteira de caractere.
 pub const MAX_GOODBYE_TEXT: usize = 255;
 
-/// `STATUS.flags`, bit 0: subtensão agora.
 pub const STATUS_UNDERVOLT_NOW: u32 = 1 << 0;
-/// `STATUS.flags`, bit 1: houve subtensão desde o boot.
 pub const STATUS_UNDERVOLT_SINCE_BOOT: u32 = 1 << 1;
-/// `STATUS.flags`, bit 2: limitação por temperatura agora.
 pub const STATUS_THROTTLED_NOW: u32 = 1 << 2;
-/// `STATUS.flags`, bit 3: modo descartável ligado (o que os apps gravarem some ao fim do serviço).
 pub const STATUS_DISPOSABLE: u32 = 1 << 3;
-/// `STATUS.temp_dc` quando a temperatura é desconhecida.
 pub const STATUS_TEMP_UNKNOWN: i16 = i16::MIN;
 
-/// Códigos de tipo de mensagem.
 pub mod kind {
     pub const HELLO: u16 = 1;
     pub const WIN_CREATE: u16 = 16;
@@ -107,16 +60,12 @@ pub mod kind {
     pub const FRAME: u16 = 20;
     pub const POPUP_CREATE: u16 = 21;
     pub const CURSOR: u16 = 22;
-    /// Servidor -> cliente.
     pub const CLIPBOARD: u16 = 23;
     pub const WIN_PARENT: u16 = 24;
     pub const WIN_LIMITS: u16 = 25;
     pub const POPUP_MOVE: u16 = 26;
-    /// Servidor -> cliente (marco 4).
     pub const VIDEO_START: u16 = 27;
-    /// Servidor -> cliente (marco 4).
     pub const VIDEO_FRAME: u16 = 28;
-    /// Servidor -> cliente (marco 4).
     pub const VIDEO_STOP: u16 = 29;
     pub const PING: u16 = 30;
     pub const PONG: u16 = 31;
@@ -128,44 +77,27 @@ pub mod kind {
     pub const RESIZE_REQ: u16 = 37;
     pub const CLOSE_REQ: u16 = 38;
     pub const FOCUS: u16 = 39;
-    /// Cliente -> servidor.
     pub const CLIPBOARD_UP: u16 = 40;
-    /// Marco 7. Os números 30 a 32 do projeto original já eram PING, PONG e FRAME_ACK; ficaram 41 a 43.
     pub const AUDIO_START: u16 = 41;
     pub const AUDIO_DATA: u16 = 42;
     pub const AUDIO_STOP: u16 = 43;
-    /// Marco 9A: primeira mensagem do servidor dentro do canal cifrado, antes do `HELLO`.
     pub const AUTH_STATUS: u16 = 44;
-    /// Marco 7B: servidor -> cliente, liga ou desliga a captura do microfone.
     pub const AUDIO_REQUEST: u16 = 45;
-    /// Marco 8A (`CAP_SESSION`), nos dois sentidos: despedida.
     pub const GOODBYE: u16 = 46;
-    /// Marco 8A (`CAP_SESSION`), servidor para cliente: estado do aparelho.
     pub const STATUS: u16 = 47;
 }
 
-/// Erros de leitura, escrita e decodificação.
 #[derive(Debug)]
 pub enum ProtoError {
-    /// Erro de E/S do transporte.
     Io(io::Error),
-    /// A outra ponta fechou a conexão entre duas mensagens.
     Closed,
-    /// `len` acima de [`MAX_BODY_LEN`]: o receptor deve encerrar a conexão.
     TooLarge(u32),
-    /// O corpo acabou antes do fim de um campo.
     Truncated,
-    /// Texto que não é UTF-8 válido.
     BadUtf8,
-    /// `magic` do HELLO diferente de [`MAGIC`].
     BadMagic(u32),
-    /// Versão do protocolo diferente da nossa.
     BadVersion(u16),
-    /// Texto longo demais para o prefixo `u16`.
     StringTooLong(usize),
-    /// Chegou uma mensagem de outro tipo onde se esperava um HELLO.
     Unexpected(u16),
-    /// Campo com valor fora do permitido (imagem de cursor grande demais, texto acima de 1 MiB...).
     Invalid(&'static str),
 }
 
@@ -201,23 +133,16 @@ impl From<io::Error> for ProtoError {
     }
 }
 
-/// Forma do cursor numa mensagem `CURSOR`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CursorShape {
-    /// Cursor oculto.
     Hidden,
-    /// Nome CSS, como em `cursor-shape-v1` ("default", "text", "pointer"...).
     Named(String),
-    /// Imagem BGRA pré-multiplicada, `width * height * 4` bytes (no máximo 128x128).
     Image { width: u16, height: u16, hot_x: i16, hot_y: i16, bgra: Vec<u8> },
 }
 
-/// Uma mensagem do protocolo, nos dois sentidos.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    // Nos dois sentidos
     Hello { version: u16, caps: u32, name: String },
-    // Servidor -> cliente
     WinCreate { win: u32, width: u32, height: u32, title: String, app_id: String },
     WinResize { win: u32, width: u32, height: u32 },
     WinTitle { win: u32, title: String },
@@ -229,24 +154,19 @@ pub enum Message {
         width: u32,
         height: u32,
         codec: u8,
-        /// Fatia que não é a última do quadro (`FRAME_FLAG_MORE` no cabeçalho; só com `CAP_ATOMIC`).
         more: bool,
         data: Vec<u8>,
     },
     Pong { echo: u64 },
-    // Servidor -> cliente, extensões do marco 3
     PopupCreate { win: u32, parent: u32, x: i32, y: i32, width: u32, height: u32, grab: bool },
     PopupMove { win: u32, x: i32, y: i32, width: u32, height: u32 },
     WinParent { win: u32, parent: u32 },
     WinLimits { win: u32, min_w: u32, min_h: u32, max_w: u32, max_h: u32 },
     Cursor { win: u32, shape: CursorShape },
-    /// Servidor -> cliente (kind 23).
     Clipboard { mime: String, data: Vec<u8> },
-    // Servidor -> cliente, extensão do marco 4 (vídeo por região)
     VideoStart { win: u32, stream: u32, x: u32, y: u32, width: u32, height: u32, codec: u8 },
     VideoFrame { win: u32, stream: u32, seq: u32, capture_us: u64, flags: u8, data: Vec<u8> },
     VideoStop { win: u32, stream: u32 },
-    // Cliente -> servidor
     Ping { value: u64 },
     FrameAck { win: u32, seq: u32 },
     PointerMove { win: u32, x: f32, y: f32 },
@@ -256,40 +176,25 @@ pub enum Message {
     ResizeReq { win: u32, width: u32, height: u32 },
     CloseReq { win: u32 },
     Focus { win: u32, focused: bool },
-    /// Cliente -> servidor (kind 40).
     ClipboardUp { mime: String, data: Vec<u8> },
-    /// Marco 7: abre um fluxo de áudio. `codec`: 0 PCM S16LE, 1 PSA1; `frames`: quadros por pacote.
     AudioStart { stream: u8, codec: u8, channels: u8, rate: u32, frames: u16 },
     AudioData { stream: u8, flags: u8, seq: u32, pts_us: u64, data: Vec<u8> },
     AudioStop { stream: u8 },
-    /// Marco 7B (kind 45, servidor para cliente, só com [`CAP_MIC`] dos dois lados): `on` 1 pede ao cliente que capture o
-    /// fluxo `stream` (hoje só [`AUDIO_STREAM_MIC`]) e responda com `AUDIO_START`; `on` 0 pede que pare.
     AudioRequest { stream: u8, on: bool },
-    /// Marco 9A (kind 44): estado do pareamento, só dentro do canal cifrado. `state`: [`AUTH_PAIRED`],
-    /// [`AUTH_PAIRED_NOW`], [`AUTH_PENDING`] ou [`AUTH_REFUSED`]; `code`: dígitos ASCII do código de 6
-    /// dígitos (só no estado 2; nos outros, zeros).
     AuthStatus { state: u8, code: [u8; 6] },
-    /// Marco 8A (kind 46, nos dois sentidos, só com [`CAP_SESSION`] dos dois lados): despedida. `reason`:
-    /// [`GOODBYE_CLIENT`] (cliente para servidor, `text` vazio), [`GOODBYE_REPLACED`] (`text` = nome de quem assumiu) ou
-    /// [`GOODBYE_SHUTDOWN`]. Motivo desconhecido é aceito na leitura (quem recebe o trata como despedida sem motivo).
     Goodbye { reason: u8, text: String },
-    /// Marco 8A (kind 47, servidor para cliente, só com [`CAP_SESSION`] dos dois lados): estado do aparelho. `flags` são os
-    /// bits `STATUS_*`; `temp_dc`, a temperatura em décimos de grau Celsius ([`STATUS_TEMP_UNKNOWN`] se desconhecida).
     Status { flags: u32, temp_dc: i16 },
 }
 
 impl Message {
-    /// Monta um HELLO só com o codec de blocos.
     pub fn hello(name: &str) -> Message {
         Message::hello_with_caps(name, CAP_BLOCK_CODEC)
     }
 
-    /// Monta um HELLO com as capacidades dadas (bits de `caps`).
     pub fn hello_with_caps(name: &str, caps: u32) -> Message {
         Message::Hello { version: VERSION, caps, name: name.to_string() }
     }
 
-    /// Código `kind` desta mensagem.
     pub fn kind(&self) -> u16 {
         match self {
             Message::Hello { .. } => kind::HELLO,
@@ -328,7 +233,6 @@ impl Message {
         }
     }
 
-    /// Acrescenta o corpo (sem o cabeçalho de 8 bytes) a `out`.
     pub fn encode_body(&self, out: &mut Vec<u8>) -> Result<(), ProtoError> {
         match self {
             Message::Hello { version, caps, name } => {
@@ -518,13 +422,10 @@ impl Message {
         Ok(())
     }
 
-    /// Decodifica o corpo de uma mensagem de tipo conhecido.
-    /// Devolve `Ok(None)` para `kind` desconhecido.
     pub fn decode_body(kind_code: u16, body: &[u8]) -> Result<Option<Message>, ProtoError> {
         Message::decode_body_with_flags(kind_code, 0, body)
     }
 
-    /// Como [`Message::decode_body`], com o campo `flags` do cabeçalho de enquadramento (hoje só o `FRAME` o usa).
     pub fn decode_body_with_flags(kind_code: u16, header_flags: u16, body: &[u8]) -> Result<Option<Message>, ProtoError> {
         let mut r = Cursor { buf: body, pos: 0 };
         let msg = match kind_code {
@@ -700,7 +601,6 @@ impl Message {
     }
 }
 
-/// Acrescenta a mensagem inteira (cabeçalho + corpo) a `out`.
 pub fn encode_message(msg: &Message, out: &mut Vec<u8>) -> Result<(), ProtoError> {
     let start = out.len();
     out.extend_from_slice(&[0u8; HEADER_LEN]);
@@ -712,15 +612,12 @@ pub fn encode_message(msg: &Message, out: &mut Vec<u8>) -> Result<(), ProtoError
     }
     out[start..start + 4].copy_from_slice(&(body_len as u32).to_le_bytes());
     out[start + 4..start + 6].copy_from_slice(&msg.kind().to_le_bytes());
-    // flags (start+6..start+8): só o `FRAME` usa (bit 0 = MORE); nas demais mensagens ficam em 0.
     if let Message::Frame { more: true, .. } = msg {
         out[start + 6..start + 8].copy_from_slice(&FRAME_FLAG_MORE.to_le_bytes());
     }
     Ok(())
 }
 
-/// Escreve uma mensagem com um único `write_all`, para não fragmentar em
-/// pacotes pequenos mesmo com `TCP_NODELAY`.
 pub fn write_message<W: Write>(w: &mut W, msg: &Message) -> Result<(), ProtoError> {
     let mut buf = Vec::with_capacity(HEADER_LEN + 64);
     encode_message(msg, &mut buf)?;
@@ -728,9 +625,6 @@ pub fn write_message<W: Write>(w: &mut W, msg: &Message) -> Result<(), ProtoErro
     Ok(())
 }
 
-/// Lê a próxima mensagem de tipo conhecido. Mensagens de `kind` desconhecido são
-/// puladas (os `len` bytes do corpo são descartados). `Err(Closed)` quando a
-/// outra ponta fecha exatamente entre duas mensagens.
 pub fn read_message<R: Read>(r: &mut R) -> Result<Message, ProtoError> {
     let mut body = Vec::new();
     loop {
@@ -759,7 +653,6 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<Message, ProtoError> {
     }
 }
 
-/// Lê e valida o HELLO da outra ponta (magic e versão).
 pub fn read_hello<R: Read>(r: &mut R) -> Result<(u32, String), ProtoError> {
     match read_message(r)? {
         Message::Hello { version, caps, name } => {
@@ -824,7 +717,6 @@ enum Fill {
     Eof,
 }
 
-/// Lê exatamente `buf.len()` bytes. `Eof` só se a conexão fechou antes do primeiro byte.
 fn read_full_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<Fill, ProtoError> {
     let mut got = 0;
     while got < buf.len() {
@@ -872,7 +764,6 @@ fn put_str(out: &mut Vec<u8>, s: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
-/// `t` cortado em no máximo `max` bytes, em fronteira de caractere.
 fn cut_text(t: &str, max: usize) -> &str {
     let mut fim = t.len().min(max);
     while !t.is_char_boundary(fim) {
@@ -1033,7 +924,6 @@ mod tests {
         buf.clear();
         encode_message(&Message::Status { flags: 0, temp_dc: STATUS_TEMP_UNKNOWN }, &mut buf).unwrap();
         assert_eq!(&buf[8..], &[0, 0, 0, 0, 0x00, 0x80]);
-        // `STATUS` com um byte a menos e `GOODBYE` com o texto cortado ao meio: truncados; texto inválido: UTF-8.
         assert!(matches!(Message::decode_body(kind::STATUS, &[0, 0, 0, 0, 1]), Err(ProtoError::Truncated)));
         assert!(matches!(Message::decode_body(kind::GOODBYE, &[1, 5, 0, b'a']), Err(ProtoError::Truncated)));
         assert!(matches!(Message::decode_body(kind::GOODBYE, &[1, 1, 0, 0xFF]), Err(ProtoError::BadUtf8)));
@@ -1041,7 +931,7 @@ mod tests {
 
     #[test]
     fn goodbye_corta_o_texto_longo_em_fronteira_de_caractere() {
-        let longo = "ç".repeat(200); // 400 bytes
+        let longo = "ç".repeat(200);
         let mut buf = Vec::new();
         encode_message(&Message::Goodbye { reason: GOODBYE_REPLACED, text: longo }, &mut buf).unwrap();
         let Message::Goodbye { text, .. } = read_message(&mut buf.as_slice()).unwrap() else { panic!("não é GOODBYE") };
@@ -1105,13 +995,13 @@ mod tests {
         let mut buf = Vec::new();
         encode_message(&Message::hello("ab"), &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            16, 0, 0, 0, // len = 4+2+2+4+2+2
-            1, 0, // kind
-            0, 0, // flags
-            b'P', b'S', b'T', b'K', // magic
-            1, 0, // version
-            0, 0, // reserved
-            1, 0, 0, 0, // caps
+            16, 0, 0, 0,
+            1, 0,
+            0, 0,
+            b'P', b'S', b'T', b'K',
+            1, 0,
+            0, 0,
+            1, 0, 0, 0,
             2, 0, b'a', b'b',
         ];
         assert_eq!(buf, esperado);
@@ -1128,7 +1018,6 @@ mod tests {
         encode_message(&frame(false), &mut buf).unwrap();
         assert_eq!(&buf[6..8], &[0, 0], "sem MORE o campo flags continua 0");
         assert_eq!(read_message(&mut buf.as_slice()).unwrap(), frame(false));
-        // As outras mensagens nunca levam flags, e flags desconhecidas num FRAME são ignoradas (bit 0 à parte).
         buf.clear();
         encode_message(&Message::Ping { value: 1 }, &mut buf).unwrap();
         assert_eq!(&buf[6..8], &[0, 0]);
@@ -1142,7 +1031,6 @@ mod tests {
     #[test]
     fn kind_desconhecido_e_pulado() {
         let mut fluxo = Vec::new();
-        // Mensagem desconhecida (kind 999) com 10_000 bytes de corpo, entre duas conhecidas.
         write_message(&mut fluxo, &Message::Ping { value: 1 }).unwrap();
         fluxo.extend_from_slice(&10_000u32.to_le_bytes());
         fluxo.extend_from_slice(&999u16.to_le_bytes());
@@ -1178,10 +1066,8 @@ mod tests {
         for m in todas() {
             let mut body = Vec::new();
             m.encode_body(&mut body).unwrap();
-            // Frame aceita qualquer resto, então só o cabeçalho fixo importa.
             for corte in 0..body.len() {
                 let r = Message::decode_body(m.kind(), &body[..corte]);
-                // VideoFrame também aceita qualquer resto depois dos 21 bytes fixos.
                 let fixo = match m {
                     Message::Frame { .. } => Some(25),
                     Message::VideoFrame { .. } => Some(21),
@@ -1227,7 +1113,7 @@ mod tests {
         let m = Message::PopupCreate { win: 1, parent: 2, x: -1, y: 3, width: 4, height: 5, grab: true };
         encode_message(&m, &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            25, 0, 0, 0, 21, 0, 0, 0, // len, kind 21, flags
+            25, 0, 0, 0, 21, 0, 0, 0,
             1, 0, 0, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 1,
         ];
         assert_eq!(buf, esperado);
@@ -1241,12 +1127,10 @@ mod tests {
         assert!(matches!(encode_message(&incoerente, &mut Vec::new()), Err(ProtoError::Invalid(_))));
         let enorme = Message::Clipboard { mime: MIME_TEXT.into(), data: vec![b'a'; MAX_CLIPBOARD + 1] };
         assert!(matches!(encode_message(&enorme, &mut Vec::new()), Err(ProtoError::Invalid(_))));
-        // No recebimento, o tamanho declarado acima de 1 MiB é recusado antes de ler os dados.
         let mut corpo = Vec::new();
         put_str(&mut corpo, MIME_TEXT).unwrap();
         put_u32(&mut corpo, (MAX_CLIPBOARD + 1) as u32);
         assert!(matches!(Message::decode_body(kind::CLIPBOARD, &corpo), Err(ProtoError::Invalid(_))));
-        // Tipo de cursor desconhecido.
         assert!(matches!(Message::decode_body(kind::CURSOR, &[1, 0, 0, 0, 9]), Err(ProtoError::Invalid(_))));
     }
 
@@ -1271,7 +1155,7 @@ mod tests {
         let m = Message::VideoStart { win: 1, stream: 2, x: 64, y: 128, width: 256, height: 320, codec: CODEC_H264 };
         encode_message(&m, &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            25, 0, 0, 0, 27, 0, 0, 0, // len, kind 27, flags
+            25, 0, 0, 0, 27, 0, 0, 0,
             1, 0, 0, 0, 2, 0, 0, 0, 64, 0, 0, 0, 128, 0, 0, 0, 0, 1, 0, 0, 64, 1, 0, 0, 1,
         ];
         assert_eq!(buf, esperado);
@@ -1280,7 +1164,7 @@ mod tests {
         let m = Message::VideoFrame { win: 1, stream: 2, seq: 3, capture_us: 4, flags: 1, data: vec![9, 8] };
         encode_message(&m, &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            23, 0, 0, 0, 28, 0, 0, 0, // len, kind 28, flags
+            23, 0, 0, 0, 28, 0, 0, 0,
             1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 1, 9, 8,
         ];
         assert_eq!(buf, esperado);
@@ -1296,7 +1180,7 @@ mod tests {
         let m = Message::AudioStart { stream: 0, codec: 1, channels: 2, rate: 48000, frames: 480 };
         encode_message(&m, &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            12, 0, 0, 0, 41, 0, 0, 0, // len, kind 41, flags
+            12, 0, 0, 0, 41, 0, 0, 0,
             0, 1, 2, 0, 0x80, 0xBB, 0, 0, 0xE0, 0x01, 0, 0,
         ];
         assert_eq!(buf, esperado);
@@ -1305,7 +1189,7 @@ mod tests {
         let m = Message::AudioData { stream: 0, flags: 1, seq: 3, pts_us: 4, data: vec![9, 8] };
         encode_message(&m, &mut buf).unwrap();
         let esperado: Vec<u8> = vec![
-            18, 0, 0, 0, 42, 0, 0, 0, // len, kind 42, flags
+            18, 0, 0, 0, 42, 0, 0, 0,
             0, 1, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 9, 8,
         ];
         assert_eq!(buf, esperado);
@@ -1317,7 +1201,6 @@ mod tests {
         let mut buf = Vec::new();
         encode_message(&Message::AudioRequest { stream: 1, on: true }, &mut buf).unwrap();
         assert_eq!(buf, vec![4, 0, 0, 0, 45, 0, 0, 0, 1, 1, 0, 0]);
-        // `on` fora de 0 e 1 é recusado na leitura.
         assert!(matches!(Message::decode_body(kind::AUDIO_REQUEST, &[1, 2, 0, 0]), Err(ProtoError::Invalid(_))));
         assert_eq!(CAP_MIC, 0x80);
     }
@@ -1330,7 +1213,6 @@ mod tests {
         assert!(matches!(encode_message(&grande, &mut Vec::new()), Err(ProtoError::Invalid(_))));
         let ok = Message::AudioData { stream: 0, flags: 0, seq: 1, pts_us: 0, data: vec![0; MAX_AUDIO_PAYLOAD] };
         assert!(encode_message(&ok, &mut Vec::new()).is_ok());
-        // No recebimento: zero canais e carga acima do limite.
         assert!(matches!(
             Message::decode_body(kind::AUDIO_START, &[0, 0, 0, 0, 0x80, 0xBB, 0, 0, 0xE0, 1, 0, 0]),
             Err(ProtoError::Invalid(_))

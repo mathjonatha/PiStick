@@ -1,6 +1,3 @@
-# Marco 4.5, aceite 4: mpv --vo=gpu (V3D, DMABUF) com o clipe 720p30 entra em video H.264 (>= 27 quadros de video por s).
-#   sh ~/pistick/tools/pi/iniciar-psd.sh mpvgpu        (MPV_CLIP escolhe o clipe; padrão mandelbrot-720p30, o mesmo do mpv)
-#   target\release\psc.exe pi-stick --script tools\roteiros\81-mpv-gpu.txt --shot-dir .cache\shot-dmabuf
 waitwin 1 15000
 wait 1000
 resize 1280 720

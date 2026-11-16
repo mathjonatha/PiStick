@@ -1,16 +1,10 @@
 #!/bin/sh
-# Instalado em /usr/local/libexec/pistick/iniciar-servico.sh e chamado pela unidade pistick.service.
-# Lê LISTEN, PSD_OPTS e APP_1..APP_8 do ambiente (carregado de /etc/pistick/psd.conf pelo systemd) e
-# troca de processo para o psd. PSD_OPTS é dividido por espaços; cada APP_n vai inteiro como um
-# argumento de --spawn. Sem eval: os argumentos são montados com `set --`.
 set -eu
 
 listen="${LISTEN:-0.0.0.0:7700}"
 set -- --wayland --listen "$listen"
 
-# PSD_OPTS dividido por espaços, sem expandir curingas.
 set -f
-# shellcheck disable=SC2086
 set -- "$@" ${PSD_OPTS:-}
 set +f
 

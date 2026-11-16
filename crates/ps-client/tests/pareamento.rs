@@ -1,6 +1,3 @@
-//! Pareamento e canal cifrado vistos do cliente (`ps_client::secure::open`) contra um `psd` de verdade
-//! (`serve_secure`) no laço local, e a prova do intermediário (aceite 5 do marco 9A). Chaves geradas a cada
-//! teste, em pastas temporárias; `force_noise` faz o laço local usar o canal cifrado.
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -101,11 +98,9 @@ fn primeiro_uso_guarda_o_aparelho_e_a_segunda_conexao_reconhece() {
     assert_eq!(conhecidos[0].0, "pi-teste");
     assert_eq!(conhecidos[0].1, fingerprint(&p.sec.device_public()));
     assert_eq!(conhecidos[0].2, p.addr.to_string());
-    // A chave do cliente persistiu (mesma identidade na segunda vez: continua pareado).
     let arq = std::fs::read(dir.join("chave-do-cliente")).unwrap();
     #[cfg(windows)]
     {
-        // Marco 9B: no Windows o arquivo é protegido pela DPAPI e não contém a chave em claro.
         let (kp, nova) = ps_client::keystore::load_or_create_client_key(&dir.join("chave-do-cliente")).unwrap();
         assert!(!nova);
         assert!(arq.len() > 32 && arq.starts_with(ps_client::keystore::MAGIC), "o arquivo deveria estar protegido");
@@ -127,7 +122,6 @@ fn laco_local_usa_texto_claro_salvo_com_force_noise() {
     assert!(matches!(abrir(p.addr, &so).unwrap(), Connected::Plain(_)));
     assert!(known_devices(&dir).unwrap().is_empty());
     assert!(!dir.join("chave-do-cliente").exists(), "texto claro não cria chave");
-    // `--insecure` também é texto claro, mesmo com Noise forçado.
     so.insecure = true;
     so.force_noise = true;
     assert!(matches!(abrir(p.addr, &so).unwrap(), Connected::Plain(_)));
@@ -160,7 +154,6 @@ fn aprovacao_no_aparelho_mostra_o_mesmo_codigo_nos_dois_lados() {
     let addr = p.addr;
     let cliente = std::thread::spawn(move || abrir(addr, &so));
     let PairWait::Request(req) = esperando.join().unwrap() else { panic!("sem pedido") };
-    // O que o `psd pair` mostra ao operador e o que o cliente mostra ao usuário são o mesmo código.
     assert_eq!(espera_codigo(&visto), format_code(&req.code));
     p.sec.decide(req.id, true).unwrap();
     let mut c = secure(cliente.join().unwrap().unwrap());
@@ -168,11 +161,6 @@ fn aprovacao_no_aparelho_mostra_o_mesmo_codigo_nos_dois_lados() {
     assert_eq!(known_devices(&dir).unwrap().len(), 1);
 }
 
-// ---- intermediário ----
-
-/// Um proxy que termina o Noise dos dois lados com chave própria, fazendo-se passar pelo aparelho (mesmo
-/// nome). Com `reescreve`, troca o código do `AUTH_STATUS` pelo que o cliente calcula (o melhor que um
-/// intermediário pode fazer para disfarçar). Devolve o endereço dele e o resultado da thread.
 fn proxy(real: SocketAddr, reescreve: bool) -> (SocketAddr, JoinHandle<Result<(), String>>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
@@ -186,7 +174,6 @@ fn proxy(real: SocketAddr, reescreve: bool) -> (SocketAddr, JoinHandle<Result<()
         let chave_do_proxy = Keypair::generate().unwrap();
         let (est, info_c) = server_handshake(&mut reader, &mut writer, &chave_do_proxy, "pi-teste").map_err(|e| format!("lado do cliente: {e}"))?;
         let mut down = SecureConn::new(reader, writer, closer, est.send, est.recv, peer);
-        // Do outro lado, o proxy é um cliente desconhecido do aparelho de verdade.
         let t = TcpTransport::connect(real).map_err(|e| e.to_string())?;
         let peer = t.peer();
         let Split { mut reader, mut writer, closer } = t.split().map_err(|e| e.to_string())?;
@@ -226,7 +213,6 @@ fn intermediario_que_termina_o_noise_dos_dois_lados_tem_codigo_diferente() {
     let no_pi = format_code(&req.code);
     let no_cliente = espera_codigo(&visto);
     assert_ne!(no_cliente, no_pi, "com um intermediário, os códigos de 6 dígitos têm de diferir");
-    // O operador vê que não bate e nega.
     p.sec.decide(req.id, false).unwrap();
     let r = cliente.join().unwrap();
     assert!(matches!(r, Err(ConnectError::Refused(_))), "a conexão negada não pode virar sessão");
@@ -246,7 +232,6 @@ fn intermediario_que_repassa_o_codigo_do_aparelho_e_denunciado_pelo_cliente() {
     let so = opcoes("notebook", &dir);
     let cliente = std::thread::spawn(move || abrir(paddr, &so));
     let PairWait::Request(req) = esperando.join().unwrap() else { panic!() };
-    // O cliente calcula o código sozinho; o do aparelho (repassado) não bate: aborta.
     let r = cliente.join().unwrap();
     assert!(matches!(r, Err(ConnectError::KeyMismatch(ref m)) if m.contains("no meio")), "{:?}", r.err());
     let _ = p.sec.decide(req.id, false);
@@ -258,19 +243,15 @@ fn cliente_que_ja_conhece_o_aparelho_recusa_a_chave_do_intermediario() {
     let p = pi("mitm-chave", &[]);
     let dir = tmpdir("c-mitm-chave");
     let so = opcoes("notebook", &dir);
-    // Primeira conexão, direto: o cliente guarda a chave verdadeira do aparelho (e é pareado).
     drop(secure(abrir(p.addr, &so).unwrap()));
     let guardada = known_devices(&dir).unwrap();
     assert_eq!(guardada.len(), 1);
-    // Agora pelo proxy, que apresenta o mesmo nome com chave própria.
     let (paddr, ph) = proxy(p.addr, true);
     let e = abrir(paddr, &so).err().expect("o cliente tem de recusar");
     assert!(matches!(e, ConnectError::KeyMismatch(_)), "{e:?}");
     assert_eq!(e.exit_code(), 5);
     assert!(e.message().contains("diferente") && e.message().contains("--forget"), "{e}");
-    // O cliente não chegou a enviar o terceiro recado: o intermediário nem soube quem era o cliente.
     assert!(ph.join().unwrap().is_err(), "o proxy não pode ter concluído o aperto de mão com o cliente");
-    // E a lista não mudou.
     assert_eq!(known_devices(&dir).unwrap(), guardada);
 }
 
@@ -280,7 +261,6 @@ fn esquecer_o_aparelho_permite_aceitar_a_chave_nova_com_o_mesmo_nome() {
     let dir = tmpdir("c-esquece");
     let so = opcoes("notebook", &dir);
     drop(secure(abrir(a.addr, &so).unwrap()));
-    // Outro aparelho com o mesmo nome (outra chave): recusado até esquecer o anterior.
     let b = pi("esquece-b", &[]);
     assert!(matches!(abrir(b.addr, &so), Err(ConnectError::KeyMismatch(_))));
     assert_eq!(forget(&dir, "nao-existe").unwrap(), 0);
@@ -292,7 +272,6 @@ fn esquecer_o_aparelho_permite_aceitar_a_chave_nova_com_o_mesmo_nome() {
 
 #[test]
 fn chave_antiga_em_claro_migra_sozinha_e_o_cliente_continua_pareado() {
-    // Marco 9B: um arquivo do formato antigo (32 bytes em claro) de um cliente já pareado.
     let kp = Keypair::generate().unwrap();
     let p = pi("migra", &[(&kp, "notebook")]);
     let dir = tmpdir("c-migra");

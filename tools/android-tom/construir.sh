@@ -1,7 +1,4 @@
 #!/bin/sh
-# Monta tom.apk (app de teste de som do marco 5) no Windows, com Git Bash: JDK 21 e build-tools do Android SDK de
-# C:\Users\math\Documents\02. REA. Uso: sh tools/android-tom/construir.sh [SAIDA.apk]   (padrão: tools/pi/android/tom.apk)
-# A chave de assinatura é de depuração, gerada na hora em .cache (fora do git); o APK não leva segredo.
 set -eu
 aqui=$(cd "$(dirname "$0")" && pwd)
 raiz=$(cd "$aqui/../.." && pwd)

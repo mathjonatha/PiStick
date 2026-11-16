@@ -1,14 +1,3 @@
-//! Assinatura destacada (`.sig`) do manifesto e a verificação.
-//!
-//! ```text
-//! pistick-assinatura 1
-//! chave <impressão digital da chave que assinou: 16 hex>
-//! assinatura <Ed25519 do manifesto inteiro: 128 hex>
-//! ```
-//!
-//! A assinatura cobre **os bytes exatos do manifesto**. A impressão digital não é assinada: serve só para dizer ao
-//! usuário "assinado por outra chave" em vez de um genérico "assinatura inválida"; quem decide é a verificação com a
-//! chave pública informada (`verify_strict`, que recusa assinaturas maleáveis e chaves de ordem pequena).
 
 use ed25519_dalek::{Signature, Signer};
 
@@ -17,11 +6,8 @@ use crate::manifesto::Manifest;
 use crate::{hex_decode, hex_encode, Erro};
 
 pub const CABECALHO: &str = "pistick-assinatura 1";
-/// Maior arquivo de assinatura lido.
 const MAX_SIG: usize = 4096;
 
-/// Assina os bytes do manifesto e devolve o texto do `.sig`. O manifesto é validado antes (nada se assina se não
-/// passa pelo leitor estrito).
 pub fn assinar(manifesto: &[u8], chave: &ChavePrivada) -> Result<String, Erro> {
     Manifest::parse(manifesto)?;
     Ok(texto_sig(manifesto, chave))
@@ -32,7 +18,6 @@ fn texto_sig(manifesto: &[u8], chave: &ChavePrivada) -> String {
     format!("{CABECALHO}\nchave {}\nassinatura {}\n", chave.publica().impressao(), hex_encode(&s.to_bytes()))
 }
 
-/// Assinatura Ed25519 pura de `mensagem` (sem formato de manifesto): usada pelos vetores do RFC 8032.
 pub fn assinar_bruta(mensagem: &[u8], chave: &ChavePrivada) -> [u8; 64] {
     chave.0.sign(mensagem).to_bytes()
 }
@@ -63,14 +48,10 @@ fn ler_sig(texto: &[u8]) -> Result<Sig, Erro> {
     Ok(Sig { impressao: impressao.to_string(), assinatura })
 }
 
-/// Confere só a assinatura Ed25519 de `mensagem` (sem olhar o formato do manifesto): usada pelos vetores do RFC 8032.
 pub fn verificar_assinatura_bruta(mensagem: &[u8], assinatura: &[u8; 64], chave: &ChavePublica) -> bool {
     chave.0.verify_strict(mensagem, &Signature::from_bytes(assinatura)).is_ok()
 }
 
-/// Verifica o manifesto: assinatura, formato estrito e serial mínimo. Devolve o manifesto lido.
-///
-/// A ordem importa: nada do conteúdo do manifesto é interpretado antes de a assinatura conferir.
 pub fn verificar(manifesto: &[u8], sig: &[u8], chave: &ChavePublica, serial_minimo: Option<u64>) -> Result<Manifest, Erro> {
     let s = ler_sig(sig)?;
     if s.impressao != chave.impressao() {
@@ -113,7 +94,6 @@ mod tests {
 
     #[test]
     fn verificar_recusa_caminho_perigoso_mesmo_com_assinatura_valida() {
-        // Quem assinasse sem passar pelo `assinar` (outra ferramenta, chave roubada) ainda esbarra no leitor estrito.
         let k = chave(2);
         for c in ["../fora", "a/../b", "/etc/passwd", "C:/x"] {
             let man = manifesto_com(c);

@@ -1,12 +1,7 @@
-//! Conversão das teclas físicas do winit para códigos evdev (`linux/input-event-codes.h`).
-//!
-//! Usa a tecla física (posição no teclado), não o caractere: o layout (por exemplo ABNT2)
-//! é resolvido no servidor, pelo compositor, como em qualquer cliente Wayland.
 
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
-/// Botões de mouse evdev usados pelo protocolo.
 pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
@@ -15,7 +10,6 @@ pub const BTN_EXTRA: u32 = 0x114;
 
 use KeyCode::*;
 
-/// Tabela tecla física → código evdev.
 const TABLE: &[(KeyCode, u32)] = &[
     (Escape, 1),
     (Digit1, 2),
@@ -100,10 +94,10 @@ const TABLE: &[(KeyCode, u32)] = &[
     (Numpad3, 81),
     (Numpad0, 82),
     (NumpadDecimal, 83),
-    (IntlBackslash, 86), // KEY_102ND
+    (IntlBackslash, 86),
     (F11, 87),
     (F12, 88),
-    (IntlRo, 89), // KEY_RO: a tecla extra do ABNT2 ao lado do shift direito
+    (IntlRo, 89),
     (NumpadEnter, 96),
     (ControlRight, 97),
     (NumpadDivide, 98),
@@ -121,19 +115,17 @@ const TABLE: &[(KeyCode, u32)] = &[
     (Delete, 111),
     (NumpadEqual, 117),
     (Pause, 119),
-    (NumpadComma, 121), // KEY_KPCOMMA: o ponto do teclado numérico ABNT2
+    (NumpadComma, 121),
     (IntlYen, 124),
     (SuperLeft, 125),
     (SuperRight, 126),
     (ContextMenu, 127),
 ];
 
-/// Código evdev da tecla física, ou `None` se não mapeada.
 pub fn keycode_to_evdev(code: KeyCode) -> Option<u32> {
     TABLE.iter().find(|(k, _)| *k == code).map(|(_, v)| *v)
 }
 
-/// Código evdev do botão do mouse, ou `None` para botões extras sem mapeamento.
 pub fn button_to_evdev(b: MouseButton) -> Option<u32> {
     match b {
         MouseButton::Left => Some(BTN_LEFT),
@@ -198,7 +190,6 @@ mod tests {
 
     #[test]
     fn cobertura_exigida() {
-        // letras, números, modificadores, setas, Enter, Esc, Backspace, Tab, espaço, F1-F12
         let letras = [
             KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT,
             KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,

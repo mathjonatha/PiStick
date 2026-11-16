@@ -15,8 +15,6 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-# Interface de desktop (janelas do `winit`, desenho do `softbuffer`, teclado/mouse, roteiros e a função `run`).
-# Sem ela o `ps-client` é só o núcleo (rede, decodificação, áudio, pareamento), usado pelo cliente Android.
 desktop = ["dep:winit", "dep:softbuffer"]
 
 [dependencies]
@@ -29,14 +27,9 @@ ps-secure = { path = "../ps-secure" }
 winit = { version = "0.30.13", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
 
-# Área de transferência do Windows (fina, só Windows). Nos outros sistemas o trait fica vazio.
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
-# Marco 4: decodificador H.264 do Media Foundation (todo o `unsafe` fica em `src/video/mf.rs`).
-# Só as features usadas; veja docs/02-tecnologias-e-referencias.md. Marco 9B: `Win32_Security_Cryptography` (DPAPI, todo o
-# `unsafe` dela em `src/dpapi.rs`).
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Media_Audio", "Win32_System_Threading", "Win32_Security", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
-# Os testes de pareamento sobem um psd de verdade (serve_secure) no laço local.
 ps-server = { path = "../ps-server" }

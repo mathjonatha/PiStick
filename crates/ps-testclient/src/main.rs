@@ -1,4 +1,3 @@
-//! `ps-testclient`: cliente Wayland de teste do compositor do `psd`.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {

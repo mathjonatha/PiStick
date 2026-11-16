@@ -1,5 +1,3 @@
-//! Utilidades de teste e de benchmark: gerador pseudoaleatório simples (xorshift64*)
-//! para não adicionar dependências.
 
 pub struct Rng(u64);
 
@@ -17,7 +15,6 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    /// Inteiro em `0..n` (n > 0).
     pub fn below(&mut self, n: u32) -> u32 {
         ((self.next_u64() >> 32) % u64::from(n)) as u32
     }
@@ -30,28 +27,18 @@ impl Rng {
     }
 }
 
-/// Coloca o byte X de cada pixel BGRX em 0xFF.
 pub fn normalize_x(pixels: &mut [u8]) {
     for px in pixels.chunks_exact_mut(4) {
         px[3] = 0xFF;
     }
 }
 
-/// Gerador da janela de vídeo sintética (marco 4): `psd --synthetic-video` e os testes que
-/// comparam com a origem usam este mesmo código. Só aritmética inteira, então o resultado é o
-/// mesmo em qualquer máquina.
-///
-/// A janela tem 1280×720 por padrão. Uma região animada de 640×384 em (64, 64) muda por completo
-/// a cada quadro (rampas suaves em movimento e um quadrado que quica: padrão que o H.264 comprime
-/// bem). O resto da janela é parado: texto, linhas finas de 1 px e retângulos.
 pub mod video {
     use crate::Rect;
 
     pub const WIDTH: u32 = 1280;
     pub const HEIGHT: u32 = 720;
-    /// Região animada, em pixels (múltiplos de 64: blocos inteiros do codec).
     pub const REGION: Rect = Rect::new(64, 64, 640, 384);
-    /// Duração de um quadro da animação (30 por segundo).
     pub const FRAME_MS: u64 = 33;
 
     const BG: [u8; 4] = [0x2A, 0x22, 0x20, 0xFF];
@@ -61,18 +48,14 @@ pub mod video {
     const LINE_B: [u8; 4] = [0x50, 0xC0, 0x70, 0xFF];
     const FRAME_BOX: [u8; 4] = [0x60, 0x60, 0xE0, 0xFF];
 
-    /// Número do quadro da animação em `now_ms` (milissegundos desde o início da sessão); depois de
-    /// `pause_after_ms` a animação para no último quadro.
     pub fn frame_at(now_ms: u64, pause_after_ms: Option<u64>) -> u64 {
         pause_after_ms.map_or(now_ms, |p| now_ms.min(p)) / FRAME_MS
     }
 
-    /// A parte da região animada que cabe numa janela de `w`×`h`.
     pub fn region_in(w: u32, h: u32) -> Option<Rect> {
         REGION.intersect(Rect::new(0, 0, w, h))
     }
 
-    /// Janela inteira no quadro `frame`: parte parada mais região animada. BGRX, stride = `w * 4`.
     pub fn render(w: u32, h: u32, frame: u64) -> Vec<u8> {
         let mut buf = vec![0u8; w as usize * h as usize * 4];
         draw_static(&mut buf, w, h);
@@ -96,7 +79,6 @@ pub mod video {
         }
     }
 
-    /// Dígitos em fonte 5×7 (cada linha são 5 bits; o bit 4 é a coluna da esquerda).
     fn glyph(ch: char) -> [u8; 7] {
         match ch {
             '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
@@ -128,17 +110,14 @@ pub mod video {
         }
     }
 
-    /// Desenha a parte parada (a região animada fica com a cor de fundo até `draw_region`).
     pub fn draw_static(buf: &mut [u8], w: u32, h: u32) {
         let (wi, hi) = (w as i32, h as i32);
         fill(buf, w, h, 0, 0, wi, hi, BG);
         fill(buf, w, h, 0, 0, wi, 48, BAR);
         text(buf, w, h, 12, 12, 3, "0123456789", TEXT);
-        // Texto em três tamanhos, à direita da região.
         text(buf, w, h, 724, 72, 1, "3141592653589793238462643383279", TEXT);
         text(buf, w, h, 724, 96, 2, "2718281828459045", TEXT);
         text(buf, w, h, 724, 132, 3, "1414213562", TEXT);
-        // Linhas finas de 1 px: grade à direita e régua embaixo.
         for i in 0..10 {
             fill(buf, w, h, 724, 180 + i * 16, 520, 1, if i % 2 == 0 { LINE_A } else { LINE_B });
         }
@@ -151,7 +130,6 @@ pub mod video {
         fill(buf, w, h, 64, 464, 640, 1, TEXT);
         text(buf, w, h, 64, 504, 2, "0123456789 0123456789 0123456789", TEXT);
         text(buf, w, h, 64, 532, 1, "9876543210987654321098765432109876543210", TEXT);
-        // Diagonal fina e retângulos vazados.
         for i in 0..200 {
             fill(buf, w, h, 64 + i * 3, 580 + i / 2, 1, 1, LINE_B);
         }
@@ -164,7 +142,6 @@ pub mod video {
         }
     }
 
-    /// Onda triangular de 0 a 255 com o período dado.
     fn tri(v: i64, period: i64) -> u8 {
         let m = v.rem_euclid(period);
         let half = period / 2;
@@ -172,7 +149,6 @@ pub mod video {
         (d * 255 / half) as u8
     }
 
-    /// Vai e volta entre 0 e `span`.
     fn bounce(v: i64, span: i64) -> i64 {
         let m = v.rem_euclid(2 * span);
         if m <= span {
@@ -182,13 +158,11 @@ pub mod video {
         }
     }
 
-    /// O quadrado cinza chapado (0xF0) que quica na região, em coordenadas da própria região.
     pub fn box_rect(frame: u64) -> Rect {
         let n = (frame % 1_000_000) as i64;
         Rect::new(bounce(n * 5, i64::from(REGION.w) - 96) as u32, bounce(n * 3, i64::from(REGION.h) - 96) as u32, 96, 96)
     }
 
-    /// Desenha a região animada do quadro `frame`, recortada à janela.
     pub fn draw_region(buf: &mut [u8], w: u32, h: u32, frame: u64) {
         let n = (frame % 1_000_000) as i64;
         let Some(vis) = region_in(w, h) else { return };
@@ -238,7 +212,6 @@ pub mod video {
                     assert!(dentro || igual, "pixel ({x}, {y}) fora da região mudou");
                 }
             }
-            // Cada bloco de 64×64 da região tem algum pixel diferente (é isso que o torna "quente").
             for by in 1..7usize {
                 for bx in 1..11usize {
                     let mut mudou = false;
@@ -254,13 +227,10 @@ pub mod video {
         fn a_parte_parada_tem_detalhe_fino_e_a_regiao_e_suave() {
             let img = render(WIDTH, HEIGHT, 0);
             let stride = WIDTH as usize * 4;
-            // Linhas de 1 px: numa linha vertical da grade, o vizinho da direita tem outra cor...
             let (x, y) = (724 + 16 * 3, 190);
             assert_ne!(img[y * stride + x * 4..y * stride + x * 4 + 3], img[y * stride + (x + 1) * 4..y * stride + (x + 1) * 4 + 3]);
-            // ... e numa linha horizontal, o vizinho de baixo.
             let (x, y) = (730, 180 + 16);
             assert_ne!(img[y * stride + x * 4..y * stride + x * 4 + 3], img[(y + 1) * stride + x * 4..(y + 1) * stride + x * 4 + 3]);
-            // Região: vizinhos na horizontal diferem pouco (fora do quadrado que quica).
             let (x, y) = (600usize, 400usize);
             for c in 0..3 {
                 let d = (i32::from(img[y * stride + x * 4 + c]) - i32::from(img[y * stride + (x + 1) * 4 + c])).abs();
@@ -280,34 +250,25 @@ pub mod video {
     }
 }
 
-/// Barras de cor para conferir matriz e faixa de cor do decodificador: oito barras verticais chapadas
-/// (branco, amarelo, ciano, verde, magenta, vermelho, azul, preto, nesta ordem, com 75% de
-/// intensidade nas cores, como nas barras SMPTE) nas linhas de cima, e embaixo uma faixa de rampa que
-/// anda a cada quadro (para haver movimento e quadros P de verdade). Qualquer tamanho a partir de 64×64.
 pub mod bars {
-    /// Cores das barras, BGR.
     pub const COLORS: [[u8; 3]; 8] = [
-        [0xBF, 0xBF, 0xBF], // branco 75%
-        [0x00, 0xBF, 0xBF], // amarelo
-        [0xBF, 0xBF, 0x00], // ciano
-        [0x00, 0xBF, 0x00], // verde
-        [0xBF, 0x00, 0xBF], // magenta
-        [0x00, 0x00, 0xBF], // vermelho
-        [0xBF, 0x00, 0x00], // azul
-        [0x10, 0x10, 0x10], // preto
+        [0xBF, 0xBF, 0xBF],
+        [0x00, 0xBF, 0xBF],
+        [0xBF, 0xBF, 0x00],
+        [0x00, 0xBF, 0x00],
+        [0xBF, 0x00, 0xBF],
+        [0x00, 0x00, 0xBF],
+        [0xBF, 0x00, 0x00],
+        [0x10, 0x10, 0x10],
     ];
 
-    /// Altura da faixa animada embaixo.
     pub const STRIP_H: u32 = 40;
 
-    /// Retângulo (x, y, largura, altura) do miolo chapado de cada barra, afastado 8 px das bordas
-    /// (a subamostragem de cor borra as bordas) e da faixa animada.
     pub fn flat_areas(w: u32, h: u32) -> Vec<[u32; 4]> {
         let bar = w / 8;
         (0..8).map(|i| [i * bar + 8, 8, bar.saturating_sub(16), h.saturating_sub(STRIP_H + 16)]).collect()
     }
 
-    /// Quadro `frame`, BGRX com stride `w * 4`.
     pub fn render(w: u32, h: u32, frame: u64) -> Vec<u8> {
         let mut buf = vec![0xFFu8; w as usize * h as usize * 4];
         let bar = (w / 8).max(1);
@@ -354,30 +315,21 @@ pub mod bars {
     }
 }
 
-/// Gerador da janela de listras sintética (`docs/20`): `psd --synthetic --synthetic-stripes` e a medição
-/// `atomic` do `psc`. Cada quadro é ruído que não comprime (para forçar o fatiamento) e, no começo de cada
-/// faixa de [`MARKER_EVERY`] linhas, um bloco de [`MARKER_W`]×[`MARKER_H`] pixels de cor sólida que
-/// codifica o número do quadro (24 bits em B, G, R). Dois marcadores com números diferentes numa mesma imagem
-/// apresentada denunciam um quadro feito de instantes diferentes.
 pub mod stripes {
     use super::Rng;
 
     pub const WIDTH: u32 = 960;
     pub const HEIGHT: u32 = 600;
-    /// Quadros por segundo (um a cada [`FRAME_MS`]).
     pub const FPS: u64 = 30;
     pub const FRAME_MS: u64 = 33;
-    /// Distância entre marcadores, em linhas.
     pub const MARKER_EVERY: u32 = 32;
     pub const MARKER_W: u32 = 64;
     pub const MARKER_H: u32 = 8;
 
-    /// Quantos marcadores cabem numa janela de altura `h`.
     pub fn marker_count(h: u32) -> usize {
         h.div_ceil(MARKER_EVERY) as usize
     }
 
-    /// Desenha o quadro `n` em `buf` (BGRX, `w`×`h`, stride = `w` × 4).
     pub fn render_into(buf: &mut [u8], w: u32, h: u32, n: u32) {
         let mut rng = Rng::new(0x5EED_0000 + u64::from(n));
         rng.fill(buf);
@@ -395,8 +347,6 @@ pub mod stripes {
         }
     }
 
-    /// Número do quadro codificado em cada marcador, de cima para baixo. Um marcador que não é de cor sólida
-    /// (imagem que não vem do gerador) conta como `u32::MAX`.
     pub fn read_markers(pixels: &[u8], w: u32, h: u32) -> Vec<u32> {
         (0..marker_count(h) as u32)
             .map(|k| {
@@ -431,13 +381,11 @@ pub mod stripes {
             assert_eq!(read_markers(&a, w, h), vec![0x0001_02FF; 19]);
             assert_eq!(read_markers(&b, w, h), vec![0x0001_0300; 19]);
             assert_ne!(a[1000 * 4..1100 * 4], b[1000 * 4..1100 * 4], "ruído de quadros diferentes difere");
-            // Misturando faixas de dois quadros, os marcadores acusam.
             let mut mista = a.clone();
             let metade = (h / 2 * w * 4) as usize;
             mista[metade..].copy_from_slice(&b[metade..]);
             let m = read_markers(&mista, w, h);
             assert!(m.contains(&0x0001_02FF) && m.contains(&0x0001_0300));
-            // Fora dos marcadores, o X é 0xFF.
             assert!(a.chunks_exact(4).all(|p| p[3] == 0xFF));
         }
     }

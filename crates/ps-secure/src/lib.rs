@@ -1,9 +1,3 @@
-//! Canal cifrado e pareamento do PiStick (marco 9, parte A; projeto em `docs/21`).
-//!
-//! - [`noise`]: máquina de estados do `Noise_XX_25519_ChaChaPoly_SHA256` (nossa; as primitivas vêm de crates).
-//! - [`canal`]: abertura `PSN1`, aperto de mão e registros cifrados sobre qualquer `Read + Write`.
-//! - [`chaves`]: chave estática, listas de pares, impressão digital e código de 6 dígitos.
-//! - [`transporte`]: o canal como `Transport` do PiStick.
 
 #![forbid(unsafe_code)]
 
@@ -16,12 +10,10 @@ pub use canal::{ChannelError, PeerInfo, SecureReader, SecureWriter};
 pub use noise::{Established, Keypair, NoiseError};
 pub use transporte::SecureConn;
 
-/// Zera um segredo em memória de um jeito que o compilador não pode descartar (`zeroize`).
 pub fn wipe(b: &mut [u8]) {
     zeroize::Zeroize::zeroize(b);
 }
 
-/// Comparação em tempo constante (não para no primeiro byte diferente). Tamanhos diferentes: `false`.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

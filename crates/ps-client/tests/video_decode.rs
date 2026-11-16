@@ -1,5 +1,3 @@
-//! Decodificador H.264 do Windows contra as amostras gravadas pelo codificador do Pi
-//! (`tests/data/*.psh2`; formato descrito em `crates/ps-server/examples/gen_h264_sample.rs`).
 #![cfg(windows)]
 
 use std::time::Instant;
@@ -38,7 +36,6 @@ fn load_path(path: &std::path::Path) -> Sample {
     Sample { width: u(0), height: u(1), origin: (u(3), u(4)), first: u64::from(u(5)), content: u(7), frames }
 }
 
-/// Quadro de origem (BGRX, linhas contíguas) do quadro `i` da amostra.
 fn origem(s: &Sample, i: usize) -> Vec<u8> {
     let frame = s.first + i as u64;
     if s.content == 1 {
@@ -53,7 +50,6 @@ fn origem(s: &Sample, i: usize) -> Vec<u8> {
     out
 }
 
-/// PSNR em dB sobre os canais B, G e R.
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
     let (mut se, mut n) = (0f64, 0f64);
@@ -70,7 +66,6 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     10.0 * (255.0f64 * 255.0 / (se / n)).log10()
 }
 
-/// Erro médio absoluto por canal (B, G, R) num retângulo.
 fn erro_medio(a: &[u8], b: &[u8], stride_px: usize, x: u32, y: u32, w: u32, h: u32) -> [f64; 3] {
     let mut s = [0f64; 3];
     for row in y..y + h {
@@ -127,7 +122,6 @@ fn amostra_640x384_da_animacao_tem_psnr_de_30_db_ou_mais() {
     eprintln!("640x384: {} saídas de {} quadros; PSNR média {media:.2} dB, mín {min:.2} dB; decodificação média {tempo:.2} ms, máx {max:.2} ms; cor {:?}", r.saidas, s.frames.len(), r.cor);
     assert_eq!(r.saidas, s.frames.len(), "em baixa latência cada unidade de acesso devolve um quadro");
     assert!(min >= 30.0, "PSNR mínimo {min:.2} dB");
-    // Área chapada: o quadrado cinza (0xF0), afastado 6 px da borda (a cor é subamostrada).
     for i in (0..s.frames.len()).step_by(3) {
         let b = video::box_rect(s.first + i as u64);
         let e = erro_medio(&r.decodificadas[i], &origem(&s, i), s.width as usize, b.x + 6, b.y + 6, b.w - 12, b.h - 12);
@@ -161,7 +155,6 @@ fn amostra_de_barras_320x200_recorta_o_sps_e_acerta_as_cores() {
 #[test]
 fn decodificador_aceita_varias_aberturas_e_recusa_dado_invalido_sem_panico() {
     let s = load("video-640x384.psh2");
-    // Um segundo decodificador na mesma thread, em paralelo ao primeiro.
     let mut a = MfDecoder::open(s.width, s.height).unwrap();
     let mut b = MfDecoder::open(s.width, s.height).unwrap();
     let (mut oa, mut ob) = (Vec::new(), Vec::new());
@@ -169,12 +162,9 @@ fn decodificador_aceita_varias_aberturas_e_recusa_dado_invalido_sem_panico() {
     b.decode(&s.frames[0].1, &mut ob).unwrap();
     assert_eq!(oa, ob, "o mesmo fluxo decodifica igual");
     assert!(a.decode(&[], &mut oa).is_err());
-    // Lixo no lugar de um quadro: erro ou nenhuma saída, nunca pânico.
     let _ = a.decode(&[0, 0, 1, 0x41, 0xFF, 0xFF, 0xFF, 0xFF], &mut oa);
 }
 
-/// Abrir e fechar o decodificador muitas vezes seguidas: cada `MFStartup` tem de ter o seu `MFShutdown`
-/// (um vazamento de contagem ou um desfazer a mais apareceria como erro ou queda numa das aberturas).
 #[test]
 fn abrir_e_fechar_varias_vezes_seguidas() {
     let s = load("video-640x384.psh2");
@@ -187,8 +177,6 @@ fn abrir_e_fechar_varias_vezes_seguidas() {
     }
 }
 
-/// Erro durante `open` (depois do `MFStartup`) não pode deixar o Media Foundation num estado ruim:
-/// depois dele, uma abertura válida e a decodificação têm de funcionar.
 #[test]
 fn erro_na_abertura_nao_estraga_a_proxima() {
     let s = load("video-640x384.psh2");
@@ -201,7 +189,6 @@ fn erro_na_abertura_nao_estraga_a_proxima() {
                 eprintln!("tamanho {w}x{h}: recusado: {e}");
             }
         }
-        // Depois de cada tentativa, recusada ou não, o decodificador válido funciona.
         let mut d = MfDecoder::open(s.width, s.height).unwrap_or_else(|e| panic!("abertura válida depois de {w}x{h}: {e}"));
         let mut out = Vec::new();
         d.decode(&s.frames[0].1, &mut out).unwrap();
@@ -210,10 +197,6 @@ fn erro_na_abertura_nao_estraga_a_proxima() {
     eprintln!("tamanhos recusados na abertura: {recusados} de 5");
 }
 
-/// Regressão do teste instável: a MFT decodifica em threads próprias e, no primeiro quadro de um decodificador
-/// recém-aberto com a máquina carregada, o `ProcessOutput` às vezes dizia `NEED_MORE_INPUT` antes de o quadro estar
-/// pronto (o quadro saía junto com o seguinte). Com a máquina carregada de propósito, o primeiro quadro de cada
-/// decodificador novo tem de sair no próprio `decode`.
 #[test]
 fn o_primeiro_quadro_de_cada_decodificador_sai_mesmo_com_a_maquina_carregada() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -268,8 +251,6 @@ fn o_criterio_de_cor_pega_matriz_e_faixa_erradas() {
     }
 }
 
-/// Medição opcional com uma amostra maior (por exemplo 1280x720), que não vai para o repositório:
-/// `PS_AMOSTRA_EXTRA=caminho.psh2 cargo test --release -p ps-client --test video_decode extra -- --nocapture`.
 #[test]
 fn amostra_extra_opcional() {
     let Ok(path) = std::env::var("PS_AMOSTRA_EXTRA") else {

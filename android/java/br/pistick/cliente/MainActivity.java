@@ -38,15 +38,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * A casca do cliente Android (marco 6, docs/26): telas de lista de aparelhos, endereço manual, pareamento e sessão,
- * sem biblioteca de interface. Toda a lógica está no núcleo em Rust; aqui só há tela, toque, teclado, área de
- * transferência, Keystore e a trava de multicast. Nenhum estado é indicado só por cor: sempre há texto.
- */
 public final class MainActivity extends Activity implements Choreographer.FrameCallback, SurfaceHolder.Callback {
     private static final String ETIQUETA = "PiStick";
     private static final String NOME_CLIENTE = "celular";
-    // Escala do texto (fator de ampliação da janela remota) em centésimos; o núcleo valida e limita.
     private static final String PREFS = "pistick";
     private static final String PREF_ESCALA = "escala_centesimos";
     private static final int ESCALA_PADRAO = 250;
@@ -54,7 +48,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     private static final int ESCALA_MAX = 400;
     private static final int ESCALA_PASSO = 50;
 
-    // Fases do evento Estado (eventos.rs).
     private static final int FASE_OCIOSO = 0;
     private static final int FASE_BUSCANDO = 1;
     private static final int FASE_CONECTANDO = 2;
@@ -63,7 +56,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     private static final int FASE_DESCONECTADO = 5;
     private static final int FASE_ERRO = 6;
 
-    // Códigos evdev da faixa de teclas.
     private static final int KEY_ESC = 1;
     private static final int KEY_TAB = 15;
     private static final int KEY_HOME = 102;
@@ -99,7 +91,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     private boolean emSessao;
     private String ultimoEndereco;
     private boolean reconectar;
-    /** Saiu da frente com uma sessão aberta: ao voltar, reconecta ao mesmo aparelho. */
     private boolean reconectarAoVoltar;
     private int focoAtual;
     private boolean tecladoAberto;
@@ -117,10 +108,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
             return;
         }
         Nucleo.iniciar(getFilesDir().getAbsolutePath(), NOME_CLIENTE);
-        // As teclas de volume do aparelho mexem no volume de mídia (o som do Pi) enquanto o app está na frente.
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         montarTelas();
-        // A escala guardada vale antes da primeira conexão.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         escala = Math.max(ESCALA_MIN, Math.min(ESCALA_MAX, prefs.getInt(PREF_ESCALA, ESCALA_PADRAO)));
         aplicarEscala(false);
@@ -128,8 +117,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         String direto = getIntent().getStringExtra("endereco");
         boolean depuravel = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         if (depuravel) {
-            // Extras de teste, só em APK depurável: `endereco`, `estatisticas=1` (VIDEOSTATS e AUDIOSTATS no logcat) e
-            // `semvideo=1` (não anuncia o H.264).
             String est = getIntent().getStringExtra("estatisticas");
             if ("1".equals(est) || getIntent().getIntExtra("estatisticas", 0) == 1) {
                 Nucleo.estatisticas(true);
@@ -143,8 +130,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
             }
         }
     }
-
-    // ---- telas -----------------------------------------------------------------------------------------------
 
     private TextView texto(String t, int sp) {
         TextView v = new TextView(this);
@@ -163,7 +148,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     private void montarTelas() {
         raiz = new FrameLayout(this);
 
-        // Lista de aparelhos e endereço manual.
         telaLista = new ScrollView(this);
         LinearLayout lista = new LinearLayout(this);
         lista.setOrientation(LinearLayout.VERTICAL);
@@ -188,7 +172,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         lista.addView(conectar);
         telaLista.addView(lista);
 
-        // Pareamento / conexão.
         telaPareamento = new LinearLayout(this);
         telaPareamento.setOrientation(LinearLayout.VERTICAL);
         telaPareamento.setGravity(Gravity.CENTER);
@@ -203,7 +186,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         cancelar.setOnClickListener(v -> voltarParaLista("Conexão cancelada."));
         telaPareamento.addView(cancelar);
 
-        // Sessão: abas, superfície, faixa de teclas.
         telaSessao = new LinearLayout(this);
         telaSessao.setOrientation(LinearLayout.VERTICAL);
         HorizontalScrollView rolagemAbas = new HorizontalScrollView(this);
@@ -275,7 +257,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         aplicarEscala(true);
     }
 
-    /** Entrega a escala ao núcleo (que refaz o pedido de tamanho), atualiza os botões e, se {@code guardar}, grava. */
     private void aplicarEscala(boolean guardar) {
         if (guardar) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(PREF_ESCALA, escala).apply();
@@ -286,7 +267,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
     }
 
     private void atualizarModificadores() {
-        // O núcleo desliga Ctrl e Alt sozinhos depois de usados; o rótulo segue o estado dele.
         int m = Nucleo.modificadores();
         botaoCtrl.setText((m & 1) != 0 ? "Ctrl: LIGADO" : "Ctrl: desligado");
         botaoAlt.setText((m & 2) != 0 ? "Alt: LIGADO" : "Alt: desligado");
@@ -313,8 +293,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         estadoLista.setText(mensagem);
         mostrar(telaLista);
     }
-
-    // ---- ações -----------------------------------------------------------------------------------------------
 
     private void procurar() {
         aparelhos.removeAllViews();
@@ -364,7 +342,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         }
     }
 
-    /** Pede o foco de áudio ao começar a tocar (a sessão abriu). */
     private void pedirFocoDeAudio() {
         AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         if (am == null || focoDeAudio != null) {
@@ -382,7 +359,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         Log.i(ETIQUETA, "foco de áudio pedido: " + (r == AudioManager.AUDIOFOCUS_REQUEST_GRANTED ? "concedido" : "negado"));
     }
 
-    /** Devolve o foco de áudio (a sessão acabou ou o app saiu da frente). */
     private void devolverFocoDeAudio() {
         if (focoDeAudio == null) {
             return;
@@ -416,8 +392,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         }
     }
 
-    // ---- ciclo de vida ---------------------------------------------------------------------------------------
-
     @Override
     protected void onStart() {
         super.onStart();
@@ -428,7 +402,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         noPrimeiroPlano = true;
         quadrosAtivos = true;
         Choreographer.getInstance().postFrameCallback(this);
-        // Voltar ao app reconecta ao mesmo aparelho (decisão 16).
         if (reconectarAoVoltar && ultimoEndereco != null) {
             reconectarAoVoltar = false;
             Log.i(ETIQUETA, "voltou ao app: reconectando a " + ultimoEndereco);
@@ -447,8 +420,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         quadrosAtivos = false;
         soltarMulticast();
         devolverFocoDeAudio();
-        // Sair da frente fecha a conexão: nada de serviço em segundo plano. Ao voltar, reconecta (onStart); enquanto
-        // isso a tela não pode dizer "Conectado".
         if (reconectar && (emSessao || telaPareamento.getVisibility() == View.VISIBLE)) {
             reconectarAoVoltar = true;
             Log.i(ETIQUETA, "fechando a conexão ao sair da frente; reconecta ao voltar");
@@ -465,7 +436,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         if (raiz == null) {
             return;
         }
-        // A leitura da área de transferência só é permitida com o app em foco.
         Nucleo.focoApp(temFoco, temFoco ? textoDaArea() : null);
     }
 
@@ -477,8 +447,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
         return t == null ? null : t.toString();
     }
-
-    // ---- superfície ------------------------------------------------------------------------------------------
 
     @Override
     public void surfaceCreated(SurfaceHolder h) {
@@ -499,8 +467,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         Nucleo.superficie(null);
     }
 
-    // ---- entrada ---------------------------------------------------------------------------------------------
-
     private void enviarToque(MotionEvent e) {
         int n = Math.min(e.getPointerCount(), 10);
         float[] dados = new float[n * 3];
@@ -517,7 +483,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         if (emSessao && e.getScanCode() > 0 && fisico(e)) {
             int c = e.getKeyCode();
             if (c != KeyEvent.KEYCODE_BACK && c != KeyEvent.KEYCODE_HOME && c != KeyEvent.KEYCODE_VOLUME_UP && c != KeyEvent.KEYCODE_VOLUME_DOWN && c != KeyEvent.KEYCODE_VOLUME_MUTE && c != KeyEvent.KEYCODE_POWER) {
-                // A repetição é feita pelo lado que injeta no teclado do app, como no psc.
                 if (e.getRepeatCount() == 0) {
                     Nucleo.tecla(e.getScanCode(), e.getAction() == KeyEvent.ACTION_DOWN);
                     atualizarModificadores();
@@ -526,10 +491,8 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
             }
         }
         if (emSessao && e.getScanCode() == 0 && (e.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0 && !teclaDeSistema(e.getKeyCode())) {
-            // adb shell input e alguns teclados externos: sem scanCode. O teclado virtual não passa por aqui (o
-            // InputConnection da EntradaView consome o que manda e a tecla vem marcada FLAG_SOFT_KEYBOARD).
             if (e.getRepeatCount() > 0) {
-                return true; // a repetição é feita pelo lado que injeta, como no caminho com scanCode
+                return true;
             }
             boolean descer = e.getAction() == KeyEvent.ACTION_DOWN;
             if (Nucleo.teclaAndroid(e.getKeyCode(), descer)) {
@@ -558,8 +521,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         return d != null && !d.isVirtual() && (e.getSource() & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
     }
 
-    // ---- quadro de animação: esvazia a fila do núcleo -------------------------------------------------------
-
     @Override
     public void doFrame(long nanos) {
         if (!quadrosAtivos) {
@@ -577,7 +538,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
         Choreographer.getInstance().postFrameCallback(this);
     }
 
-    /** Leitor do formato de eventos.rs (little-endian). */
     private static final class Leitor {
         private final byte[] b;
         int p;
@@ -623,12 +583,12 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
             }
             Leitor r = new Leitor(b, ini);
             switch (tipo) {
-                case 1: { // Estado
+                case 1: {
                     int fase = r.u8();
                     estado(fase, r.texto());
                     break;
                 }
-                case 2: { // Aparelho
+                case 2: {
                     String nome = r.texto();
                     int seguro = r.u8();
                     int aberto = r.u8();
@@ -640,43 +600,43 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
                     aparelho(nome, enderecos, seguro, aberto);
                     break;
                 }
-                case 3: // BuscaFim
+                case 3:
                     buscaFim((int) r.u32());
                     break;
-                case 4: // Codigo
+                case 4:
                     codigoPareamento.setText(r.texto());
                     break;
-                case 5: { // ChaveNova
+                case 5: {
                     byte[] k = Arrays.copyOfRange(b, ini, ini + 32);
                     Nucleo.chaveGravada(ChaveDoCliente.gravar(this, k));
                     break;
                 }
-                case 6: { // Erro
+                case 6: {
                     Log.e(ETIQUETA, "erro do núcleo: " + r.texto());
                     r.p = ini;
                     voltarParaLista("Erro: " + r.texto());
                     break;
                 }
-                case 7: // Janelas
+                case 7:
                     janelas(r);
                     break;
-                case 8: { // AreaDeTransferencia
+                case 8: {
                     ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                     if (cm != null) {
                         cm.setPrimaryClip(ClipData.newPlainText("PiStick", r.texto()));
                     }
                     break;
                 }
-                case 9: // Vibrar
+                case 9:
                     superficie.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                     break;
-                case 10: // Aviso
+                case 10:
                     avisoSessao.setText(r.texto());
                     break;
-                case 11: // Encerrada: o aparelho se despediu; o texto também chega como Estado DESCONECTADO e vai à lista
+                case 11:
                     Log.i(ETIQUETA, "sessão encerrada pelo aparelho, motivo " + r.u8() + ": " + r.texto());
                     break;
-                case 12: { // EstadoDoAparelho: avisos por palavras, nunca só por cor
+                case 12: {
                     long fl = r.u32();
                     StringBuilder sb = new StringBuilder();
                     if ((fl & 1) != 0) sb.append("Energia fraca (subtensão) no aparelho. ");
@@ -686,7 +646,7 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
                     break;
                 }
                 default:
-                    break; // tipo desconhecido: pulado
+                    break;
             }
             pos = ini + tam;
         }
@@ -755,7 +715,6 @@ public final class MainActivity extends Activity implements Choreographer.FrameC
             if (titulo.isEmpty()) {
                 titulo = "janela " + id;
             }
-            // A aba em foco leva colchetes e "(em foco)": nada de depender de cor.
             Button b = botao(id == foco ? "[ " + titulo + " ] em foco" : titulo);
             b.setOnClickListener(v -> Nucleo.aba(id));
             abas.addView(b);

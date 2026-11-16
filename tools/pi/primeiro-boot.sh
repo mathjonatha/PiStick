@@ -1,9 +1,4 @@
 #!/bin/sh
-# Instalado em /usr/local/libexec/pistick/primeiro-boot.sh e chamado, uma só vez, pela unidade
-# pistick-primeiro-boot.service (só existe na imagem pronta). Se o nome do aparelho ainda é "pistick",
-# troca para pistick-xxxx (quatro últimos dígitos hexadecimais do número de série), para dois
-# aparelhos na mesma rede não colidirem na descoberta. Um nome definido pelo usuário (Imager,
-# cloud-init) é respeitado. Ao final a unidade se desabilita.
 set -eu
 
 atual=""
@@ -29,7 +24,6 @@ if [ "$atual" != "pistick" ]; then
     exit 0
 fi
 
-# Só dígitos hexadecimais; os quatro últimos, em minúsculas.
 quatro=$(printf '%s' "$serie" | tr 'A-F' 'a-f' | tr -cd '0-9a-f' | tail -c 4)
 if [ "${#quatro}" -ne 4 ]; then
     echo "primeiro-boot: AVISO: número de série ilegível; o nome fica 'pistick'."

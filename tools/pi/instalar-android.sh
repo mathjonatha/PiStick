@@ -1,16 +1,4 @@
 #!/bin/sh
-# Roda NO PI (Raspberry Pi OS, aarch64): instala o Android (Waydroid) para o psd, de forma opcional e
-# idempotente, no mesmo padrão do provisionar.sh. Cada passo confere antes de agir e imprime
-# ok, feito, FALTA (só em --verificar) ou FALHOU. Veja docs/23-android-instalacao-e-uso.md.
-#
-#   sh tools/pi/instalar-android.sh              instala o que falta (baixa cerca de 1 GB na primeira vez)
-#   sh tools/pi/instalar-android.sh --verificar  não muda nada; código 1 se algo falta
-#   sh tools/pi/instalar-android.sh --remover    desfaz tudo: pacotes, imagem, dados, repositório, chave
-#
-# O que faz: repositório apt oficial do Waydroid (repo.waydro.id), o pacote `waydroid`, a imagem
-# LineageOS VANILLA arm64 (`waydroid init`), serviços do LXC desabilitados, `waydroid-net.sh` com nftables,
-# o `lmkd` (só se o kernel não tem PSI), a propriedade de várias janelas e o abrir-android.sh do psd.
-# Não mexe em wlan0, NetworkManager, netplan, cmdline.txt, config.txt nem na rede do Pi.
 set -eu
 
 verificar=0
@@ -48,7 +36,6 @@ tmp=$(mktemp -d)
 repo_url=https://repo.waydro.id
 chave=/usr/share/keyrings/waydroid.gpg
 lista_apt=/etc/apt/sources.list.d/waydroid.list
-# shellcheck disable=SC1091
 codinome=$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}")
 net=/usr/lib/waydroid/data/scripts/waydroid-net.sh
 net_original="$net.original-do-pacote"
@@ -61,14 +48,12 @@ policy=/usr/sbin/policy-rc.d
 
 limpar() {
     rm -rf "$tmp" "$tmp.reg"
-    # policy-rc.d nosso, se a execução foi interrompida durante o apt.
     if [ -f "$tmp.policy" ]; then
         sudo rm -f "$policy" "$tmp.policy" 2>/dev/null || true
     fi
 }
 trap limpar EXIT
 
-# estado NOME RESULTADO [DETALHE]: imprime uma linha e guarda no resumo.
 estado() {
     if [ -n "${3:-}" ]; then
         linha=$(printf '%-7s %s  (%s)' "$2" "$1" "$3")
@@ -99,7 +84,6 @@ apt_atualizado() {
     fi
 }
 
-# pacotes ROTULO PACOTE...: instala só os que faltam.
 pacotes() {
     rotulo=$1
     shift
@@ -115,14 +99,11 @@ pacotes() {
         falta "pacotes: $rotulo" "faltam:$faltam"
     else
         apt_atualizado
-        # shellcheck disable=SC2086
         sudo apt-get install -y --no-install-recommends $faltam || falhou "pacotes: $rotulo" "apt-get install"
         estado "pacotes: $rotulo" feito "instalados:$faltam"
     fi
 }
 
-# instalar_arquivo ROTULO ORIGEM DESTINO MODO: copia com sudo só se o conteúdo mudou.
-# Deixa mudou=1 se copiou (ou, em --verificar, se difere ou falta).
 mudou=0
 instalar_arquivo() {
     mudou=0
@@ -138,7 +119,6 @@ instalar_arquivo() {
     fi
 }
 
-# remover_arquivo ROTULO CAMINHO: apaga (com sudo) se existe.
 remover_arquivo() {
     if sudo test -e "$2" || sudo test -L "$2"; then
         sudo rm -rf "$2" || falhou "$1" "rm $2"
@@ -148,11 +128,7 @@ remover_arquivo() {
     fi
 }
 
-# ---------------------------------------------------------------------------------------------
-# Remoção
-# ---------------------------------------------------------------------------------------------
 if [ "$remover" -eq 1 ]; then
-    # 1. O contêiner e a ponte. O D-Bus ativaria o serviço de novo se alguém rodasse `waydroid status`.
     sudo systemctl stop waydroid-container 2>/dev/null || true
     if ip link show waydroid0 >/dev/null 2>&1; then
         sudo ip link del waydroid0 2>/dev/null || true
@@ -162,12 +138,10 @@ if [ "$remover" -eq 1 ]; then
     fi
     estado "contêiner e ponte" ok "parados"
 
-    # Nada pode estar montado dentro dos dados do Waydroid antes do rm -rf.
     if findmnt -rn -o TARGET | grep -q "^$dados"; then
         falhou "montagens" "ainda há montagens em $dados (o contêiner não parou?); nada foi apagado"
     fi
 
-    # 2. Desvio do waydroid-net.sh (antes de remover o pacote).
     if dpkg-divert --list "$net" 2>/dev/null | grep -q .; then
         sudo rm -f "$net"
         sudo dpkg-divert --local --rename --remove "$net" >/dev/null || falhou "desvio de waydroid-net.sh" "dpkg-divert --remove"
@@ -176,8 +150,6 @@ if [ "$remover" -eq 1 ]; then
         estado "desvio de waydroid-net.sh" ok "não havia"
     fi
 
-    # 3. Pacotes: os que a instalação registrou; sem registro (instalado à mão), o waydroid e o que o apt
-    # passar a considerar órfão depois dele.
     if [ -f "$registro" ]; then
         lista_pacotes=$(grep -v '^[[:space:]]*$' "$registro" | tr '\n' ' ')
         instalados=""
@@ -189,15 +161,12 @@ if [ "$remover" -eq 1 ]; then
         if [ -z "$instalados" ]; then
             estado "pacotes do Android" ok "nenhum instalado"
         else
-            # Conferência: o apt só pode remover o que a instalação registrou.
             echo "$lista_pacotes" | tr ' ' '\n' | grep -v '^$' | sort -u > "$tmp.reg"
-            # shellcheck disable=SC2086
             a_remover=$(sudo apt-get -s purge $instalados | awk '/^Purg /{print $2}' | sort -u)
             fora=$(printf '%s\n' "$a_remover" | grep -vxF -f "$tmp.reg" || true)
             if [ -n "$fora" ]; then
                 falhou "pacotes do Android" "o apt também removeria pacotes que a instalação não registrou:$(echo "$fora" | tr '\n' ' ')"
             fi
-            # shellcheck disable=SC2086
             sudo apt-get purge -y $instalados || falhou "pacotes do Android" "apt-get purge"
             estado "pacotes do Android" feito "removidos: $(echo "$instalados" | wc -w) pacotes"
         fi
@@ -209,7 +178,6 @@ if [ "$remover" -eq 1 ]; then
         estado "pacotes do Android" ok "waydroid não está instalado"
     fi
 
-    # 4. Dados, camada overlay, estado.
     remover_arquivo "dados do Waydroid ($dados)" "$dados"
     remover_arquivo "dados do usuário (~/.local/share/waydroid)" "$casa/.local/share/waydroid"
     for f in "$casa"/.local/share/applications/waydroid.*.desktop "$casa/.local/share/applications/Waydroid.desktop"; do
@@ -220,7 +188,6 @@ if [ "$remover" -eq 1 ]; then
     remover_arquivo "script parar-android.sh instalado" "$libexec/parar-android.sh"
     remover_arquivo "registro de pacotes" "$registro"
     sudo rmdir "$(dirname "$registro")" 2>/dev/null || true
-    # 5. Repositório e chave.
     remover_arquivo "repositório apt" "$lista_apt"
     remover_arquivo "chave do repositório" "$chave"
     sudo rm -f /var/lib/apt/lists/repo.waydro.id_* 2>/dev/null || true
@@ -233,11 +200,6 @@ if [ "$remover" -eq 1 ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------------------------
-# Instalação e verificação
-# ---------------------------------------------------------------------------------------------
-
-# 1. Repositório apt do projeto Waydroid: chave em /usr/share/keyrings e lista em sources.list.d.
 if [ -s "$chave" ]; then
     estado "chave do repositório" ok "$chave"
 elif [ "$verificar" -eq 1 ]; then
@@ -255,9 +217,6 @@ if [ "$mudou" -eq 1 ] && [ "$verificar" -eq 0 ]; then
     apt_atualizado
 fi
 
-# 2. Pacote do Waydroid. Antes, registra o que o apt vai instalar (a remoção usa essa lista). Durante a
-# instalação um policy-rc.d temporário impede os pós-instalação de iniciar serviços: o `lxc` sobe o
-# `lxc-net` (ponte lxcbr0, tabelas nft, dnsmasq) e a rede do Pi não deve mudar.
 if dpkg-query -W -f='${Status}' waydroid 2>/dev/null | grep -q '^install ok installed'; then
     estado "pacote waydroid" ok "$(dpkg-query -W -f='${Version}' waydroid)"
 elif [ "$verificar" -eq 1 ]; then
@@ -287,9 +246,6 @@ if [ -e "$policy" ] && [ "$verificar" -eq 1 ]; then
     falta "policy-rc.d temporário" "sobrou $policy de uma instalação interrompida"
 fi
 
-# 3. Serviços: o contêiner só roda quando o Android é pedido (o D-Bus ativa o waydroid-container na
-# hora), e as unidades do LXC (ponte lxcbr0, tabela nft própria) conflitam com a ponte do Waydroid.
-# Unidades `static` (lxc-monitord) não têm o que desabilitar.
 for u in waydroid-container lxc-net lxc lxc-monitord lxcfs; do
     if ! systemctl cat "$u.service" >/dev/null 2>&1; then
         estado "serviço $u" ok "não existe"
@@ -309,10 +265,6 @@ for u in waydroid-container lxc-net lxc lxc-monitord lxcfs; do
     esac
 done
 
-# 4. waydroid-net.sh: o kernel do Pi não tem ip_tables legado, então a ponte precisa de nftables
-# (LXC_USE_NFT="true"). O arquivo é do pacote e um `apt upgrade` o desfaria. Solução: `dpkg-divert`.
-# O arquivo original vai para "$net_original" (um upgrade do pacote grava a versão nova lá) e no lugar
-# fica uma cópia gerada a partir dele só com essa linha trocada; reaplicada a cada execução.
 if [ -f "$net" ] || [ -f "$net_original" ]; then
     desviado=0
     if dpkg-divert --list "$net" 2>/dev/null | grep -q .; then desviado=1; fi
@@ -338,7 +290,6 @@ elif [ "$verificar" -eq 1 ]; then
     falta "waydroid-net.sh" "o pacote não está instalado"
 fi
 
-# 5. Imagem do Android (LineageOS, variante VANILLA, sem os apps do Google). Só baixa se não existe.
 if sudo test -s "$dados/images/system.img" && sudo test -s "$dados/images/vendor.img" && [ -f "$cfg" ]; then
     estado "imagem do Android" ok "$dados/images"
 elif [ "$verificar" -eq 1 ]; then
@@ -350,9 +301,6 @@ else
     estado "imagem do Android" feito "waydroid init -s VANILLA"
 fi
 
-# 6. lmkd. Com PSI (/proc/pressure/memory) o lmkd do próprio Android funciona e NENHUM substituto é
-# instalado (e o que houver na camada overlay sai). Sem PSI, instala o substituto nosso e o lmkd.rc sem
-# `critical` (veja tools/pi/android/lmkd-substituto.c).
 lmkd_bin="$overlay/system/bin/lmkd"
 lmkd_rc="$overlay/system/etc/init/lmkd.rc"
 if [ -e /proc/pressure/memory ]; then
@@ -373,14 +321,11 @@ else
     if command -v gcc >/dev/null 2>&1 && [ -f /usr/lib/aarch64-linux-gnu/libc.a ]; then
         gcc -O2 -s -static -Wall -Wextra -o "$tmp/lmkd" "$repo/tools/pi/android/lmkd-substituto.c" || falhou "lmkd substituto" "gcc"
         instalar_arquivo "lmkd: substituto nosso (kernel sem PSI): binário" "$tmp/lmkd" "$lmkd_bin" 755
-        # O init do Android só aceita fim de linha LF (o git archive do sync-pi converte para CRLF sem o .gitattributes).
         tr -d '\r' < "$repo/tools/pi/android/lmkd.rc" > "$tmp/lmkd.rc"
         instalar_arquivo "lmkd: substituto nosso (kernel sem PSI): lmkd.rc sem critical" "$tmp/lmkd.rc" "$lmkd_rc" 644
     fi
 fi
 
-# 7. Propriedade do Android: cada app em sua janela (persist.waydroid.multi_windows=true), na seção
-# [properties] do waydroid.cfg (o Waydroid a copia para o waydroid.prop a cada partida do contêiner).
 if [ -f "$cfg" ]; then
     if python3 -c '
 import configparser, sys
@@ -409,12 +354,9 @@ else
     if [ "$verificar" -eq 1 ]; then falta "propriedade multi_windows=true" "falta $cfg"; fi
 fi
 
-# 8. Script que o psd usa para abrir o Android (APP_n=/usr/local/libexec/pistick/abrir-android.sh [PACOTE]).
 instalar_arquivo "abrir-android.sh" "$repo/tools/pi/android/abrir-android.sh" "$libexec/abrir-android.sh" 755
-# O pistick.service o chama (como root) no ExecStopPost: espera o contêiner parar e então para o waydroid-container.
 instalar_arquivo "parar-android.sh" "$repo/tools/pi/android/parar-android.sh" "$libexec/parar-android.sh" 755
 
-# 9. Estado do contêiner: parado e desabilitado quando ninguém pediu o Android.
 if pgrep -x lxc-start >/dev/null 2>&1; then
     estado "contêiner" ok "rodando agora (o Android está em uso)"
 elif systemctl is-active --quiet waydroid-container 2>/dev/null; then

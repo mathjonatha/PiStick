@@ -1,14 +1,7 @@
-# Marco 4, etapa 9 (aceite 7): mede o mpv 720p30 por 20 s com `psd --video auto` e `psd --video off`:
-# quadros por segundo no cliente, taxa de bits na rede, CPU do psd e do mpv (amostrada por ssh), tempo de
-# codificação (log do psd), tempo de decodificação por quadro e RTT mediano (linha VIDEOSTATS do psc).
-# Pré-requisitos: mpv e clipes no Pi (docs/06, "mpv e vídeo real"), psc em release
-# (cargo build --release -p ps-client) e o psd compilado no Pi. Reinicia o psd a cada modo.
-# Uso:  tools\medir-marco4.ps1                                  (pelo cabo, 192.168.0.11:7700)
-#       tools\medir-marco4.ps1 -Address 192.168.0.13:7700        (pelo Wi-Fi)
 param(
     [string]$Address = '192.168.0.11:7700',
     [string[]]$Modos = @('auto', 'off'),
-    [int[]]$MaxQp = @(0),   # teto de QP do H.264 (--video-max-qp); 0 = o padrão do psd. Ex.: -MaxQp 51,38,36,34,32
+    [int[]]$MaxQp = @(0),
     [string]$Clip = 'mandelbrot-720p30.mp4',
     [int]$Segundos = 20,
     [string]$Psc = "$PSScriptRoot\..\target\release\psc.exe",
@@ -32,7 +25,6 @@ foreach ($modo in $Modos) {
     Ssh "MPV_CLIP=`$HOME/clips/$Clip ${extra}sh ~/pistick/tools/pi/iniciar-psd.sh mpv" 60
     $pscFile = "$OutDir\$rot-psc.txt"; $cpuFile = "$OutDir\$rot-cpu.txt"; $logFile = "$OutDir\$rot-psd.txt"
     $c = Start-Process $Psc -ArgumentList @($Address, '--script', (Resolve-Path $Roteiro).Path) -PassThru -NoNewWindow -RedirectStandardOutput $pscFile -RedirectStandardError "$OutDir\$rot-psc.err"
-    # A janela de medição do roteiro abre ~11,5 s depois do início do psc.
     Start-Sleep -Seconds 11
     $cpu = Start-Process ssh -ArgumentList '-n', 'pi-stick', "sh pistick/tools/pi/medir-cpu.sh $Segundos mpv" -PassThru -NoNewWindow -RedirectStandardOutput $cpuFile -RedirectStandardError "$OutDir\$rot-cpu.err"
     if (-not $c.WaitForExit(90 * 1000)) { Stop-Process -Id $c.Id -Force; "psc não terminou ($modo)" }
@@ -45,7 +37,6 @@ foreach ($modo in $Modos) {
     $cpuPsd = @(); $cpuMpv = @()
     for ($i = 1; $i -lt $am.Count; $i++) { $cpuPsd += ($am[$i].psd - $am[$i - 1].psd); $cpuMpv += ($am[$i].mpv - $am[$i - 1].mpv) }
     $stats = Get-Content $pscFile -Encoding UTF8 | Where-Object { $_ -match '^VIDEOSTATS' } | Select-Object -Last 1
-    # Tempo de codificação por quadro: médias de 1 s do log do psd, depois de o vídeo entrar (modo auto) ou todas (off).
     $linhas = @(Get-Content $logFile -Encoding UTF8)
     $ini = ($linhas | Select-String -Pattern 'vídeo iniciado' | Select-Object -First 1)
     $de = if ($ini) { $ini.LineNumber } else { 0 }
